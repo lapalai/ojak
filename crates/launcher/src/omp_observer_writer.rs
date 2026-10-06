@@ -11,7 +11,20 @@ fn private_directory(path: &Path) -> Result<()> {
     if !path.try_exists()? {
         aam_protocol::secure::restrict_dir(path)?;
     }
-    owned_directory(path, true)
+    // 같은 omp 프로세스의 세션 둘이 writer를 동시에 띄우면 한쪽이 폴더를 만들고 ACL을 조이는 사이에
+    // 다른 쪽이 "존재하지만 아직 안전하지 않은" 폴더를 본다. 잠깐 기다렸다 다시 검사한다. 끝내 안전하지 않으면 거절한다.
+    let mut attempt = 0;
+    loop {
+        match owned_directory(path, true) {
+            Ok(()) => return Ok(()),
+            Err(error) if attempt < 20 => {
+                attempt += 1;
+                let _ = error;
+                std::thread::sleep(std::time::Duration::from_millis(25));
+            }
+            Err(error) => return Err(error),
+        }
+    }
 }
 fn write_snapshot(paths: &Paths, bytes: &[u8], parent_pid: u32) -> Result<()> {
     let snapshot: Value = serde_json::from_slice(bytes)?;
