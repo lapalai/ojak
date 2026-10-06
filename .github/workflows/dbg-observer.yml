@@ -1,0 +1,33 @@
+name: dbg-observer
+on: workflow_dispatch
+permissions: { contents: read }
+jobs:
+  dbg:
+    runs-on: windows-latest
+    defaults: { run: { shell: bash } }
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
+        with: { persist-credentials: false }
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020
+        with: { node-version: 22 }
+      - run: npm ci
+      - run: cargo build -p aam-launcher
+      - name: probe writer
+        shell: pwsh
+        run: |
+          $root = Join-Path $env:TEMP ("aam-dbg-" + [guid]::NewGuid())
+          New-Item -ItemType Directory $root | Out-Null
+          $sid = [System.Security.Principal.WindowsIdentity]::GetCurrent().User.Value
+          "user sid: $sid"; "temp: $env:TEMP"; "root: $root"
+          whoami /groups | Select-String "Administrators|Mandatory"
+          icacls.exe $root /inheritance:r /grant:r "*${sid}:(OI)(CI)F"
+          icacls.exe $root
+          (Get-Acl $root).Owner
+          $env:AAM_HOME = $root
+          $snap = @{ version = 1; pid = $PID; sessionId = "s1"; sessionFile = "C:\x\s1.jsonl" } | ConvertTo-Json -Compress
+          $p = Start-Process -FilePath "$env:GITHUB_WORKSPACE\target\debug\aam.exe" -ArgumentList "omp-observer","write" -NoNewWindow -PassThru -RedirectStandardInput "$root\in.txt" -RedirectStandardOutput "$root\out.txt" -RedirectStandardError "$root\err.txt" -Wait -ErrorAction SilentlyContinue 2>$null
+          Set-Content "$root\in.txt" ($snap + "`n") -NoNewline
+          $p = Start-Process -FilePath "$env:GITHUB_WORKSPACE\target\debug\aam.exe" -ArgumentList "omp-observer","write" -NoNewWindow -PassThru -RedirectStandardInput "$root\in.txt" -RedirectStandardOutput "$root\out.txt" -RedirectStandardError "$root\err.txt" -Wait
+          "exit: $($p.ExitCode)"; "stdout:"; Get-Content "$root\out.txt"; "stderr:"; Get-Content "$root\err.txt"
+          "home acl:"; icacls.exe $root; "obs dir:"; if (Test-Path "$root\omp-observations") { icacls.exe "$root\omp-observations"; Get-ChildItem "$root\omp-observations" } else { "missing" }
