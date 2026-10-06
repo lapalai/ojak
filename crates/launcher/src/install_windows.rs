@@ -700,12 +700,18 @@ fn app_owns_autostart(value: &str, install_dir: &Path) -> bool {
         }
         let rest = value[dir.len()..].trim_start_matches(['\\', '/']);
         let name = rest.split([' ', '\t', '"']).next().unwrap_or("");
-        return name.eq_ignore_ascii_case("Ojak.exe");
+        return is_app_exe(name);
     };
     exe.is_some_and(|exe| {
         exe.parent().is_some_and(|parent| same_dir(&parent.to_string_lossy(), install_dir))
-            && exe.file_name().and_then(|name| name.to_str()).is_some_and(|name| name.eq_ignore_ascii_case("Ojak.exe"))
+            && exe.file_name().and_then(|name| name.to_str()).is_some_and(is_app_exe)
     })
+}
+
+/// 설치본 앱 실행 파일 이름. 번들은 Cargo 이름 `ai-account-manager.exe`로 설치되고(실기기 Run 값으로 확인),
+/// 제품명 `Ojak.exe`로 설치되는 빌드도 있어 둘 다 앱으로 본다. 서비스(`aam-service.exe`)는 앱이 아니다.
+fn is_app_exe(name: &str) -> bool {
+    name.eq_ignore_ascii_case("ai-account-manager.exe") || name.eq_ignore_ascii_case("Ojak.exe")
 }
 
 #[cfg(test)]
@@ -743,5 +749,10 @@ mod tests {
         assert!(app_owns_autostart(r#""C:\Users\me\AppData\Local\Programs\Ojak\Ojak.exe" --autostart"#, &dir));
         assert!(!app_owns_autostart(r"C:\Other\Ojak.exe --autostart", &dir));
         assert!(!app_owns_autostart(r"C:\Users\me\AppData\Local\Programs\Ojak\aam-service.exe", &dir));
+        // 실제 설치본은 Cargo 이름으로 깔린다(Windows 실기기 HKCU Run 값).
+        let installed = PathBuf::from(r"C:\Users\me\AppData\Local\Ojak");
+        assert!(app_owns_autostart(r"C:\Users\me\AppData\Local\Ojak\ai-account-manager.exe --autostart", &installed));
+        assert!(app_owns_autostart(r#""C:\Users\me\AppData\Local\Ojak\ai-account-manager.exe" --autostart"#, &installed));
+        assert!(!app_owns_autostart(r"C:\Elsewhere\ai-account-manager.exe --autostart", &installed));
     }
 }
