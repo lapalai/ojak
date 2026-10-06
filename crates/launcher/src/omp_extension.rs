@@ -301,12 +301,9 @@ mod windows_tests {
         fs::create_dir_all(&dir).unwrap();
         let path = dir.join(RECEIPT);
         write_new(&path, b"{}").unwrap();
+        // 소유자가 정확히 사용자 SID여야 한다(TOKEN_OWNER 불인정). PowerShell 셸아웃은 CI 러너에서 빈 출력을 낸다.
         let sid = aam_protocol::winutil::current_user_sid().unwrap();
-        let output = std::process::Command::new("powershell.exe")
-            .args(["-NoProfile", "-NonInteractive", "-Command", &format!("(Get-Acl -LiteralPath '{}').GetOwner([Security.Principal.SecurityIdentifier]).Value", path.display())])
-            .output()
-            .unwrap();
-        assert_eq!(String::from_utf8_lossy(&output.stdout).trim(), sid);
+        assert_eq!(aam_protocol::winutil::file_owner_sid(&path).unwrap(), sid);
         assert_eq!(read_owned(&path, 4_096).unwrap(), b"{}");
         fs::remove_dir_all(&dir).unwrap();
     }
