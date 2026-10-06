@@ -18,14 +18,17 @@ const hash = value => createHash('sha256').update(value).digest('hex');
 const inaccessible = () => { throw new Error('비밀/본문 접근 금지'); };
 
 async function environment(t) {
-  const root = await mkdtemp(join(tmpdir(), 'aam-observer-'));
-  if (windows) execFileSync('icacls.exe', [root, '/inheritance:r', '/grant:r', `*${sid}:(OI)(CI)F`], { windowsHide: true });
+  // AAM_HOME은 미리 만들지 않는다. Windows에서는 writer가 없는 폴더를 자기 규칙(restrict_dir)으로 만들어야
+  // 소유자·DACL이 검사와 맞는다. 상위 임시 폴더에 icacls로 ACL을 흉내 내면 러너의 상속·소유자 설정에 따라
+  // 사용자 ACE가 반영되지 않아(GitHub Windows 러너: SYSTEM·Administrators만 남음) writer가 unsafe로 거절한다.
+  const parent = await mkdtemp(join(tmpdir(), 'aam-observer-'));
+  const root = join(parent, 'home');
   const before = process.env.AAM_HOME;
   process.env.AAM_HOME = root;
   t.after(async () => {
     if (before === undefined) delete process.env.AAM_HOME;
     else process.env.AAM_HOME = before;
-    await rm(root, { recursive: true, force: true });
+    await rm(parent, { recursive: true, force: true });
   });
   return root;
 }
@@ -163,11 +166,21 @@ test('긴 branch는 순회 한도를 지키고 불완전성을 표시합니다',
 
 test('observer 경로 symlink 충돌은 외부 파일을 변경하거나 OMP에 오류를 전파하지 않습니다', async t => {
   const root = await environment(t);
+  // 양성 대조: 정상 writer가 AAM_HOME을 자기 규칙으로 만들고 스냅샷을 실제로 쓴다. 이게 통과해야
+  // 아래 거부가 symlink 때문이지 폴더 권한 때문이 아님이 확인된다.
+  const control = session('control');
+  control.emit('session_start');
+  await control.tick();
+  assert.ok((await snapshot(root, 'control')).lifecycle, 'positive control: writer must create AAM_HOME and persist a snapshot');
+  await control.emit('session_shutdown');
+  // 관측 폴더만 외부 폴더로 가는 symlink/junction으로 바꾼다. 상위 AAM_HOME은 writer가 만든 안전한 폴더 그대로다.
+  const observations = join(root, 'omp-observations');
+  await rm(observations, { recursive: true, force: true });
   const outside = await mkdtemp(join(tmpdir(), 'aam-observer-outside-'));
   t.after(() => rm(outside, { recursive: true, force: true }));
   const sentinel = join(outside, 'keep');
   await writeFile(sentinel, '그대로 유지');
-  await symlink(outside, join(root, 'omp-observations'), windows ? 'junction' : 'dir');
+  await symlink(outside, observations, windows ? 'junction' : 'dir');
   const fixture = session('collision');
   fixture.emit('session_start');
   await fixture.tick();
