@@ -100,25 +100,30 @@ impl UserSid {
     }
 
     fn string(&self) -> io::Result<String> {
-        let mut raw = ptr::null_mut();
-        if unsafe { ConvertSidToStringSidW(self.sid(), &mut raw) } == 0 || raw.is_null() {
-            return Err(io_error());
-        }
-        let mut len = 0usize;
-        unsafe {
-            while *raw.add(len) != 0 {
-                len += 1;
-            }
-        }
-        let text = String::from_utf16_lossy(unsafe { std::slice::from_raw_parts(raw, len) });
-        unsafe {
-            LocalFree(raw.cast());
-        }
-        if text.is_empty() || text.contains(|c: char| c.is_control() || c == '"') {
-            return Err(io::Error::other("사용자 SID를 확인하지 못했습니다"));
-        }
-        Ok(text)
+        sid_string(self.sid())
     }
+}
+
+/// SID를 `S-1-5-…` 문자열로 바꾼다.
+fn sid_string(sid: *mut c_void) -> io::Result<String> {
+    let mut raw = ptr::null_mut();
+    if unsafe { ConvertSidToStringSidW(sid, &mut raw) } == 0 || raw.is_null() {
+        return Err(io_error());
+    }
+    let mut len = 0usize;
+    unsafe {
+        while *raw.add(len) != 0 {
+            len += 1;
+        }
+    }
+    let text = String::from_utf16_lossy(unsafe { std::slice::from_raw_parts(raw, len) });
+    unsafe {
+        LocalFree(raw.cast());
+    }
+    if text.is_empty() || text.contains(|c: char| c.is_control() || c == '"') {
+        return Err(io::Error::other("사용자 SID를 확인하지 못했습니다"));
+    }
+    Ok(text)
 }
 
 fn token_user(process: HANDLE) -> io::Result<UserSid> {
@@ -269,6 +274,36 @@ pub fn owned_by_current_user(path: &Path) -> io::Result<bool> {
         }
     }
     Ok(same)
+}
+
+/// 파일 소유자 SID 문자열. `owned_by_current_user`와 달리 TOKEN_OWNER(승격 시 Administrators)를 인정하지 않는
+/// 엄격한 값이라, "승격 실행이 남긴 기록의 소유자가 정확히 사용자 SID인지" 검사할 때 쓴다.
+pub fn file_owner_sid(path: &Path) -> io::Result<String> {
+    let wide_path = path_wide(path)?;
+    let mut owner = ptr::null_mut();
+    let mut sd = ptr::null_mut();
+    let status = unsafe {
+        GetNamedSecurityInfoW(
+            wide_path.as_ptr(),
+            SE_FILE_OBJECT,
+            OWNER_SECURITY_INFORMATION,
+            &mut owner,
+            ptr::null_mut(),
+            ptr::null_mut(),
+            ptr::null_mut(),
+            &mut sd,
+        )
+    };
+    if status != 0 {
+        return Err(io::Error::from_raw_os_error(status as i32));
+    }
+    let text = if owner.is_null() { Err(io::Error::other("파일 소유자를 확인하지 못했습니다")) } else { sid_string(owner) };
+    if !sd.is_null() {
+        unsafe {
+            LocalFree(sd);
+        }
+    }
+    text
 }
 
 pub fn is_reparse_point(path: &Path) -> io::Result<bool> {

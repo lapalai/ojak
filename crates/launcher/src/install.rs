@@ -922,12 +922,10 @@ mod windows_tests {
         fs::create_dir_all(&dir).unwrap();
         let path = dir.join("record.json");
         save(&path, &serde_json::json!({ "owner": "test" })).unwrap();
+        // 승격 실행이어도 소유자가 "정확히" 사용자 SID여야 한다. owned_by_current_user는 TOKEN_OWNER(Administrators)도
+        // 인정하므로 이 회귀에는 쓰지 않는다. PowerShell 셸아웃은 CI 러너에서 빈 출력을 내 신뢰할 수 없다.
         let sid = aam_protocol::winutil::current_user_sid().unwrap();
-        let output = std::process::Command::new("powershell.exe")
-            .args(["-NoProfile", "-NonInteractive", "-Command", &format!("(Get-Acl -LiteralPath '{}').GetOwner([Security.Principal.SecurityIdentifier]).Value", path.display())])
-            .output()
-            .unwrap();
-        assert_eq!(String::from_utf8_lossy(&output.stdout).trim(), sid);
+        assert_eq!(aam_protocol::winutil::file_owner_sid(&path).unwrap(), sid);
         assert!(read_owned::<serde_json::Value>(&path).unwrap().is_some());
         fs::remove_dir_all(&dir).unwrap();
     }
