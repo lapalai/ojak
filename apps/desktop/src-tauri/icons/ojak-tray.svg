@@ -1,0 +1,16 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 44 44" width="44" height="44">
+  <!-- Ojak menu-bar template glyph (black on transparent; macOS uses alpha only). Rendered to tray-icon@2x.png. -->
+  <defs>
+    <path id="magpie" d="M664 376 L628 358 C616 320 566 316 546 342 C528 360 500 386 468 402 C418 414 348 446 288 478 C280 490 282 500 292 508 C358 496 424 478 466 470 C476 506 520 526 560 522 C606 518 634 496 638 456 C632 430 628 416 622 402 C636 392 650 386 664 376 Z"/>
+    <mask id="gap">
+      <rect width="44" height="44" fill="#FFFFFF"/>
+      <g transform="translate(-8.5 -12.5) scale(0.066)">
+        <use href="#magpie" fill="#000000" stroke="#000000" stroke-width="44" stroke-linejoin="round"/>
+      </g>
+    </mask>
+  </defs>
+  <path d="M6 36 A16 13 0 0 1 38 36" fill="none" stroke="#000000" stroke-width="5" stroke-linecap="round" mask="url(#gap)"/>
+  <g transform="translate(-8.5 -12.5) scale(0.066)">
+    <use href="#magpie" fill="#000000"/>
+  </g>
+</svg>

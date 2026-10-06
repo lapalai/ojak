@@ -1,0 +1,36 @@
+{
+  "name": "@aam/desktop",
+  "version": "0.1.1",
+  "private": true,
+  "description": "Local menu-bar and tray app that assigns your own Claude Code, Codex, and omp subscription accounts",
+  "author": "lapal",
+  "license": "MIT",
+  "homepage": "https://github.com/lapalai/ojak",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/lapalai/ojak.git"
+  },
+  "bugs": {
+    "url": "https://github.com/lapalai/ojak/issues"
+  },
+  "type": "module",
+  "scripts": {
+    "dev": "vite --host 127.0.0.1",
+    "build": "tsc -b && vite build",
+    "typecheck": "tsc -b --pretty false",
+    "test": "node --test src/*.test.ts"
+  },
+  "dependencies": {
+    "@tauri-apps/api": "^2.8.0",
+    "lucide-react": "^0.468.0",
+    "react": "^19.0.0",
+    "react-dom": "^19.0.0"
+  },
+  "devDependencies": {
+    "@types/react": "^19.0.0",
+    "@types/react-dom": "^19.0.0",
+    "@vitejs/plugin-react": "^4.3.4",
+    "typescript": "~5.7.3",
+    "vite": "^6.1.0"
+  }
+}

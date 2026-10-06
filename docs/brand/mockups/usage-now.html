@@ -1,0 +1,209 @@
+<!doctype html>
+<html lang="ko">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Ojak 사용 현황 시안 · 저울은 어디에</title>
+<style>
+  :root {
+    --bg:#f5f5f7; --surface:#fff; --line:#e3e3e8; --text:#1d1d1f; --secondary:#55555c; --tertiary:#8a8a93;
+    --good:#287c4c; --warning:#986200; --danger:#bd3434; --accent:#2f6fde; --hover:#ececf0;
+    --brass:#b8863b; --brass-dark:#7a5420; --sand:#e0b860; --grain:#f4e9c9;
+    --ink:#17181f; --belly:#f6f3ea; --tail:#2f7f86;
+  }
+  * { box-sizing:border-box; }
+  body { margin:0; background:var(--bg); color:var(--text); font:13px/1.5 -apple-system,BlinkMacSystemFont,"Apple SD Gothic Neo","Noto Sans KR",sans-serif; }
+  .page { max-width:1180px; margin:0 auto; padding:28px 24px 64px; }
+  h1 { font-size:22px; margin:0 0 4px; }
+  .lead { color:var(--secondary); margin:0 0 22px; }
+  .q { background:#111426; color:#eef0ff; border-radius:12px; padding:16px 20px; margin-bottom:26px; }
+  .q b { color:#ffd27a; }
+  .opt { margin-top:34px; }
+  .opt-head { display:flex; align-items:baseline; gap:10px; margin-bottom:10px; }
+  .opt-head .tag { font-size:11px; font-weight:700; padding:2px 8px; border-radius:999px; background:var(--hover); color:var(--secondary); }
+  .opt-head .tag.rec { background:#e6f4ec; color:var(--good); }
+  .opt-head h2 { font-size:17px; margin:0; }
+  .why { display:grid; grid-template-columns:1fr 1fr; gap:12px; margin-top:10px; }
+  .why div { background:var(--surface); border:1px solid var(--line); border-radius:10px; padding:10px 12px; color:var(--secondary); }
+  .why b { color:var(--text); }
+
+  /* 앱 화면 흉내 */
+  .app { background:var(--surface); border:1px solid var(--line); border-radius:12px; overflow:hidden; box-shadow:0 1px 3px rgba(0,0,0,.05); }
+  .panel-head { display:flex; align-items:center; gap:8px; padding:12px 18px; border-bottom:1px solid var(--line); }
+  .dot { width:9px; height:9px; border-radius:50%; }
+  .panel-head h3 { margin:0; font-size:14px; }
+  .panel-head .aside { margin-left:auto; color:var(--tertiary); font-size:12px; }
+  .acct { display:grid; grid-template-columns:300px 1fr; border-top:1px solid var(--line); }
+  .acct:first-of-type { border-top:0; }
+  .info { padding:12px 18px; border-right:1px solid var(--line); }
+  .who { font-weight:600; }
+  .verdict { display:inline-flex; align-items:center; gap:6px; margin-top:5px; font-size:12px; font-weight:600; color:var(--secondary); }
+  .verdict i { width:7px; height:7px; border-radius:50%; background:var(--good); }
+  .verdict.blue { color:var(--accent); } .verdict.blue i { background:var(--accent); }
+  .verdict.warn { color:var(--warning); } .verdict.warn i { background:var(--warning); }
+  .quota { display:grid; gap:7px; margin-top:9px; }
+  .row { display:grid; grid-template-columns:62px 1fr 74px; gap:8px; align-items:center; font-size:11.5px; color:var(--tertiary); }
+  .row b { text-align:right; font-weight:600; color:var(--secondary); font-variant-numeric:tabular-nums; }
+  .row.warn b { color:var(--warning); }
+  .bar { position:relative; height:6px; border-radius:3px; background:var(--hover); }
+  .bar > i { position:absolute; inset:0 auto 0 0; border-radius:3px; background:var(--good); }
+  .row.warn .bar > i { background:var(--warning); }
+  .reset { grid-column:1/-1; text-align:right; font-size:10.5px; margin-top:-4px; color:var(--tertiary); }
+  .models { padding:12px 16px; display:flex; gap:10px; color:var(--tertiary); align-items:flex-start; }
+  .cell { border:1px solid var(--line); border-radius:9px; padding:9px 12px; min-width:200px; }
+  .cell b { color:var(--text); }
+
+  /* 옵션 A: 페이스 눈금 */
+  .pace { position:absolute; top:-4px; bottom:-4px; width:2px; background:var(--text); border-radius:1px; }
+  .pace::after { content:""; position:absolute; top:-5px; left:-3px; border:4px solid transparent; border-top-color:var(--text); }
+  .pace-note { grid-column:1/-1; font-size:11px; margin-top:-3px; }
+  .pace-note.blue { color:var(--accent); } .pace-note.warn { color:var(--warning); }
+
+  /* 저울 진열대(요약) */
+  .summary { display:flex; align-items:center; gap:14px; padding:12px 16px; margin-bottom:14px; background:#fbf7ee; border:1px solid #eadfc6; border-radius:12px; }
+  .summary p { margin:0; color:var(--text); }
+  .summary p small { display:block; color:var(--secondary); }
+  .summary button { margin-left:auto; border:1px solid var(--line); background:var(--surface); border-radius:8px; padding:5px 10px; font-size:12px; }
+
+  /* 범례 */
+  .legend { display:flex; gap:18px; flex-wrap:wrap; margin-top:10px; color:var(--secondary); font-size:12px; }
+  .legend span { display:inline-flex; align-items:center; gap:6px; }
+
+  .pop { width:340px; background:var(--surface); border:1px solid var(--line); border-radius:12px; padding:12px 14px; box-shadow:0 8px 30px rgba(0,0,0,.12); }
+  .pop .h { display:flex; gap:8px; align-items:center; font-weight:650; padding-bottom:8px; }
+  .pop .h small { margin-left:auto; color:var(--tertiary); font-weight:400; }
+  .pcard { border-top:1px solid var(--line); padding:8px 0; }
+  .pcard .t { display:flex; align-items:center; gap:6px; font-weight:600; }
+  .pcard .big { margin-left:auto; font-size:20px; font-weight:650; }
+  .pcard .big small { font-size:11px; color:var(--secondary); font-weight:500; margin-left:3px; }
+  .pline { display:flex; align-items:center; gap:8px; padding:4px 0 0 4px; color:var(--secondary); }
+  .pline .m { width:64px; height:4px; border-radius:2px; background:var(--hover); margin-left:auto; position:relative; }
+  .pline .m i { position:absolute; inset:0 auto 0 0; border-radius:2px; background:var(--good); }
+  .pline b { width:34px; text-align:right; color:var(--text); }
+  .grid2 { display:grid; grid-template-columns:auto 1fr; gap:24px; align-items:start; }
+  .callout { background:var(--surface); border:1px solid var(--line); border-radius:10px; padding:12px 14px; color:var(--secondary); }
+  .callout b { color:var(--text); }
+</style>
+</head>
+<body>
+<div class="page">
+  <h1>사용 현황 시안 — 호랑이 저울은 어디에, 어떻게</h1>
+  <p class="lead">같은 가짜 데이터로 그렸습니다. Claude 계정 3개(한 계정은 주간 한도 1일 뒤 리셋인데 60% 남음, 한 계정은 너무 빨리 쓰는 중), Codex 1개.</p>
+
+  <div class="q">이 화면에서 사용자가 답을 얻어야 하는 질문은 하나입니다. <b>"리셋 전에 낭비될 계정, 또는 곧 막힐 계정이 있나?"</b><br>지금 막대는 <b>남은 양</b>만 보여 줘서, 1일 뒤 리셋인데 60% 남은 계정 A(낭비 위험)와 4일 뒤 리셋인데 60% 남은 계정 B(속도 적당)가 똑같이 보입니다.</div>
+
+  <!-- 0. 현재 -->
+  <section class="opt">
+    <div class="opt-head"><span class="tag">0</span><h2>지금 화면</h2></div>
+    <div class="app" id="current"></div>
+    <div class="why"><div><b>문제</b> — A와 B가 둘 다 "60% 남음, 초록"이라 구분이 안 됩니다. A는 내일 리셋이라 지금 써야 하는 계정인데 화면이 알려 주지 않습니다.</div><div><b>곧 리셋 안내</b>가 있긴 하지만 설정 기준(48시간·30%)에 걸릴 때만 한 줄로 나옵니다.</div></div>
+  </section>
+
+  <!-- A. 페이스 눈금 -->
+  <section class="opt">
+    <div class="opt-head"><span class="tag rec">A · 추천</span><h2>막대에 "고르게 썼다면 지금 여기" 눈금 하나</h2></div>
+    <div class="app" id="optA"></div>
+    <div class="legend"><span><svg width="10" height="14"><rect x="4" y="2" width="2" height="12" fill="#1d1d1f"/><path d="M1 0h8L5 4z" fill="#1d1d1f"/></svg> 눈금 = 리셋까지 고르게 쓴다면 지금 남아 있어야 할 양</span><span>막대가 눈금보다 <b style="color:var(--accent)">길면</b> → 남는 쪽(먼저 쓰기)</span><span>막대가 눈금보다 <b style="color:var(--warning)">짧으면</b> → 빨리 쓰는 쪽</span></div>
+    <div class="why"><div><b>장점</b> — 새 위젯 없이 기존 막대에 눈금만 더합니다. 데이터 요금제·가계부 앱에서 익숙한 방식이라 따로 배울 필요가 없습니다. 색약 사용자도 길이로 읽습니다.</div><div><b>호랑이 저울은?</b> — 정보 표시가 아니라 아래 "요약 띠"처럼 <b>알릴 일이 있을 때만</b> 등장합니다. 숫자는 막대가, 기억은 저울이 맡습니다.</div></div>
+  </section>
+
+  <!-- B. 계정별 저울 -->
+  <section class="opt">
+    <div class="opt-head"><span class="tag">B</span><h2>계정마다 호랑이 저울</h2></div>
+    <div class="app" id="optB"></div>
+    <div class="why"><div><b>장점</b> — 한국적이고 브랜드가 강하게 보입니다. 기울기로 "어느 쪽이 무거운지" 직관적입니다.</div><div><b>위험</b> — "쌀 쪽이 무겁다"를 <b>"쌀이 많다 = 괜찮다"</b>로 읽기 쉬워, 정작 알리고 싶은 "먼저 써야 한다"가 반대로 전달될 수 있습니다. 계정마다 그림이 하나씩 붙어 화면이 무거워집니다.</div></div>
+  </section>
+
+  <!-- 요약 띠 -->
+  <section class="opt">
+    <div class="opt-head"><span class="tag rec">A와 함께</span><h2>호랑이 저울 + 깍이 요약 띠 (알릴 일이 있을 때만)</h2></div>
+    <div class="summary" id="summary"></div>
+    <div class="why"><div><b>언제</b> — 리셋 전에 쓸 게 남은 계정이 있을 때, 또는 쓰는 계정이 곧 막힐 때만. 평소엔 숨깁니다.</div><div><b>누르면</b> — 해당 계정 카드로 이동하고, 그 카드의 막대 눈금이 잠깐 강조됩니다.</div></div>
+  </section>
+
+  <!-- 팝오버 -->
+  <section class="opt">
+    <div class="opt-head"><span class="tag">롤백 완료</span><h2>메뉴바 아이콘 클릭 팝오버 — 기존과 동일</h2></div>
+    <div class="grid2"><div class="pop" id="pop"></div><div class="callout"><b>팝오버는 원래대로 되돌렸습니다.</b> 깍이 한 줄과 계정별 저울을 빼고, 작은 막대와 % 숫자만 남겼습니다. 잔여량 색 기준(31% 이상 초록 · 30% 이하 주황 · 여유분 이하 빨강)은 앞서 맞춘 그대로입니다.</div></div>
+  </section>
+</div>
+
+<script>
+// 가짜 데이터: 이메일·실계정 없음.
+const DAY = 86400000;
+const accounts = [
+  { who: "계정 A", left: 60, resetDays: 1, five: 92, note: "곧 리셋 · 많이 남음" },
+  { who: "계정 B", left: 60, resetDays: 4, five: 88, note: "정상" },
+  { who: "계정 C", left: 24, resetDays: 5, five: 40, note: "빨리 쓰는 중" },
+];
+const pace = a => Math.round(a.resetDays / 7 * 100); // 고르게 썼다면 지금 남아 있어야 할 %
+const tone = v => v <= 10 ? "bad" : v <= 30 ? "warn" : "";
+
+function quotaRow(label, left, reset, withPace, p) {
+  const t = tone(left);
+  const marker = withPace && p != null ? `<span class="pace" style="left:calc(${p}% - 1px)"></span>` : "";
+  let note = "";
+  if (withPace && p != null) {
+    const d = left - p;
+    if (d >= 15) note = `<div class="pace-note blue">고르게 썼을 때보다 ${d}%p 더 남음 · 리셋 전에 먼저 쓰는 게 좋아요</div>`;
+    else if (d <= -15) note = `<div class="pace-note warn">고르게 썼을 때보다 ${-d}%p 빨리 쓰는 중</div>`;
+  }
+  return `<div class="row ${t}"><span>${label}</span><div class="bar"><i style="width:${left}%"></i>${marker}</div><b>${left}% 남음</b>${reset ? `<div class="reset">${reset}</div>` : ""}${note}</div>`;
+}
+
+function scaleSVG(tilt, color, size) {
+  const out = [];
+  for (let y=3;y<=11;y++) out.push([8,y,"B"],[9,y,"B"]);
+  for (let x=5;x<=12;x++) out.push([x,12,"B"]);
+  out.push([8,2,"D"],[9,2,"D"]);
+  const beamY = x => 3 + Math.round(tilt * (8.5 - x) / 7.5 * 1.5);
+  for (let x=1;x<=16;x++) out.push([x,beamY(x),"D"]);
+  const ly = beamY(2), ry = beamY(15);
+  for (let y=ly+1;y<=ly+3;y++) out.push([2,y,"D"]);
+  for (let y=ry+1;y<=ry+3;y++) out.push([15,y,"D"]);
+  for (let x=0;x<=4;x++) out.push([x,ly+4,"B"]);
+  for (let x=13;x<=17;x++) out.push([x,ry+4,"B"]);
+  out.push([1,ly+3,"G"],[3,ly+3,"G"]); if (tilt>0) out.push([1,ly+2,"G"],[2,ly+2,"G"],[3,ly+2,"G"]);
+  out.push([14,ry+1,"H"],[16,ry+1,"H"],[15,ry+2,"A"],[14,ry+3,"H"],[16,ry+3,"H"],[15,ry+3,"A"]);
+  const F = {B:"var(--brass)",D:"var(--brass-dark)",G:"var(--grain)",H:color,A:"var(--sand)"};
+  return `<svg width="${size}" height="${size*14/18}" viewBox="0 0 18 14" shape-rendering="crispEdges">${out.map(([x,y,k])=>`<rect x="${x}" y="${y}" width="1" height="1" fill="${F[k]}"/>`).join("")}</svg>`;
+}
+function kkagiSVG(size) {
+  const B = ["..........KKK..",".........KKEKB.","TT......KKKKK..",".TTT..KKKKKKK..","...TTKKWWKWWK..",".....KKKWWWWK..","........KWWK...",".........K.K..."];
+  const C = {K:"var(--ink)",W:"var(--belly)",T:"var(--tail)",E:"var(--belly)",B:"var(--ink)"};
+  const r = B.flatMap((row,y)=>[...row].map((c,x)=>c==="."?"":`<rect x="${x}" y="${y}" width="1" height="1" fill="${C[c]}"/>`)).join("") + `<rect x="14" y="1" width="1" height="1" fill="var(--grain)"/><rect x="14" y="0" width="1" height="1" fill="var(--grain)"/><rect x="13" y="2" width="1" height="1" fill="var(--grain)"/>`;
+  return `<svg width="${size}" height="${size*8/15}" viewBox="0 0 15 8" shape-rendering="crispEdges">${r}</svg>`;
+}
+
+function panel(mode) {
+  const head = `<div class="panel-head"><span class="dot" style="background:#b07556"></span><h3>Claude</h3><span class="aside">최근 1시간 요청 42회</span></div>`;
+  const rows = accounts.map(a => {
+    const p = pace(a);
+    const verdictBlue = mode !== "current" && a.left - p >= 15;
+    const verdictWarn = a.left <= 30;
+    let verdict = `<div class="verdict"><i></i>사용 가능</div>`;
+    if (mode === "B") {
+      const tilt = a.left - p >= 30 ? 2 : a.left - p >= 15 ? 1 : a.left - p <= -30 ? -2 : a.left - p <= -15 ? -1 : 0;
+      const color = tilt > 0 ? "var(--accent)" : verdictWarn ? "var(--warning)" : "var(--good)";
+      const text = tilt > 0 ? "쌀 쪽으로 기움 · 먼저 쓰기" : tilt < 0 ? "시간 쪽으로 기움 · 아껴 쓰기" : "균형";
+      verdict = `<div style="display:flex;align-items:center;gap:10px;margin-top:6px">${scaleSVG(tilt,color,48)}<span class="verdict ${tilt>0?"blue":tilt<0?"warn":""}" style="margin:0"><i></i>${text}</span></div>`;
+    } else if (verdictBlue) verdict = `<div class="verdict blue"><i></i>리셋 전에 먼저 쓰기</div>`;
+    else if (verdictWarn) verdict = `<div class="verdict warn"><i></i>사용 가능 · 빠르게 줄어드는 중</div>`;
+    const weekly = quotaRow("주간", a.left, `${a.resetDays}일 뒤 리셋`, mode === "A", p);
+    const five = quotaRow("5시간", a.five, "", false);
+    return `<div class="acct"><div class="info"><div class="who">${a.who}</div>${verdict}<div class="quota">${five}${weekly}</div></div><div class="models"><div class="cell"><b>claude-fable</b><br>최근 요청 ${a.who==="계정 A"?3:a.who==="계정 B"?11:28}회</div></div></div>`;
+  }).join("");
+  return head + rows;
+}
+
+document.getElementById("current").innerHTML = panel("current");
+document.getElementById("optA").innerHTML = panel("A");
+document.getElementById("optB").innerHTML = panel("B");
+document.getElementById("summary").innerHTML = `${scaleSVG(2,"var(--accent)",56)}${kkagiSVG(48)}<p><b>계정 A</b>의 주간 한도가 내일 리셋되는데 60%가 남았어요.<small>고르게 썼다면 14%만 남았을 때예요. 리셋 전에 먼저 쓰면 한 톨도 안 흘려요.</small></p><button>계정 A 보기</button>`;
+document.getElementById("pop").innerHTML = `<div class="h">남은 한도 <small>1분 전</small></div>` +
+  `<div class="pcard"><div class="t"><span class="dot" style="background:#b07556"></span>Claude<span class="big">24%<small>남음</small></span></div>` +
+  accounts.map(a => `<div class="pline">${a.who}<span class="m"><i style="width:${a.left}%;background:${a.left<=30?"var(--warning)":"var(--good)"}"></i></span><b style="color:${a.left<=30?"var(--warning)":"var(--text)"}">${a.left}%</b></div>`).join("") + `</div>` +
+  `<div class="pcard"><div class="t"><span class="dot" style="background:#4f8664"></span>Codex<span class="big">93%<small>남음</small></span></div><div class="pline">계정 1<span class="m"><i style="width:93%"></i></span><b>93%</b></div></div>`;
+</script>
+</body>
+</html>

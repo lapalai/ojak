@@ -1,0 +1,348 @@
+<!doctype html>
+<html lang="ko">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>AI Account Manager — 정리 후 최종 시안</title>
+<style>
+  /* 앱(apps/desktop/src/styles.css) 토큰 기반 */
+  :root {
+    font-family: -apple-system, BlinkMacSystemFont, "SF Pro Text", "Apple SD Gothic Neo", "Helvetica Neue", sans-serif;
+    font-size: 13px; -webkit-font-smoothing: antialiased;
+    --surface: #ffffff; --surface-secondary: #f6f6f8; --surface-hover: #eeeef1; --sidebar: #efeff3;
+    --text: #252529; --secondary: #64646d; --tertiary: #767680; --line: #e4e4e9; --strong-line: #d0d0d6;
+    --accent: #087af5; --accent-tint: #eaf2ff; --good: #287c4c; --good-tint: #eaf4ed;
+    --warning: #986200; --warning-tint: #fff5df; --danger: #bd3434; --danger-tint: #fff0ef;
+    --p-claude: #b07556; --p-codex: #4f8664; --p-gemini: #4b78ad; --p-grok: #7d7d88; --p-zai: #8a78ad;
+    color: var(--text); background: var(--surface-secondary);
+  }
+  @media (prefers-color-scheme: dark) {
+    :root {
+      --surface: #202023; --surface-secondary: #27272b; --surface-hover: #333338; --sidebar: #1c1c1f;
+      --text: #ededf0; --secondary: #a3a3ad; --tertiary: #8b8b95; --line: #36363c; --strong-line: #46464d;
+      --accent: #3b93ff; --accent-tint: #1d2c42; --good: #6cc28f; --good-tint: #1d3326;
+      --warning: #e0a744; --warning-tint: #3a2e17; --danger: #ff7b72; --danger-tint: #3d2020;
+      --p-claude: #d69e80; --p-codex: #7fb193; --p-gemini: #7ea6d8; --p-grok: #a4a4ae; --p-zai: #a996cc;
+    }
+  }
+  * { box-sizing: border-box; }
+  body { margin: 0; }
+  button { font: inherit; color: inherit; }
+  :focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; border-radius: 4px; }
+  code { font-size: 12px; }
+
+  .window { display: grid; grid-template-columns: 208px 1fr; min-height: 100vh; }
+  .sidebar { background: var(--sidebar); border-right: 1px solid var(--line); padding: 22px 12px; display: flex; flex-direction: column; }
+  .brand { font-weight: 650; font-size: 14px; padding: 0 10px 18px; }
+  .nav button { display: flex; width: 100%; justify-content: space-between; align-items: center; padding: 7px 10px; border: 0; border-radius: 6px; background: none; color: var(--secondary); cursor: pointer; text-align: left; }
+  .nav button[aria-current="page"] { background: var(--surface-hover); color: var(--text); font-weight: 560; }
+  .nav small { color: var(--tertiary); font-variant-numeric: tabular-nums; }
+  .side-foot { margin-top: auto; padding: 12px 10px 0; border-top: 1px solid var(--line); color: var(--secondary); font-size: 12px; line-height: 1.6; }
+  .side-foot .row { display: flex; align-items: center; gap: 7px; }
+  .switch { margin-left: auto; width: 30px; height: 18px; border-radius: 9px; background: var(--strong-line); position: relative; border: 0; cursor: pointer; }
+  .switch::after { content: ""; position: absolute; top: 2px; left: 2px; width: 14px; height: 14px; border-radius: 50%; background: #fff; transition: left .15s; }
+  .switch[aria-checked="true"] { background: var(--good); }
+  .switch[aria-checked="true"]::after { left: 14px; }
+
+  main { padding: 24px 32px 56px; max-width: 1240px; }
+  .view { display: none; } .view.on { display: block; }
+  .top { display: flex; justify-content: space-between; align-items: flex-end; gap: 16px; flex-wrap: wrap; margin-bottom: 18px; }
+  h1 { font-size: 22px; font-weight: 680; letter-spacing: -.01em; margin: 0; }
+  .sub { color: var(--tertiary); margin-top: 4px; }
+  .segmented { display: inline-flex; background: var(--surface-hover); border-radius: 7px; padding: 2px; }
+  .segmented button { border: 0; background: none; padding: 4px 12px; border-radius: 5px; cursor: pointer; color: var(--secondary); }
+  .segmented button[aria-pressed="true"] { background: var(--surface); color: var(--text); font-weight: 560; box-shadow: 0 1px 2px rgba(0,0,0,.08); }
+  .button { border: 1px solid var(--strong-line); background: var(--surface); border-radius: 6px; padding: 5px 11px; cursor: pointer; white-space: nowrap; }
+  .button.primary { background: var(--accent); border-color: var(--accent); color: #fff; }
+  .live { width: 7px; height: 7px; border-radius: 50%; background: var(--good); box-shadow: 0 0 0 3px color-mix(in srgb, var(--good) 22%, transparent); flex: none; display: inline-block; }
+  .dot { width: 8px; height: 8px; border-radius: 50%; background: var(--c); flex: none; display: inline-block; }
+  .panel { background: var(--surface); border: 1px solid var(--line); border-radius: 12px; overflow: hidden; margin-bottom: 14px; }
+  .panel > header { display: flex; align-items: center; gap: 9px; padding: 11px 18px; border-bottom: 1px solid var(--line); }
+  .panel > header h2 { font-size: 14px; font-weight: 650; margin: 0; }
+  .panel > header .aside { color: var(--tertiary); margin-left: auto; font-variant-numeric: tabular-nums; }
+  .tag { font-size: 11.5px; padding: 1px 7px; border-radius: 4px; background: var(--surface-hover); color: var(--secondary); white-space: nowrap; }
+  .tag.aam { background: var(--accent-tint); color: var(--accent); }
+  .tag.direct { background: var(--warning-tint); color: var(--warning); }
+  .tag.good { background: var(--good-tint); color: var(--good); }
+  .tag.bad { background: var(--danger-tint); color: var(--danger); }
+
+  /* 지금 사용 현황 */
+  .now { display: grid; grid-template-columns: minmax(0, 1.3fr) minmax(0, 2fr); gap: 1px; background: var(--line); border: 1px solid var(--line); border-radius: 12px; overflow: hidden; margin-bottom: 14px; }
+  .now > * { background: var(--surface); }
+  .busiest { padding: 18px 20px; }
+  .busiest .who { font-size: 13px; color: var(--secondary); display: flex; align-items: center; gap: 7px; }
+  .busiest .model { font-size: 26px; font-weight: 700; letter-spacing: -.015em; margin: 6px 0 2px; }
+  .busiest .rate { font-size: 14px; color: var(--secondary); }
+  .busiest .rate b { color: var(--text); font-size: 18px; font-variant-numeric: tabular-nums; }
+  .busiest svg { margin-top: 12px; width: 100%; height: 44px; display: block; }
+  .ranking { list-style: none; margin: 0; padding: 8px 0; }
+  .ranking li { display: grid; grid-template-columns: 18px minmax(0, 1fr) 120px 56px; gap: 12px; align-items: center; padding: 7px 20px; }
+  .ranking .rank { color: var(--tertiary); font-variant-numeric: tabular-nums; }
+  .ranking .line { overflow: hidden; white-space: nowrap; text-overflow: ellipsis; }
+  .ranking .line span { color: var(--secondary); }
+  .ranking .count { text-align: right; font-weight: 600; font-variant-numeric: tabular-nums; }
+  .ranking svg { width: 120px; height: 22px; display: block; }
+  .notice { display: flex; gap: 12px; align-items: center; padding: 11px 16px; border: 1px solid var(--line); border-left: 3px solid var(--tone); background: var(--surface); border-radius: 8px; margin-bottom: 14px; }
+  .notice p { margin: 0; flex: 1; line-height: 1.45; } .notice b { font-weight: 620; }
+
+  .acct { display: grid; grid-template-columns: 290px minmax(0, 1fr); border-top: 1px solid var(--line); }
+  .acct:first-of-type { border-top: 0; }
+  .acct.off { opacity: .55; }
+  .acct-info { padding: 12px 18px; border-right: 1px solid var(--line); }
+  .acct-info .who { font-weight: 580; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; display: flex; gap: 7px; align-items: center; }
+  .acct-info .note { color: var(--tertiary); font-size: 12px; margin-top: 3px; line-height: 1.4; }
+  .quota { display: grid; gap: 6px; margin-top: 9px; }
+  .q { white-space: nowrap; display: grid; grid-template-columns: 96px 1fr 38px; gap: 8px; align-items: center; font-size: 11.5px; color: var(--tertiary); }
+  .q b { text-align: right; font-weight: 560; color: var(--secondary); font-variant-numeric: tabular-nums; }
+  .q.warn b { color: var(--warning); } .q.bad b { color: var(--danger); }
+  .bar { height: 5px; border-radius: 3px; background: var(--surface-hover); overflow: hidden; }
+  .bar i { display: block; height: 100%; border-radius: 3px; background: var(--c); }
+  .q.warn .bar i { background: var(--warning); } .q.bad .bar i { background: var(--danger); }
+  .flag { margin-top: 8px; font-size: 12px; color: var(--warning); line-height: 1.4; } .flag.bad { color: var(--danger); } .flag.ok { color: var(--good); }
+  .models { display: grid; grid-template-columns: repeat(auto-fill, minmax(230px, 1fr)); gap: 10px; padding: 12px 16px; align-content: start; }
+  .cell { border: 1px solid var(--line); border-radius: 9px; padding: 10px 12px; background: color-mix(in srgb, var(--c) calc(var(--heat) * 16%), var(--surface)); }
+  .cell .head { display: flex; align-items: center; gap: 7px; }
+  .cell .name { font-weight: 600; }
+  .cell .n { margin-left: auto; font-weight: 650; font-variant-numeric: tabular-nums; }
+  .cell .n small { font-weight: 450; color: var(--tertiary); }
+  .cell svg { width: 100%; height: 26px; display: block; margin: 6px 0 4px; }
+  .cell .where { display: flex; gap: 5px; flex-wrap: wrap; }
+  .empty { padding: 14px 16px; color: var(--tertiary); }
+
+  /* 표 공통 */
+  table { width: 100%; border-collapse: collapse; }
+  th, td { text-align: left; padding: 9px 16px; border-top: 1px solid var(--line); vertical-align: middle; }
+  thead th { border-top: 0; font-weight: 560; color: var(--tertiary); font-size: 12px; background: var(--surface-secondary); }
+  td.num { text-align: right; font-variant-numeric: tabular-nums; }
+  .muted { color: var(--tertiary); }
+  .tools { display: flex; gap: 5px; flex-wrap: wrap; }
+
+  /* 배정 정책 */
+  .rules { display: grid; gap: 1px; background: var(--line); }
+  .rule { background: var(--surface); display: grid; grid-template-columns: 220px minmax(0, 1fr) auto; gap: 16px; align-items: center; padding: 14px 18px; }
+  .rule .t { font-weight: 600; }
+  .rule .d { color: var(--secondary); line-height: 1.45; }
+  .rule .ctl { display: flex; gap: 8px; align-items: center; }
+  .applies { display: flex; gap: 5px; margin-top: 6px; }
+  select, input[type="number"] { font: inherit; color: inherit; background: var(--surface); border: 1px solid var(--strong-line); border-radius: 6px; padding: 4px 8px; }
+  input[type="number"] { width: 64px; }
+  .order { list-style: none; margin: 0; padding: 0; }
+  .order li { display: grid; grid-template-columns: 20px 1fr auto auto; gap: 12px; align-items: center; padding: 8px 18px; border-top: 1px solid var(--line); }
+  .order li:first-child { border-top: 0; }
+  .order .grip { color: var(--tertiary); cursor: grab; }
+
+  /* 연결 */
+  .steps { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 1px; background: var(--line); }
+  .step { background: var(--surface); padding: 14px 18px; }
+  .step .t { font-weight: 600; display: flex; gap: 8px; align-items: center; }
+  .step p { margin: 6px 0 0; color: var(--secondary); line-height: 1.45; }
+  .row-actions { display: flex; gap: 8px; padding: 12px 18px; border-top: 1px solid var(--line); align-items: center; }
+  .row-actions .hint { color: var(--tertiary); margin-right: auto; }
+
+  @media (max-width: 960px) {
+    .window { grid-template-columns: 1fr; } .sidebar { display: none; }
+    main { padding: 18px 14px 40px; }
+    .now, .steps { grid-template-columns: 1fr; }
+    .acct { grid-template-columns: 1fr; } .acct-info { border-right: 0; border-bottom: 1px solid var(--line); }
+    .rule { grid-template-columns: 1fr; }
+    .ranking li { grid-template-columns: 18px minmax(0, 1fr) 56px; } .ranking svg { display: none; }
+  }
+  @media (prefers-reduced-motion: no-preference) {
+    .live { animation: pulse 2.4s ease-in-out infinite; }
+    @keyframes pulse { 50% { box-shadow: 0 0 0 5px color-mix(in srgb, var(--good) 6%, transparent); } }
+  }
+</style>
+</head>
+<body>
+<div class="window">
+  <aside class="sidebar" aria-label="주 탐색">
+    <div class="brand">Account Manager</div>
+    <nav class="nav" id="nav">
+      <button type="button" data-view="usage" aria-current="page">지금 사용 현황 <small>9</small></button>
+      <button type="button" data-view="sessions">세션 <small>6</small></button>
+      <button type="button" data-view="policy">배정 정책</button>
+      <button type="button" data-view="connect">연결</button>
+    </nav>
+    <div class="side-foot">
+      <div class="row"><span class="live"></span>서비스 실행 중</div>
+      <div class="row">자동 배정 <button class="switch" role="switch" aria-checked="true" aria-label="자동 배정" id="auto"></button></div>
+      <div class="muted">사용량 3분 전 조회</div>
+    </div>
+  </aside>
+
+  <main>
+    <!-- 1. 지금 사용 현황 -->
+    <section class="view on" id="usage" aria-labelledby="usage-title">
+      <div class="top">
+        <div><h1 id="usage-title">지금 사용 현황</h1><div class="sub">최근 1시간, 5분 단위로 모았습니다.</div></div>
+        <div class="segmented" role="group" aria-label="기간">
+          <button type="button" aria-pressed="false">15분</button><button type="button" aria-pressed="true">1시간</button><button type="button" aria-pressed="false">오늘</button>
+        </div>
+      </div>
+      <section class="now" aria-label="가장 많이 쓰는 곳"><div class="busiest" id="busiest"></div><ol class="ranking" id="ranking"></ol></section>
+      <div id="board"></div>
+    </section>
+
+    <!-- 2. 세션 -->
+    <section class="view" id="sessions" aria-labelledby="sessions-title">
+      <div class="top"><div><h1 id="sessions-title">세션</h1><div class="sub">omp, Claude Code, Codex에서 지금 열려 있는 세션입니다. 한 세션은 한 계정에 고정됩니다.</div></div></div>
+      <div class="panel"><table>
+        <thead><tr><th>프로젝트</th><th>도구</th><th>모델</th><th>계정</th><th class="num">요청</th><th>마지막 사용</th></tr></thead>
+        <tbody id="session-rows"></tbody>
+      </table></div>
+    </section>
+
+    <!-- 3. 배정 정책 -->
+    <section class="view" id="policy" aria-labelledby="policy-title">
+      <div class="top"><div><h1 id="policy-title">배정 정책</h1><div class="sub">아래 규칙은 omp(AAM 모델), Claude Code, Codex의 새 세션에 똑같이 적용됩니다. 이미 시작된 응답은 계정을 바꾸지 않습니다.</div></div></div>
+      <div class="panel">
+        <header><h2>계정을 고르는 기준</h2></header>
+        <div class="rules">
+          <div class="rule"><div class="t">배정 방식</div><div class="d">리셋이 가까운 계정의 남은 한도를 먼저 씁니다. 5시간 한도를 85% 넘게 쓴 계정은 뒤로 미룹니다.</div><div class="ctl"><select aria-label="배정 방식"><option>남은 한도 우선</option><option>아래 순서대로</option></select></div></div>
+          <div class="rule"><div class="t">안전 여유량</div><div class="d">이만큼 남으면 그 모델에는 새 세션을 보내지 않습니다. 모델 전용 한도(Fable 등)에도 적용합니다.</div><div class="ctl"><input type="number" value="10" aria-label="안전 여유량 퍼센트">%</div></div>
+          <div class="rule"><div class="t">세션 고정</div><div class="d">같은 세션은 마지막 사용 후 60분까지 같은 계정을 씁니다. 프롬프트 캐시를 지키기 위해서입니다.</div><div class="ctl"><select aria-label="세션 고정 시간"><option>60분</option><option>30분</option></select></div></div>
+          <div class="rule"><div class="t">한도 소진 시</div><div class="d">응답 시작 전이면 다음 계정으로 바로 다시 보냅니다. 모든 계정이 막히면 가장 이른 리셋 시각을 알려 주고 멈춥니다.</div><div class="ctl"><span class="tag">고정 동작</span></div></div>
+        </div>
+      </div>
+      <div class="panel">
+        <header><h2>계정 순서와 배정 포함</h2><span class="aside">끄면 omp, Claude Code, Codex 모두 이 계정을 쓰지 않습니다</span></header>
+        <ul class="order" id="order"></ul>
+      </div>
+      <div class="panel">
+        <header><h2>프로젝트 규칙</h2><span class="aside">규칙이 없으면 위 기준을 따릅니다</span></header>
+        <table>
+          <thead><tr><th>프로젝트</th><th>적용 도구</th><th>규칙</th><th></th></tr></thead>
+          <tbody>
+            <tr><td>project-a</td><td><div class="tools"><span class="tag">omp</span><span class="tag">Codex</span></div></td><td>Codex는 carol@example.com만 사용</td><td class="num"><button class="button" type="button">편집</button></td></tr>
+            <tr><td>project-b</td><td><div class="tools"><span class="tag">omp</span><span class="tag">Claude Code</span></div></td><td>자동 배정</td><td class="num"><button class="button" type="button">편집</button></td></tr>
+          </tbody>
+        </table>
+        <div class="row-actions"><span class="hint">프로젝트 폴더를 고르고 도구별로 계정을 고정하거나 제외할 수 있습니다.</span><button class="button" type="button">규칙 추가</button></div>
+      </div>
+    </section>
+
+    <!-- 4. 연결 -->
+    <section class="view" id="connect" aria-labelledby="connect-title">
+      <div class="top"><div><h1 id="connect-title">연결</h1><div class="sub">AAM이 계정을 고를 수 있게 연결된 도구입니다.</div></div></div>
+      <div class="panel">
+        <header><span class="dot" style="--c: var(--accent)"></span><h2>omp</h2><span class="tag good" style="margin-left:auto">연결됨</span></header>
+        <div class="steps">
+          <div class="step"><div class="t"><span class="tag good">완료</span>계정 저장소</div><p>omp 계정 8개를 AAM이 관리합니다. 계정 추가는 omp에서 <code>/login</code>으로 원래 공급자를 고르면 됩니다.</p></div>
+          <div class="step"><div class="t"><span class="tag good">완료</span>AAM 로그인 항목</div><p><code>/login</code>에 AAM · Claude, Codex, Antigravity, Grok, Z.AI가 보입니다. 다섯 개 모두 로그인되어 있습니다.</p></div>
+          <div class="step"><div class="t"><span class="tag good">완료</span>계정 연결 8개</div><p>Anthropic 3, Codex 2, Antigravity 1, xAI 1, Z.AI 1. 모두 실행 중입니다.</p></div>
+        </div>
+        <div class="row-actions"><span class="hint">새로 연 omp 세션부터 적용됩니다.</span><button class="button" type="button">상태 다시 확인</button><button class="button" type="button">연결 해제</button></div>
+      </div>
+      <div class="panel">
+        <header><span class="dot" style="--c: var(--p-claude)"></span><h2>Claude Code</h2><span class="tag good" style="margin-left:auto">연결됨</span></header>
+        <table><tbody>
+          <tr><td>alice@example.com</td><td class="muted">기본 프로필</td><td class="num"><span class="tag good">실행 가능</span></td></tr>
+          <tr><td>bob@example.com</td><td class="muted">AAM 프로필</td><td class="num"><span class="tag good">실행 가능</span></td></tr>
+        </tbody></table>
+        <div class="row-actions"><span class="hint">Orca와 터미널의 <code>claude</code>는 AAM을 거쳐 실행됩니다.</span><button class="button" type="button">계정 추가</button></div>
+      </div>
+      <div class="panel">
+        <header><span class="dot" style="--c: var(--p-codex)"></span><h2>Codex</h2><span class="tag good" style="margin-left:auto">연결됨</span></header>
+        <table><tbody>
+          <tr><td>bob@example.com</td><td class="muted">AAM 프로필</td><td class="num"><span class="tag good">실행 가능</span></td></tr>
+          <tr><td>carol@example.com</td><td class="muted">AAM 프로필</td><td class="num"><span class="tag bad">한도 소진 · 4일 18시간</span></td></tr>
+        </tbody></table>
+        <div class="row-actions"><span class="hint">Orca와 터미널의 <code>codex</code>는 AAM을 거쳐 실행됩니다.</span><button class="button" type="button">계정 추가</button></div>
+      </div>
+      <div class="panel">
+        <header><h2>Orca</h2><span class="tag good" style="margin-left:auto">사용 중</span></header>
+        <div class="row-actions" style="border-top:0"><span class="hint">Orca에서 여는 omp, claude, codex도 위와 같이 AAM이 계정을 고릅니다. Orca 자체의 계정 전환 기능은 쓰지 않습니다.</span></div>
+      </div>
+    </section>
+  </main>
+</div>
+
+<script>
+(() => {
+  const providers = [
+    { id: "claude", name: "Anthropic" }, { id: "codex", name: "OpenAI Codex" },
+    { id: "gemini", name: "Google Antigravity" }, { id: "grok", name: "xAI" }, { id: "zai", name: "Z.AI" },
+  ];
+  const Z = n => Array(n).fill(0);
+  // 2026-09-26 실제 관측값. 정리 후에는 모든 omp 역할이 AAM을 거친다고 가정하고 "계정 미확인" 줄은 없앴다.
+  const accounts = [
+    { p: "claude", who: "alice@example.com", quota: [["5시간", 2], ["주간", 2], ["Fable 주간", 3]],
+      models: [{ name: "Fable 5.1", s: [...Z(10), 22, 73], where: ["project-b", "project-a"] }] },
+    { p: "claude", who: "carol@example.com", quota: [["5시간", 34], ["주간", 43], ["Fable 주간", 62]],
+      models: [{ name: "Fable 5.1", s: [...Z(11), 9], where: ["project-a"] }, { name: "Opus 5.5", s: [...Z(7), 2, ...Z(4)], where: ["project-b"] }] },
+    { p: "claude", who: "bob@example.com", quota: [["5시간", 5], ["주간", 78], ["Fable 주간", 91]],
+      flag: ["Fable 여유량 10% 아래라 Fable 새 세션은 받지 않습니다. Opus·Sonnet은 받습니다.", "warn"],
+      models: [{ name: "Fable 5.1", s: [...Z(11), 3], where: ["project-c"], note: "기존 세션만" }] },
+    { p: "codex", who: "bob@example.com", quota: [["주간", 0]],
+      models: [{ name: "GPT-6 Astra", s: [...Z(8), 1, 0, 16, 15], where: ["project-a", "project-c"] }] },
+    { p: "codex", who: "carol@example.com", quota: [["주간", 100]], flag: ["한도 소진. 4일 18시간 뒤에 풀립니다.", "bad"], models: [] },
+    { p: "gemini", who: "bob@example.com", quota: [["Gemini 5시간", 0.1], ["Gemini 주간", 0.2], ["Claude·GPT 주간", 0]],
+      models: [{ name: "Gemini 3.8 Flash", s: [...Z(8), 1, ...Z(3)], where: ["project-b"] }] },
+    { p: "grok", who: "bob@example.com", quota: [["주간 크레딧", 0]],
+      models: [{ name: "Grok 4.6", s: [...Z(8), 1, 0, 3, 5], where: ["project-a", "project-b", "project-c"], note: "보조 역할" }] },
+    { p: "zai", who: "bob@example.com", quota: [], note: "사용량 정보를 제공하지 않습니다.", models: [] },
+  ];
+  const color = id => `var(--p-${id})`;
+  const sum = s => s.reduce((a, b) => a + b, 0);
+  const pname = id => providers.find(p => p.id === id).name;
+  const peak = Math.max(...accounts.flatMap(a => a.models.map(m => Math.max(...m.s))));
+  const spark = (s, id, w = 120, h = 24) => {
+    const step = w / (s.length - 1), pts = s.map((v, i) => `${(i * step).toFixed(1)},${(h - 2 - (v / peak) * (h - 4)).toFixed(1)}`).join(" ");
+    return `<svg viewBox="0 0 ${w} ${h}" preserveAspectRatio="none" aria-hidden="true"><polygon points="0,${h} ${pts} ${w},${h}" fill="${color(id)}" opacity=".16"/><polyline points="${pts}" fill="none" stroke="${color(id)}" stroke-width="1.6" vector-effect="non-scaling-stroke"/></svg>`;
+  };
+  const lines = accounts.flatMap(a => a.models.map(m => ({ a, m, n: sum(m.s), now: m.s.at(-1) }))).sort((x, y) => y.now - x.now || y.n - x.n);
+  const lead = lines[0];
+  document.getElementById("busiest").innerHTML = `
+    <div class="who"><span class="live"></span>지금 가장 많이 쓰는 곳</div>
+    <div class="model">${lead.m.name}</div>
+    <div class="who"><span class="dot" style="--c:${color(lead.a.p)}"></span>${pname(lead.a.p)}, ${lead.a.who}</div>
+    <div class="rate">최근 5분 <b>${lead.now}회</b>, 1시간 ${lead.n}회</div>${spark(lead.m.s, lead.a.p, 300, 44)}`;
+  document.getElementById("ranking").innerHTML = lines.slice(1, 7).map((l, i) => `<li><span class="rank">${i + 2}</span>
+    <span class="line">${l.now ? '<span class="live" style="margin-right:7px;vertical-align:1px"></span>' : ""}${l.m.name} <span>${pname(l.a.p)}, ${l.a.who}</span></span>
+    ${spark(l.m.s, l.a.p)}<span class="count">${l.n}회</span></li>`).join("");
+  document.getElementById("board").innerHTML = providers.map(p => {
+    const rows = accounts.filter(a => a.p === p.id), total = sum(rows.flatMap(a => a.models.flatMap(m => m.s)));
+    return `<section class="panel" aria-label="${p.name}"><header><span class="dot" style="--c:${color(p.id)}"></span><h2>${p.name}</h2><span class="aside">${total ? `1시간 ${total}회` : "최근 호출 없음"}</span></header>
+      ${rows.map(a => `<div class="acct"><div class="acct-info">
+        <div class="who">${a.who}</div>${a.note ? `<div class="note">${a.note}</div>` : ""}
+        ${a.quota.length ? `<div class="quota">${a.quota.map(([l, v]) => `<div class="q ${v >= 100 ? "bad" : v >= 85 ? "warn" : ""}"><span>${l}</span><div class="bar"><i style="width:${Math.min(v, 100)}%;--c:${color(p.id)}"></i></div><b>${v}%</b></div>`).join("")}</div>` : ""}
+        ${a.flag ? `<div class="flag ${a.flag[1]}">${a.flag[0]}</div>` : ""}</div>
+        ${a.models.length ? `<div class="models">${a.models.map(m => { const n = sum(m.s); return `<div class="cell" style="--c:${color(p.id)};--heat:${Math.min(1, n / peak).toFixed(2)}">
+          <div class="head">${m.s.at(-1) ? '<span class="live"></span>' : ""}<span class="name">${m.name}</span><span class="n">${n}<small>회</small></span></div>${spark(m.s, p.id, 220, 26)}
+          <div class="where">${m.where.map(w => `<span class="tag">${w}</span>`).join("")}${m.note ? `<span class="tag direct">${m.note}</span>` : ""}</div></div>`; }).join("")}</div>` : `<div class="empty">최근 1시간 호출이 없습니다.</div>`}
+      </div>`).join("")}</section>`;
+  }).join("");
+
+  const sessions = [
+    ["project-b", "omp", "Fable 5.1", "claude", "alice@example.com", 95, "방금"],
+    ["project-a", "omp", "GPT-6 Astra", "codex", "bob@example.com", 31, "방금"],
+    ["project-a", "omp", "Fable 5.1", "claude", "carol@example.com", 9, "방금"],
+    ["project-c", "omp", "Fable 5.1", "claude", "bob@example.com", 3, "2분 전"],
+    ["project-b", "omp", "Opus 5.5", "claude", "carol@example.com", 2, "24분 전"],
+    ["project-a", "Codex", "기본 모델", "codex", "carol@example.com", 1, "1시간 전"],
+  ];
+  document.getElementById("session-rows").innerHTML = sessions.map(([proj, tool, model, p, who, n, when]) =>
+    `<tr><td>${proj}</td><td><span class="tag">${tool}</span></td><td><span class="dot" style="--c:${color(p)};margin-right:7px"></span>${model}</td><td>${who}</td><td class="num">${n}</td><td class="muted">${when}</td></tr>`).join("");
+
+  const order = [["claude", "alice@example.com", true], ["claude", "carol@example.com", true], ["claude", "bob@example.com", true],
+    ["codex", "bob@example.com", true], ["codex", "carol@example.com", true], ["gemini", "bob@example.com", true], ["grok", "bob@example.com", true], ["zai", "bob@example.com", false]];
+  document.getElementById("order").innerHTML = order.map(([p, who, on], i) =>
+    `<li><span class="grip" aria-hidden="true">⋮⋮</span><span><span class="dot" style="--c:${color(p)};margin-right:8px"></span>${pname(p)}, ${who}</span>
+     <span class="muted">${on ? "배정 포함" : "배정 제외"}</span><button class="switch" role="switch" aria-checked="${on}" aria-label="${who} 배정 포함"></button></li>`).join("");
+
+  for (const b of document.querySelectorAll(".switch")) b.addEventListener("click", () => {
+    const on = b.getAttribute("aria-checked") !== "true"; b.setAttribute("aria-checked", String(on));
+    const label = b.previousElementSibling; if (label && label.classList.contains("muted")) label.textContent = on ? "배정 포함" : "배정 제외";
+  });
+  for (const b of document.querySelectorAll(".segmented button")) b.addEventListener("click", () =>
+    b.parentElement.querySelectorAll("button").forEach(x => x.setAttribute("aria-pressed", String(x === b))));
+  const show = id => {
+    document.querySelectorAll(".view").forEach(v => v.classList.toggle("on", v.id === id));
+    document.querySelectorAll("#nav button").forEach(b => b.toggleAttribute("aria-current", b.dataset.view === id) || b.dataset.view === id && b.setAttribute("aria-current", "page"));
+  };
+  document.querySelectorAll("#nav button").forEach(b => b.addEventListener("click", () => show(b.dataset.view)));
+  const hash = location.hash.slice(1); if (hash) show(hash);
+})();
+</script>
+</body>
+</html>

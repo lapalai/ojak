@@ -1,0 +1,226 @@
+# gh, not tauri-apps/tauri-action: the project build is scripts/build.mjs, which
+# compiles the aam and aam-service sidecars and then runs `tauri build`.
+# tauri-action always invokes `tauri build` itself, so it would skip that sidecar
+# step or build twice. It also does not write SHA256SUMS, which install.sh requires.
+# This workflow runs the project's build once, then publishes the DMG, updater
+# archive, signature, latest.json, and SHA256SUMS with gh.
+# macOS and Windows build in a matrix; one publish job writes latest.json for both.
+#
+# Tag push only. There is no pull_request or pull_request_target trigger, so a
+# fork PR cannot read secrets. Jobs also refuse every repository except
+# lapalai/ojak, so a fork's own tag push does not run this file's signing steps.
+name: Release
+
+on:
+  push:
+    tags:
+      - "v*"
+
+permissions:
+  contents: read
+
+concurrency:
+  group: release-${{ github.ref }}
+  cancel-in-progress: false
+
+jobs:
+  # 두 OS를 각각 빌드해 산출물만 올린다. 릴리스 게시와 latest.json·SHA256SUMS는 publish 한 곳에서 만든다.
+  build:
+    if: github.repository == 'lapalai/ojak' && github.event_name == 'push' && startsWith(github.ref, 'refs/tags/v')
+    permissions:
+      contents: read
+      actions: write
+    strategy:
+      fail-fast: true
+      matrix:
+        include:
+          - os: macos-14
+            platform: darwin-aarch64
+          - os: windows-latest
+            platform: windows-x86_64
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 120
+    defaults:
+      run:
+        shell: bash
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+        with:
+          persist-credentials: false
+
+      - uses: dtolnay/rust-toolchain@89b12181fb390509a0842a86cc55eeb8eb928c1d # stable
+        with:
+          toolchain: stable
+
+      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4.4.0
+        with:
+          node-version: 22
+          cache: npm
+
+      - uses: swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
+
+      - name: Install npm dependencies
+        run: npm ci
+
+      - name: Require a real updater pubkey and a matching tag
+        run: |
+          node --input-type=module <<'EOF'
+          import { readFileSync } from "node:fs";
+          const conf = JSON.parse(readFileSync("apps/desktop/src-tauri/tauri.conf.json", "utf8"));
+          const cargo = readFileSync("Cargo.toml", "utf8");
+          const rootPkg = JSON.parse(readFileSync("package.json", "utf8"));
+          const desktopPkg = JSON.parse(readFileSync("apps/desktop/package.json", "utf8"));
+          const version = conf.version;
+          const tag = process.env.GITHUB_REF_NAME ?? "";
+          const pubkey = conf.plugins?.updater?.pubkey ?? "";
+          const cargoVersion = cargo.match(/\[workspace\.package\][\s\S]*?^version = "([^"]+)"/m)?.[1];
+          if (!tag.startsWith("v") || tag.slice(1) !== version) {
+            console.error(`tag ${tag} does not match tauri.conf.json version ${version}`);
+            process.exit(1);
+          }
+          if (!/^\d+\.\d+\.\d+$/.test(version)) {
+            console.error(`refusing non x.y.z version ${version}`);
+            process.exit(1);
+          }
+          if (cargoVersion !== version || rootPkg.version !== version || desktopPkg.version !== version) {
+            console.error(`version drift: tauri=${version} cargo=${cargoVersion} root=${rootPkg.version} desktop=${desktopPkg.version}`);
+            process.exit(1);
+          }
+          if (!pubkey || pubkey === "REPLACE_WITH_TAURI_UPDATER_PUBKEY" || pubkey.includes("REPLACE_WITH")) {
+            console.error("Replace plugins.updater.pubkey with the output of `npx tauri signer generate` before tagging a release. See README.");
+            process.exit(1);
+          }
+          const endpoint = conf.plugins?.updater?.endpoints?.[0] ?? "";
+          if (!endpoint.startsWith("https://github.com/lapalai/ojak/releases/")) {
+            console.error("plugins.updater.endpoints must stay on https://github.com/lapalai/ojak/releases/. See README.");
+            process.exit(1);
+          }
+          EOF
+
+      # 비밀키가 비어 있지 않은지만 보지 않는다. 작은 파일을 secret으로 서명해 커밋된 pubkey로 검증한다.
+      # 짝이 다르거나 암호가 틀리면 빌드 전에 멈춘다. 스크립트는 키·암호를 출력하지 않는다.
+      - name: Verify signing key matches committed updater pubkey
+        env:
+          TAURI_SIGNING_PRIVATE_KEY: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY }}
+          TAURI_SIGNING_PRIVATE_KEY_PASSWORD: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY_PASSWORD }}
+        run: node scripts/verify-signing-key.mjs
+
+      - name: Test
+        run: |
+          set -eu
+          cargo test --workspace --exclude ai-account-manager -- --test-threads=1
+          cargo build -p aam-launcher
+          npm run test:desktop
+          npm run typecheck
+          if [ "$RUNNER_OS" = "Windows" ]; then
+            writer="${GITHUB_WORKSPACE}/target/debug/aam.exe"
+          else
+            writer="${GITHUB_WORKSPACE}/target/debug/aam"
+          fi
+          if [ ! -f "$writer" ]; then
+            echo "omp observer writer was not built: $writer"
+            exit 1
+          fi
+          AAM_OBSERVER_TEST_WRITER="$writer" node --test \
+            integrations/omp/aam-accounts.test.mjs \
+            integrations/omp/aam-observer.test.mjs
+
+      - name: Build
+        env:
+          TAURI_SIGNING_PRIVATE_KEY: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY }}
+          TAURI_SIGNING_PRIVATE_KEY_PASSWORD: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY_PASSWORD }}
+        run: npm run build
+
+      - name: Collect artifacts
+        run: |
+          set -eu
+          stage="${RUNNER_TEMP}/ojak-${{ matrix.platform }}"
+          mkdir -p "$stage"
+          if [ "${{ matrix.platform }}" = "darwin-aarch64" ]; then
+            dmg=$(find target -path '*/bundle/dmg/*.dmg' -type f | head -n 1)
+            archive=$(find target -path '*/bundle/macos/*.app.tar.gz' -type f | head -n 1)
+            if [ -z "$dmg" ] || [ -z "$archive" ] || [ ! -f "${archive}.sig" ]; then
+              echo "Missing DMG, Ojak.app.tar.gz, or signature."; exit 1
+            fi
+            cp "$dmg" "$stage/$(basename "$dmg")"
+            cp "$archive" "$stage/Ojak.app.tar.gz"
+            cp "${archive}.sig" "$stage/Ojak.app.tar.gz.sig"
+          else
+            # NSIS 설치 파일이 그대로 업데이트 파일이다(Tauri v2). 서명 파일은 옆에 생긴다.
+            setup=$(find target -path '*/bundle/nsis/*-setup.exe' -type f | head -n 1)
+            if [ -z "$setup" ] || [ ! -f "${setup}.sig" ]; then
+              echo "Missing NSIS setup.exe or signature."; exit 1
+            fi
+            cp "$setup" "$stage/$(basename "$setup")"
+            cp "${setup}.sig" "$stage/$(basename "$setup").sig"
+          fi
+          ls -l "$stage"
+
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: ojak-${{ matrix.platform }}
+          path: ${{ runner.temp }}/ojak-${{ matrix.platform }}
+          if-no-files-found: error
+
+  publish:
+    needs: build
+    if: github.repository == 'lapalai/ojak' && github.event_name == 'push' && startsWith(github.ref, 'refs/tags/v')
+    permissions:
+      contents: write
+      actions: read
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+
+      - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4.3.0
+        with:
+          path: ${{ runner.temp }}/dist
+          merge-multiple: true
+
+      - name: Publish GitHub Release
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          set -eu
+          version="${GITHUB_REF_NAME#v}"
+          printf '%s\n' "$version" | grep -Eq '^[0-9]+\.[0-9]+\.[0-9]+$' || {
+            echo "Refusing tag version that is not x.y.z."
+            exit 1
+          }
+          stage="${RUNNER_TEMP}/dist"
+          cd "$stage"
+          dmg=$(ls ./*.dmg | head -n 1)
+          setup=$(ls ./*-setup.exe | head -n 1)
+          base="https://github.com/${GITHUB_REPOSITORY}/releases/download/${GITHUB_REF_NAME}"
+          notes="Ojak ${version}"
+          annotated=$(git -C "$GITHUB_WORKSPACE" tag -l --format='%(contents)' "$GITHUB_REF_NAME" || true)
+          if [ -n "$annotated" ]; then notes="$annotated"; fi
+          VERSION="$version" NOTES="$notes" BASE="$base" SETUP="$(basename "$setup")" node --input-type=module <<'EOF'
+          import { readFileSync, writeFileSync } from "node:fs";
+          const sig = (file) => readFileSync(file, "utf8").trim();
+          const mac = { signature: sig("Ojak.app.tar.gz.sig"), url: `${process.env.BASE}/Ojak.app.tar.gz` };
+          const win = { signature: sig(`${process.env.SETUP}.sig`), url: `${process.env.BASE}/${process.env.SETUP}` };
+          const manifest = {
+            version: process.env.VERSION,
+            notes: process.env.NOTES,
+            pub_date: new Date().toISOString(),
+            platforms: {
+              "darwin-aarch64": mac,
+              "darwin-aarch64-app": mac,
+              "windows-x86_64": win,
+              "windows-x86_64-nsis": win,
+            },
+          };
+          writeFileSync("latest.json", `${JSON.stringify(manifest, null, 2)}\n`);
+          EOF
+          sha256sum "$(basename "$dmg")" Ojak.app.tar.gz Ojak.app.tar.gz.sig "$(basename "$setup")" "$(basename "$setup").sig" > SHA256SUMS
+          test -s SHA256SUMS
+          gh release create "$GITHUB_REF_NAME" --repo "$GITHUB_REPOSITORY" \
+            --title "Ojak ${version}" \
+            --notes "$notes" \
+            "$(basename "$dmg")" Ojak.app.tar.gz Ojak.app.tar.gz.sig \
+            "$(basename "$setup")" "$(basename "$setup").sig" \
+            latest.json SHA256SUMS

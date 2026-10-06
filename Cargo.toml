@@ -1,0 +1,20 @@
+[workspace]
+resolver = "2"
+members = ["crates/protocol", "crates/adapters", "crates/service", "crates/launcher", "apps/desktop/src-tauri"]
+default-members = ["crates/protocol", "crates/adapters", "crates/service", "crates/launcher"]
+
+[workspace.package]
+version = "0.1.1"
+edition = "2021"
+license = "MIT"
+authors = ["lapal"]
+description = "Local menu-bar and tray app that assigns your own Claude Code, Codex, and omp subscription accounts"
+repository = "https://github.com/lapalai/ojak"
+homepage = "https://github.com/lapalai/ojak"
+
+[workspace.dependencies]
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+uuid = { version = "1", features = ["v4"] }
+libc = "0.2"
+sha2 = "0.10"

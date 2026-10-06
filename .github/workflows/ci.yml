@@ -1,0 +1,73 @@
+name: CI
+
+# pull_request, not pull_request_target: fork PRs run without this
+# repository's secrets. This workflow does not use secrets. Do not switch it
+# to pull_request_target.
+on:
+  push:
+  pull_request:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ci-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  test:
+    strategy:
+      fail-fast: false
+      matrix:
+        # macos-14 is Apple silicon, the only Mac target. windows-latest is x64.
+        os: [macos-14, windows-latest]
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 90
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+        with:
+          persist-credentials: false
+
+      - uses: dtolnay/rust-toolchain@89b12181fb390509a0842a86cc55eeb8eb928c1d # stable
+        with:
+          toolchain: stable
+
+      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4.4.0
+        with:
+          node-version: 22
+          cache: npm
+
+      - uses: swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
+
+      - name: Install npm dependencies
+        run: npm ci
+
+      - name: Cargo tests
+        run: cargo test --workspace --exclude ai-account-manager -- --test-threads=1
+
+      - name: Build omp observer writer
+        run: cargo build -p aam-launcher
+
+      - name: Desktop tests
+        run: npm run test:desktop
+
+      - name: Typecheck
+        run: npm run typecheck
+
+      - name: omp extension tests
+        shell: bash
+        run: |
+          set -eu
+          if [ "$RUNNER_OS" = "Windows" ]; then
+            writer="${GITHUB_WORKSPACE}/target/debug/aam.exe"
+          else
+            writer="${GITHUB_WORKSPACE}/target/debug/aam"
+          fi
+          if [ ! -f "$writer" ]; then
+            echo "omp observer writer was not built: $writer"
+            exit 1
+          fi
+          # The writer child is Windows-only. macOS still runs the node tests.
+          AAM_OBSERVER_TEST_WRITER="$writer" node --test \
+            integrations/omp/aam-accounts.test.mjs \
+            integrations/omp/aam-observer.test.mjs

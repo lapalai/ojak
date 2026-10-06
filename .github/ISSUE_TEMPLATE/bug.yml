@@ -1,0 +1,63 @@
+name: 버그 신고 / Bug report
+description: 동작이 잘못됐을 때 / Something does not work
+labels: [bug]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        지원 범위: macOS 13 이상, Apple Silicon(arm64). / Supported: macOS 13+, Apple Silicon (arm64).
+        **토큰, 이메일, 프롬프트, API 키를 붙이지 마세요.** 경로의 사용자 이름은 `~`로 바꿔 주세요.
+        **Do not paste tokens, emails, prompts or API keys.** Replace your user name in paths with `~`.
+  - type: textarea
+    id: what
+    attributes:
+      label: 무슨 일이 있었나요? / What happened?
+      description: 기대한 동작과 실제 동작 / Expected vs. actual
+    validations:
+      required: true
+  - type: textarea
+    id: steps
+    attributes:
+      label: 재현 방법 / Steps to reproduce
+      placeholder: |
+        1. claude 실행
+        2. ...
+    validations:
+      required: true
+  - type: input
+    id: version
+    attributes:
+      label: Ojak 버전 / Ojak version
+      description: 설정 → 정보, 또는 `aam --version` / Settings → About, or `aam --version`
+    validations:
+      required: true
+  - type: input
+    id: macos
+    attributes:
+      label: macOS 버전과 칩 / macOS version and chip
+      placeholder: macOS 26.1, M3
+    validations:
+      required: true
+  - type: textarea
+    id: doctor
+    attributes:
+      label: "`aam doctor` 결과 / output"
+      description: 경로의 사용자 이름은 `~`로 바꿔 주세요. / Replace your user name with `~`.
+      render: text
+    validations:
+      required: true
+  - type: textarea
+    id: error
+    attributes:
+      label: 오류 메시지 / Error message
+      description: "`aam: ... (CODE)` 형식의 코드가 있으면 꼭 넣어 주세요. / Include the `(CODE)` if shown."
+      render: text
+  - type: checkboxes
+    id: terms
+    attributes:
+      label: 확인 / Confirm
+      options:
+        - label: 본인 명의의 계정만 사용하고 있습니다. / I only use accounts I own.
+          required: true
+        - label: 토큰·이메일·프롬프트를 지웠습니다. / I removed tokens, emails and prompts.
+          required: true

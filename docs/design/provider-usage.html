@@ -1,0 +1,261 @@
+<!doctype html>
+<html lang="ko">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>지금 사용 현황 — AI Account Manager 시안</title>
+<style>
+  /* 앱(apps/desktop/src/styles.css)의 토큰을 그대로 쓴다. */
+  :root {
+    font-family: -apple-system, BlinkMacSystemFont, "SF Pro Text", "Apple SD Gothic Neo", "Helvetica Neue", sans-serif;
+    font-size: 13px; -webkit-font-smoothing: antialiased;
+    --surface: #ffffff; --surface-secondary: #f6f6f8; --surface-hover: #eeeef1; --sidebar: #efeff3;
+    --text: #252529; --secondary: #64646d; --tertiary: #767680; --line: #e4e4e9; --strong-line: #d0d0d6;
+    --accent: #087af5; --accent-tint: #eaf2ff; --good: #287c4c; --warning: #986200; --warning-tint: #fff5df;
+    --danger: #bd3434; --danger-tint: #fff0ef;
+    --p-claude: #b07556; --p-codex: #4f8664; --p-gemini: #4b78ad; --p-grok: #7d7d88; --p-zai: #8a78ad;
+    color: var(--text); background: var(--surface-secondary);
+  }
+  @media (prefers-color-scheme: dark) {
+    :root {
+      --surface: #202023; --surface-secondary: #27272b; --surface-hover: #333338; --sidebar: #1c1c1f;
+      --text: #ededf0; --secondary: #a3a3ad; --tertiary: #8b8b95; --line: #36363c; --strong-line: #46464d;
+      --accent: #3b93ff; --accent-tint: #1d2c42; --good: #6cc28f; --warning: #e0a744; --warning-tint: #3a2e17;
+      --danger: #ff7b72; --danger-tint: #3d2020;
+      --p-claude: #d69e80; --p-codex: #7fb193; --p-gemini: #7ea6d8; --p-grok: #a4a4ae; --p-zai: #a996cc;
+    }
+  }
+  * { box-sizing: border-box; }
+  body { margin: 0; }
+  button { font: inherit; color: inherit; }
+  :focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; border-radius: 4px; }
+  code { font-size: 12px; }
+
+  .window { display: grid; grid-template-columns: 200px 1fr; min-height: 100vh; }
+  .sidebar { background: var(--sidebar); border-right: 1px solid var(--line); padding: 22px 12px; }
+  .brand { font-weight: 650; font-size: 14px; padding: 0 10px 18px; }
+  .nav a { display: block; padding: 6px 10px; border-radius: 6px; color: var(--secondary); text-decoration: none; }
+  .nav a[aria-current] { background: var(--surface-hover); color: var(--text); font-weight: 560; }
+
+  main { padding: 24px 32px 56px; max-width: 1240px; }
+  .top { display: flex; justify-content: space-between; align-items: flex-end; gap: 16px; flex-wrap: wrap; margin-bottom: 18px; }
+  h1 { font-size: 22px; font-weight: 680; letter-spacing: -.01em; margin: 0; }
+  .fresh { color: var(--tertiary); margin-top: 4px; }
+  .segmented { display: inline-flex; background: var(--surface-hover); border-radius: 7px; padding: 2px; }
+  .segmented button { border: 0; background: none; padding: 4px 12px; border-radius: 5px; cursor: pointer; color: var(--secondary); }
+  .segmented button[aria-pressed="true"] { background: var(--surface); color: var(--text); font-weight: 560; box-shadow: 0 1px 2px rgba(0,0,0,.08); }
+
+  /* 가장 바쁜 줄: 화면에서 가장 먼저 읽히는 부분 */
+  .now { display: grid; grid-template-columns: minmax(0, 1.3fr) minmax(0, 2fr); gap: 1px; background: var(--line); border: 1px solid var(--line); border-radius: 12px; overflow: hidden; margin-bottom: 22px; }
+  .now > * { background: var(--surface); }
+  .busiest { padding: 18px 20px; }
+  .busiest .who { font-size: 13px; color: var(--secondary); display: flex; align-items: center; gap: 7px; }
+  .busiest .model { font-size: 26px; font-weight: 700; letter-spacing: -.015em; margin: 6px 0 2px; }
+  .busiest .rate { font-size: 14px; color: var(--secondary); }
+  .busiest .rate b { color: var(--text); font-size: 18px; font-variant-numeric: tabular-nums; }
+  .busiest .spark-lg { margin-top: 12px; width: 100%; height: 44px; display: block; }
+  .ranking { list-style: none; margin: 0; padding: 8px 0; }
+  .ranking li { display: grid; grid-template-columns: 18px minmax(0, 1fr) 120px 64px; gap: 12px; align-items: center; padding: 7px 20px; }
+  .ranking .rank { color: var(--tertiary); font-variant-numeric: tabular-nums; }
+  .ranking .line { overflow: hidden; white-space: nowrap; text-overflow: ellipsis; }
+  .ranking .line span { color: var(--secondary); }
+  .ranking .count { text-align: right; font-weight: 600; font-variant-numeric: tabular-nums; }
+  .ranking svg { width: 120px; height: 22px; display: block; }
+
+  .live { width: 7px; height: 7px; border-radius: 50%; background: var(--good); box-shadow: 0 0 0 3px color-mix(in srgb, var(--good) 22%, transparent); flex: none; }
+  .dot { width: 8px; height: 8px; border-radius: 50%; background: var(--c); flex: none; display: inline-block; }
+
+  /* 보드: 공급자 → 계정 → 모델 */
+  .provider { background: var(--surface); border: 1px solid var(--line); border-radius: 12px; margin-bottom: 14px; overflow: hidden; }
+  .provider > header { display: flex; align-items: center; gap: 9px; padding: 11px 18px; border-bottom: 1px solid var(--line); }
+  .provider > header h2 { font-size: 14px; font-weight: 650; margin: 0; }
+  .provider > header .sum { color: var(--tertiary); margin-left: auto; font-variant-numeric: tabular-nums; }
+  .acct { display: grid; grid-template-columns: 290px minmax(0, 1fr); border-top: 1px solid var(--line); }
+  .acct:first-of-type { border-top: 0; }
+  .acct-info { padding: 12px 18px; border-right: 1px solid var(--line); }
+  .acct-info .who { font-weight: 580; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+  .acct-info .who.unknown { font-weight: 500; color: var(--secondary); }
+  .acct-info .note { color: var(--tertiary); font-size: 12px; margin-top: 3px; line-height: 1.4; }
+  .quota { display: grid; gap: 6px; margin-top: 9px; }
+  .q { white-space: nowrap; display: grid; grid-template-columns: 96px 1fr 38px; gap: 8px; align-items: center; font-size: 11.5px; color: var(--tertiary); }
+  .q b { text-align: right; font-weight: 560; color: var(--secondary); font-variant-numeric: tabular-nums; }
+  .q.warn b { color: var(--warning); } .q.bad b { color: var(--danger); }
+  .bar { height: 5px; border-radius: 3px; background: var(--surface-hover); overflow: hidden; }
+  .bar i { display: block; height: 100%; border-radius: 3px; background: var(--c); }
+  .q.warn .bar i { background: var(--warning); } .q.bad .bar i { background: var(--danger); }
+
+  .models { display: grid; grid-template-columns: repeat(auto-fill, minmax(230px, 1fr)); gap: 10px; padding: 12px 16px; align-content: start; }
+  .cell { border: 1px solid var(--line); border-radius: 9px; padding: 10px 12px; background: color-mix(in srgb, var(--c) calc(var(--heat) * 16%), var(--surface)); }
+  .cell .head { display: flex; align-items: center; gap: 7px; }
+  .cell .name { font-weight: 600; }
+  .cell .n { margin-left: auto; font-weight: 650; font-variant-numeric: tabular-nums; }
+  .cell .n small { font-weight: 450; color: var(--tertiary); }
+  .cell svg { width: 100%; height: 26px; display: block; margin: 6px 0 4px; }
+  .cell .where { display: flex; gap: 5px; flex-wrap: wrap; }
+  .tag { font-size: 11.5px; padding: 1px 7px; border-radius: 4px; background: var(--surface-hover); color: var(--secondary); }
+  .tag.aam { background: var(--accent-tint); color: var(--accent); }
+  .tag.direct { background: var(--warning-tint); color: var(--warning); }
+  .cell.idle { background: var(--surface); }
+  .cell.idle .name, .cell.idle .n { color: var(--tertiary); font-weight: 500; }
+  .empty { padding: 14px 16px; color: var(--tertiary); }
+
+  .flag { margin-top: 8px; font-size: 12px; color: var(--warning); line-height: 1.4; }
+  .flag.bad { color: var(--danger); }
+  .foot { color: var(--tertiary); font-size: 12px; margin-top: 16px; line-height: 1.5; max-width: 90ch; }
+
+  @media (max-width: 960px) {
+    .window { grid-template-columns: 1fr; } .sidebar { display: none; }
+    main { padding: 18px 14px 40px; }
+    .now { grid-template-columns: 1fr; }
+    .acct { grid-template-columns: 1fr; } .acct-info { border-right: 0; border-bottom: 1px solid var(--line); }
+    .ranking li { grid-template-columns: 18px minmax(0, 1fr) 64px; } .ranking svg { display: none; }
+  }
+  @media (prefers-reduced-motion: no-preference) {
+    .live { animation: pulse 2.4s ease-in-out infinite; }
+    @keyframes pulse { 50% { box-shadow: 0 0 0 5px color-mix(in srgb, var(--good) 6%, transparent); } }
+  }
+</style>
+</head>
+<body>
+<div class="window">
+  <aside class="sidebar" aria-label="주 탐색">
+    <div class="brand">Account Manager</div>
+    <nav class="nav">
+      <a href="#" aria-current="page">지금 사용 현황</a>
+      <a href="#">계정</a>
+      <a href="#">세션</a>
+      <a href="#">배정 정책</a>
+      <a href="#">연결 상태</a>
+    </nav>
+  </aside>
+
+  <main>
+    <div class="top">
+      <div>
+        <h1>지금 사용 현황</h1>
+        <div class="fresh">최근 1시간, 5분 단위. 사용량은 3분 전에 조회했습니다.</div>
+      </div>
+      <div class="segmented" role="group" aria-label="기간">
+        <button type="button" aria-pressed="false">15분</button>
+        <button type="button" aria-pressed="true">1시간</button>
+        <button type="button" aria-pressed="false">오늘</button>
+      </div>
+    </div>
+
+    <section class="now" aria-label="가장 많이 쓰는 곳">
+      <div class="busiest" id="busiest"></div>
+      <ol class="ranking" id="ranking"></ol>
+    </section>
+
+    <div id="board"></div>
+
+    <p class="foot">2026-09-26 기준 실제 관측값입니다. AAM을 거친 호출(<code>ojak-claude/…</code> 등)은 계정까지 기록됩니다. omp가 직접 계정을 고른 호출(<code>anthropic/…</code> 등)은 어느 계정이 처리했는지 omp가 알려 주지 않아 "계정 미확인"으로 모읍니다. 프로젝트 표시는 관측 확장이 기록한 곳만 나오며, AAM 호출의 프로젝트는 다음 빌드부터 채워집니다.</p>
+  </main>
+</div>
+
+<script>
+// 실제 관측값: AAM 브릿지 로그(5분 단위 12칸, 오래된 것 → 최근), omp 관측 확장, omp usage
+const providers = [
+  { id: "claude", name: "Anthropic", note: "Claude" },
+  { id: "codex", name: "OpenAI Codex", note: "GPT" },
+  { id: "gemini", name: "Google Antigravity", note: "Gemini" },
+  { id: "grok", name: "xAI", note: "Grok" },
+  { id: "zai", name: "Z.AI", note: "GLM" },
+];
+const Z = n => Array(n).fill(0);
+const accounts = [
+  { provider: "claude", who: "alice@example.com", quota: [["5시간", 2], ["주간", 2], ["Fable 주간", 3]],
+    models: [{ name: "Fable 5.1", series: [...Z(10), 22, 73], where: [["AAM", "aam"]] }] },
+  { provider: "claude", who: "bob@example.com", quota: [["5시간", 5], ["주간", 78], ["Fable 주간", 91]],
+    flag: "Fable 주간 91%인데 최근 5분에 Fable 40회가 이 계정으로 갔습니다. 다른 계정이 바쁘면 이 계정이 새 세션을 받기 때문입니다.",
+    models: [{ name: "Fable 5.1", series: [...Z(11), 40], where: [["AAM", "aam"]] }] },
+  { provider: "claude", who: "carol@example.com", quota: [["5시간", 34], ["주간", 43], ["Fable 주간", 62]],
+    models: [
+      { name: "Fable 5.1", series: [...Z(11), 9], where: [["AAM", "aam"], ["project-a", ""]] },
+      { name: "Opus 5.5", series: [...Z(7), 2, ...Z(4)], where: [["AAM", "aam"]] },
+    ] },
+  { provider: "claude", unknown: true, who: "계정 미확인",
+    note: "omp가 직접 고른 호출입니다. 세 계정 중 하나가 처리했습니다.",
+    models: [
+      { name: "Opus 5.5", series: [...Z(11), 2], where: [["omp 직접", "direct"], ["project-b", ""]] },
+      { name: "Fable 5.1", series: [...Z(11), 2], where: [["omp 직접", "direct"], ["project-a", ""]] },
+    ] },
+  { provider: "codex", who: "bob@example.com", quota: [["주간", 0]],
+    models: [{ name: "GPT-6 Astra", series: [...Z(8), 1, 0, 16, 15], where: [["AAM", "aam"], ["project-a", ""]] }] },
+  { provider: "codex", who: "carol@example.com", quota: [["주간", 100]],
+    flag: "주간 한도 소진. 4일 18시간 뒤에 풀립니다. 새 Codex 요청은 bob로 갑니다.", flagTone: "bad", models: [] },
+  { provider: "codex", unknown: true, who: "계정 미확인", note: "omp가 직접 고른 호출입니다.",
+    models: [{ name: "GPT-6 Astra", series: [...Z(11), 2], where: [["omp 직접", "direct"], ["project-a", ""]] }] },
+  { provider: "gemini", who: "bob@example.com", quota: [["Gemini 5시간", 0.1], ["Gemini 주간", 0.2], ["Claude·GPT 주간", 0]],
+    models: [{ name: "Gemini 3.8 Flash", series: [...Z(8), 1, ...Z(3)], where: [["AAM", "aam"]] }] },
+  { provider: "grok", who: "bob@example.com", quota: [["주간 크레딧", 0]],
+    models: [{ name: "Grok 4.6", series: [...Z(8), 1, ...Z(3)], where: [["AAM", "aam"]] }] },
+  { provider: "grok", unknown: true, who: "계정 미확인", note: "omp 보조 역할(tiny)이 직접 고른 호출입니다.",
+    models: [{ name: "Grok 4.6", series: [...Z(10), 3, 5], where: [["omp 직접", "direct"], ["project-a", ""], ["project-b", ""]] }] },
+  { provider: "zai", who: "bob@example.com", quota: [], note: "사용량 정보를 제공하지 않습니다.", models: [] },
+];
+
+const color = id => `var(--p-${id})`;
+const total = s => s.reduce((a, b) => a + b, 0);
+const peak = Math.max(...accounts.flatMap(a => a.models.map(m => Math.max(...m.series))));
+function spark(series, id, w = 120, h = 24, fill = true) {
+  const max = Math.max(peak, 1), step = w / (series.length - 1);
+  const pts = series.map((v, i) => [i * step, h - 2 - (v / max) * (h - 4)]);
+  const line = pts.map(p => p.map(n => n.toFixed(1)).join(",")).join(" ");
+  const area = `0,${h} ${line} ${w},${h}`;
+  return `<svg viewBox="0 0 ${w} ${h}" preserveAspectRatio="none" aria-hidden="true">${fill ? `<polygon points="${area}" fill="${color(id)}" opacity=".16"/>` : ""}<polyline points="${line}" fill="none" stroke="${color(id)}" stroke-width="1.6" vector-effect="non-scaling-stroke" stroke-linejoin="round"/></svg>`;
+}
+const live = m => m.series.at(-1) > 0;
+const tags = m => m.where.map(([t, k]) => `<span class="tag ${k}">${t}</span>`).join("");
+
+// 가장 바쁜 줄과 순위
+const lines = accounts.flatMap(a => a.models.map(m => ({ a, m, n: total(m.series), now: m.series.at(-1) })))
+  .sort((x, y) => y.now - x.now || y.n - x.n);
+const first = lines[0];
+const pname = id => providers.find(p => p.id === id).name;
+document.getElementById("busiest").innerHTML = `
+  <div class="who"><span class="live"></span>지금 가장 많이 쓰는 곳</div>
+  <div class="model">${first.m.name}</div>
+  <div class="who"><span class="dot" style="--c:${color(first.a.provider)}"></span>${pname(first.a.provider)}, ${first.a.who}</div>
+  <div class="rate">최근 5분 <b>${first.now}회</b>, 1시간 ${first.n}회</div>
+  ${spark(first.m.series, first.a.provider, 300, 44).replace("<svg", '<svg class="spark-lg"')}`;
+document.getElementById("ranking").innerHTML = lines.slice(1, 7).map((l, i) => `
+  <li>
+    <span class="rank">${i + 2}</span>
+    <span class="line">${l.now ? '<span class="live" style="display:inline-block;margin-right:7px;vertical-align:1px"></span>' : ""}${l.m.name} <span>${pname(l.a.provider)}, ${l.a.who}</span></span>
+    ${spark(l.m.series, l.a.provider)}
+    <span class="count">${l.n}회</span>
+  </li>`).join("");
+
+// 보드
+document.getElementById("board").innerHTML = providers.map(p => {
+  const rows = accounts.filter(a => a.provider === p.id);
+  const sum = total(rows.flatMap(a => a.models.flatMap(m => m.series)));
+  return `<section class="provider" aria-label="${p.name}">
+    <header><span class="dot" style="--c:${color(p.id)}"></span><h2>${p.name}</h2><span class="sum">${sum ? `1시간 ${sum}회` : "최근 호출 없음"}</span></header>
+    ${rows.map(a => `<div class="acct">
+      <div class="acct-info">
+        <div class="who${a.unknown ? " unknown" : ""}">${a.who}</div>
+        ${a.note ? `<div class="note">${a.note}</div>` : ""}
+        ${a.quota && a.quota.length ? `<div class="quota">${a.quota.map(([label, v]) => `<div class="q ${v >= 100 ? "bad" : v >= 85 ? "warn" : ""}"><span>${label}</span><div class="bar"><i style="width:${Math.min(v, 100)}%;--c:${color(p.id)}"></i></div><b>${v}%</b></div>`).join("")}</div>` : ""}
+        ${a.flag ? `<div class="flag ${a.flagTone || ""}">${a.flag}</div>` : ""}
+      </div>
+      ${a.models.length ? `<div class="models">${a.models.map(m => {
+        const n = total(m.series), heat = Math.min(1, n / peak);
+        return `<div class="cell${n ? "" : " idle"}" style="--c:${color(p.id)};--heat:${heat.toFixed(2)}">
+          <div class="head">${live(m) ? '<span class="live" title="최근 5분에 호출이 있습니다"></span>' : ""}<span class="name">${m.name}</span><span class="n">${n}<small>회</small></span></div>
+          ${spark(m.series, p.id, 220, 26)}
+          <div class="where">${tags(m)}</div>
+        </div>`;
+      }).join("")}</div>` : `<div class="empty">최근 1시간 호출이 없습니다.</div>`}
+    </div>`).join("")}
+  </section>`;
+}).join("");
+
+// 기간 버튼(시안: 선택 표시만 바꾼다)
+for (const b of document.querySelectorAll(".segmented button")) {
+  b.addEventListener("click", () => document.querySelectorAll(".segmented button").forEach(x => x.setAttribute("aria-pressed", String(x === b))));
+}
+</script>
+</body>
+</html>

@@ -1,0 +1,2 @@
+# 테스트 고정값(계정 키 자리표시자). 실제 비밀값이 아니다.
+2e039133405b8565fc6a1b644afca12c9411f9ce:apps/desktop/src-tauri/src/main.rs:generic-api-key:1020

@@ -1,0 +1,18 @@
+import { spawnSync } from 'node:child_process';
+import { existsSync, mkdirSync, copyFileSync } from 'node:fs';
+import { homedir } from 'node:os';
+import { resolve, dirname } from 'node:path';
+import { fileURLToPath } from 'node:url';
+const root = resolve(dirname(fileURLToPath(import.meta.url)), '..');
+const cargo = existsSync(resolve(homedir(), '.cargo/bin/cargo')) ? resolve(homedir(), '.cargo/bin/cargo') : 'cargo';
+const env = { ...process.env, PATH: `${resolve(homedir(), '.cargo/bin')}:${process.env.PATH}` };
+const build = spawnSync(cargo, ['build', '-p', 'aam-service', '-p', 'aam-launcher'], {cwd: root,env,stdio:'inherit'});
+if (build.status !== 0) process.exit(build.status ?? 1);
+const rustc = existsSync(resolve(homedir(), '.cargo/bin/rustc')) ? resolve(homedir(), '.cargo/bin/rustc') : 'rustc';
+const version = spawnSync(rustc, ['-vV'], { encoding:'utf8' });
+const triple = version.stdout?.match(/^host: (\S+)$/m)?.[1];
+if (version.status !== 0 || !triple || !/^[a-z0-9_-]+$/.test(triple)) throw new Error('Rust host triple을 확인하지 못했습니다.');
+const binaryDir=resolve(root,'apps/desktop/src-tauri/binaries'); mkdirSync(binaryDir,{recursive:true});
+for(const name of ['aam','aam-service']) copyFileSync(resolve(root,'target/debug',name),resolve(binaryDir,`${name}-${triple}`));
+const result=spawnSync(resolve(root,'node_modules/.bin/tauri'),['dev'],{cwd:resolve(root,'apps/desktop'),env,stdio:'inherit'});
+process.exit(result.status ?? 1);

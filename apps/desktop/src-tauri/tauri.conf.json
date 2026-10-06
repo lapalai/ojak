@@ -1,0 +1,44 @@
+{
+  "$schema": "https://schema.tauri.app/config/2",
+  "productName": "Ojak",
+  "version": "0.1.1",
+  "identifier": "ai.aam.desktop",
+  "build": {
+    "beforeDevCommand": "npm run dev",
+    "devUrl": "http://localhost:1420",
+    "beforeBuildCommand": "npm run build",
+    "frontendDist": "../dist"
+  },
+  "app": {
+    "macOSPrivateApi": true,
+    "windows": [{
+      "label": "main", "title": "Ojak", "width": 1180, "height": 780,
+      "minWidth": 900, "minHeight": 600, "center": true,
+      "titleBarStyle": "Overlay", "hiddenTitle": true, "transparent": true,
+        "create": false
+    }],
+    "security": { "csp": "default-src 'self'; script-src 'self'; style-src 'self' 'unsafe-inline'; img-src 'self' asset: data:; connect-src ipc: http://ipc.localhost; font-src 'self'; object-src 'none'; base-uri 'self'; frame-src 'none'" }
+  },
+  "bundle": {
+    "active": true, "targets": ["app", "dmg"],
+    "createUpdaterArtifacts": true,
+    "externalBin": ["binaries/aam", "binaries/aam-service"],
+    "icon": ["icons/icon.icns", "icons/icon.ico", "icons/icon.png"],
+    "resources": {
+      "../src/assets/fonts/Pretendard-OFL.txt": "licenses/Pretendard-OFL.txt",
+      "../../../THIRD_PARTY_NOTICES.md": "licenses/THIRD_PARTY_NOTICES.md"
+    },
+    "category": "DeveloperTool",
+    "publisher": "lapal",
+    "copyright": "© 2026 lapal",
+    "homepage": "https://github.com/lapalai/ojak",
+    "shortDescription": "계정과 사용량을 한눈에, AI 작업은 올바른 계정으로",
+    "macOS": { "minimumSystemVersion": "13.0", "signingIdentity": "-", "entitlements": "entitlements.plist" }
+  },
+  "plugins": {
+    "updater": {
+      "pubkey": "dW50cnVzdGVkIGNvbW1lbnQ6IG1pbmlzaWduIHB1YmxpYyBrZXk6IEQ5QUZGNjlCOTFENUNCMkYKUldRdnk5V1JtL2F2Mld5ckQyVWtJM1grSTBEanNWZEFBb2tFUHFyT3RlNzIwWjYwZFA0anZCdy8K",
+      "endpoints": ["https://github.com/lapalai/ojak/releases/latest/download/latest.json"]
+    }
+  }
+}

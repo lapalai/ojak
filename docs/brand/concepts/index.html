@@ -1,0 +1,346 @@
+<!doctype html>
+<html lang="ko">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Ojak 브랜드 컨셉 v1 · 깍이</title>
+<link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/galmuri/dist/galmuri.css">
+<style>
+  :root {
+    --ink: #10122b; --night: #1a1f4d; --panel: #222861; --line: #3b4392;
+    --paper: #f3ead8; --text: #eef0ff; --muted: #a9aed8;
+    --red: #c4472f; --ochre: #d9a441; --blue: #5b8fd6; --green: #4fae84;
+    --pixel: "Galmuri11", "Galmuri9", ui-monospace, monospace;
+  }
+  * { box-sizing: border-box; }
+  body { margin: 0; background: var(--ink); color: var(--text); font: 15px/1.65 -apple-system, BlinkMacSystemFont, "Apple SD Gothic Neo", "Pretendard", "Noto Sans KR", sans-serif; }
+  a { color: var(--ochre); }
+  .wrap { max-width: 1120px; margin: 0 auto; padding: 0 24px 80px; }
+  h1, h2, h3, .px { font-family: var(--pixel); font-weight: 400; letter-spacing: 0; }
+  header.hero { position: relative; border-bottom: 4px solid var(--line); background: #0b0d22 url("B-ojakgyo-hero.png") center / cover no-repeat; image-rendering: pixelated; }
+  header.hero .shade { background: linear-gradient(180deg, rgba(11,13,34,.35), rgba(11,13,34,.92)); }
+  header.hero .wrap { padding-top: 120px; padding-bottom: 36px; }
+  header.hero h1 { font-size: 40px; line-height: 1.25; margin: 0 0 10px; }
+  header.hero p { margin: 0; color: var(--muted); max-width: 720px; }
+  .chips { display: flex; flex-wrap: wrap; gap: 8px; margin-top: 18px; }
+  .chip { font-family: var(--pixel); font-size: 12px; padding: 4px 10px; border: 2px solid var(--line); background: var(--night); box-shadow: 2px 2px 0 #000; }
+  section { margin-top: 56px; }
+  h2 { font-size: 22px; margin: 0 0 16px; display: flex; align-items: center; gap: 10px; }
+  h2::before { content: ""; width: 12px; height: 12px; background: var(--ochre); box-shadow: 2px 2px 0 #000; }
+  .box { background: var(--night); border: 2px solid var(--line); box-shadow: 4px 4px 0 #000; padding: 20px 22px; }
+  .name { display: grid; grid-template-columns: 220px 1fr; gap: 24px; align-items: center; }
+  .name .big { font-family: var(--pixel); font-size: 64px; text-align: center; color: var(--paper); text-shadow: 4px 4px 0 #000; }
+  .name .big small { display: block; font-size: 16px; color: var(--muted); text-shadow: none; }
+  .meaning { display: grid; grid-template-columns: 1fr 1fr; gap: 14px; }
+  .meaning div { border: 2px dashed var(--line); padding: 12px 14px; }
+  .meaning b { font-family: var(--pixel); font-weight: 400; color: var(--ochre); }
+  .slogan { margin-top: 16px; font-family: var(--pixel); font-size: 18px; color: var(--paper); }
+  ul.plain { margin: 0; padding-left: 20px; }
+  ul.plain li { margin: 4px 0; }
+  .cards { display: grid; grid-template-columns: repeat(2, 1fr); gap: 22px; }
+  .card { background: var(--night); border: 2px solid var(--line); box-shadow: 4px 4px 0 #000; display: flex; flex-direction: column; }
+  .card.wide { grid-column: 1 / -1; }
+  .card a.img { display: block; background: #0b0d22; border-bottom: 2px solid var(--line); }
+  .card img { display: block; width: 100%; height: auto; image-rendering: pixelated; }
+  .card .body { padding: 16px 18px 18px; flex: 1; }
+  .card h3 { font-size: 18px; margin: 0 0 4px; }
+  .card .role { font-size: 12px; font-family: var(--pixel); color: var(--muted); }
+  .card .msg { margin: 10px 0; font-weight: 600; color: var(--paper); }
+  .card dl { display: grid; grid-template-columns: 56px 1fr; gap: 4px 10px; margin: 0; font-size: 14px; }
+  .card dt { color: var(--muted); }
+  .card dd { margin: 0; }
+  .tag { font-family: var(--pixel); font-size: 11px; padding: 2px 8px; border: 2px solid currentColor; margin-left: 6px; vertical-align: 2px; }
+  .tag.pick { color: var(--green); } .tag.fix { color: var(--red); } .tag.caution { color: var(--ochre); }
+  .note { margin-top: 12px; padding: 10px 12px; border-left: 4px solid var(--ochre); background: rgba(217,164,65,.08); font-size: 14px; }
+  .note.red { border-color: var(--red); background: rgba(196,71,47,.1); }
+  table { width: 100%; border-collapse: collapse; font-size: 14px; }
+  th, td { text-align: left; padding: 10px 12px; border-bottom: 2px solid var(--line); vertical-align: top; }
+  th { font-family: var(--pixel); font-weight: 400; color: var(--muted); font-size: 12px; }
+  td.fact { width: 55%; }
+  .patch { background: #0b0d22; border: 2px solid var(--green); box-shadow: 4px 4px 0 #000; padding: 18px 22px; font-family: var(--pixel); font-size: 15px; line-height: 1.9; }
+  .patch .h { color: var(--green); }
+  .patch .down { color: var(--red); }
+  .patch .src { margin-top: 10px; font-family: inherit; font-size: 11px; color: var(--muted); }
+  .combo { display: grid; grid-template-columns: repeat(5, 1fr); gap: 12px; }
+  .combo div { background: var(--panel); border: 2px solid var(--line); padding: 12px; text-align: center; }
+  .combo .k { font-family: var(--pixel); font-size: 28px; color: var(--paper); }
+  .combo .v { font-size: 13px; color: var(--muted); }
+  .grid2 { display: grid; grid-template-columns: 1fr 1fr; gap: 22px; }
+  .ok li::marker { content: "✓  "; color: var(--green); }
+  .no li::marker { content: "✕  "; color: var(--red); }
+  footer { margin-top: 64px; color: var(--muted); font-size: 13px; border-top: 2px solid var(--line); padding-top: 16px; }
+  @media (max-width: 820px) { .cards, .grid2, .meaning, .name { grid-template-columns: 1fr; } .combo { grid-template-columns: repeat(2, 1fr); } }
+</style>
+</head>
+<body>
+<header class="hero"><div class="shade"><div class="wrap">
+  <div class="px" style="color:var(--ochre);font-size:13px">OJAK BRAND CONCEPT · v1 · 2026-10-03</div>
+  <h1>요금제는 맨날 깍고,<br>깍이는 안 흘리고.</h1>
+  <p>Ojak(오작) 외부 PR용 브랜드·재미 요소 컨셉 정리. 오작교의 까치 <b>깍이</b>와 민화 까치호랑이를 도트로 비틀어, 내가 낸 한도를 리셋 전에 끝까지 쓰게 돕는 이야기.</p>
+  <div class="chips"><span class="chip">풍자: 가볍지만 강도 있게</span><span class="chip">도트: 전면 테마</span><span class="chip">로고: 현행 유지</span><span class="chip">출시일: 고정 없음</span><span class="chip">원화: AI 시안 → 리터칭</span></div>
+</div></div></header>
+
+<main class="wrap">
+
+<section>
+  <h2>마스코트 이름</h2>
+  <div class="box name">
+    <div class="big">깍이<small>Kkagi</small></div>
+    <div>
+      <div class="meaning">
+        <div><b>① 깍깍</b><br>까치 울음소리의 애칭. 공식 소개·앱 안에서는 이 뜻만 쓴다. 귀엽고 부담 없음.</div>
+        <div><b>② 깍네</b><br>"토큰 맨날 깍네." 요금제가 한도를 깎는다는 풍자. 캠페인 카피에서만 쓴다.</div>
+      </div>
+      <div class="slogan">"요금제는 맨날 깍고, 깍이는 안 흘리고."</div>
+      <p style="margin:10px 0 0;color:var(--muted);font-size:14px">영문권에서는 말장난이 통하지 않으므로 별도 카피: <i>"Kkagi — the magpie who never drops a token."</i></p>
+    </div>
+  </div>
+</section>
+
+<section>
+  <h2>세계관</h2>
+  <div class="grid2">
+    <div class="box"><h3 style="margin-top:0">오작교 (烏鵲橋)</h3><p style="margin:0">까마귀와 까치가 놓는 다리. 견우와 직녀 대신 <b>개발자와 한도</b>를 잇는다. 깍이는 요청(편지)을 물고 계정에서 계정으로 건네준다.</p></div>
+    <div class="box"><h3 style="margin-top:0">까치호랑이 (민화)</h3><p style="margin:0">원래 어수룩한 호랑이(권세)와 영리한 까치(서민)로 권력을 비꼬던 그림. 여기서 <b>호랑이 = 요금제 정책</b>, <b>까치 = Ojak과 사용자</b>. 회사·사람이 아니라 정책을 웃는다.</p></div>
+  </div>
+</section>
+
+<section>
+  <h2>시안 5종</h2>
+  <div class="cards">
+    <article class="card wide">
+      <a class="img" href="A-mascot-sheet.png" target="_blank"><img src="A-mascot-sheet.png" alt="깍이 상태 6종 시트"></a>
+      <div class="body">
+        <h3>A. 깍이 상태 6종 <span class="tag pick">앱 기준 원형</span></h3>
+        <div class="role">앱 팝오버 · 빈 화면 · 오류 화면</div>
+        <p class="msg">숫자보다 표정으로 상태를 먼저 알린다.</p>
+        <table>
+          <tr><th>쉼</th><th>나름</th><th>헐떡</th><th>기절</th><th>부활</th><th>급함</th></tr>
+          <tr><td>최근 15분 사용 없음</td><td>브릿지·관리 세션 사용 중</td><td>잔여 30% 이하</td><td>소진·안전 여유분 이하</td><td>리셋 직후</td><td>곧 리셋 + 많이 남음</td></tr>
+        </table>
+        <div class="note">다섯 장 모두 같은 깍이(검은 머리·흰 배·청록 꼬리)로 나왔다. 이 시트를 캐릭터 기준으로 삼고 리터칭한다. 앱 아이콘은 현재 오작교 까치 로고를 유지한다.</div>
+      </div>
+    </article>
+
+    <article class="card">
+      <a class="img" href="B-ojakgyo-hero.png" target="_blank"><img src="B-ojakgyo-hero.png" alt="오작교 히어로"></a>
+      <div class="body">
+        <h3>B. 오작교 <span class="tag pick">랜딩 첫 화면</span></h3>
+        <div class="role">랜딩 상단 · 앱 첫 실행 연출</div>
+        <p class="msg">까치들이 다리를 놓아 요청을 건네준다.</p>
+        <dl><dt>톤</dt><dd>정통 세계관, 풍자 없음. 제품 설명용.</dd><dt>연출</dt><dd>첫 실행 안내에서 단계마다 까치가 한 마리씩 날아와 다리 완성.</dd></dl>
+      </div>
+    </article>
+
+    <article class="card">
+      <a class="img" href="C-tiger-scale.png" target="_blank"><img src="C-tiger-scale.png" alt="까치호랑이 풍자"></a>
+      <div class="body">
+        <h3>C. 까치호랑이 <span class="tag pick">풍자 메인 추천</span></h3>
+        <div class="role">랜딩 풍자 섹션 키비주얼 · 포스터</div>
+        <p class="msg">호랑이는 저울에서 쌀을 덜고, 깍이는 한 톨씩 모은다.</p>
+        <dl><dt>왜</dt><dd>민화 원래의 권력 풍자 구조를 그대로 쓴다. 한국적이고 강도 있지만 특정 회사를 직접 조롱하지 않는다.</dd><dt>카피</dt><dd>"효율화라 쓰고 덜어 내기라 읽는다."</dd></dl>
+      </div>
+    </article>
+
+    <article class="card">
+      <a class="img" href="D-snack-bag.png" target="_blank"><img src="D-snack-bag.png" alt="질소과자 풍자"></a>
+      <div class="body">
+        <h3>D. 질소과자 <span class="tag caution">출처 캡션 필수</span></h3>
+        <div class="role">SNS 밈 · 질소과자 지수 소개</div>
+        <p class="msg">가격은 $200 그대로, 봉지 안에는 칩 세 개.</p>
+        <dl><dt>포인트</dt><dd>깍이의 무표정. 한국인이면 바로 이해하는 밈.</dd><dt>연결</dt><dd>앱의 "질소과자 지수"(내 계정 기준 요청 1회당 한도 % 추적) 소개 이미지.</dd></dl>
+        <div class="note">$200은 공식 가격이지만 이미지만 퍼지면 출처 없는 주장처럼 보인다. 게시할 때 공식 문서 링크·확인 날짜 캡션을 항상 붙인다.</div>
+      </div>
+    </article>
+
+    <article class="card">
+      <a class="img" href="E-speed-toll.png" target="_blank"><img src="E-speed-toll.png" alt="속도세 풍자"></a>
+      <div class="body">
+        <h3>E. 속도세 <span class="tag fix">재작업 필요</span></h3>
+        <div class="role">Ultrafast 8배 차감 풍자</div>
+        <p class="msg">×8 요금소에서 경주차는 동전 더미를 낸다.</p>
+        <dl><dt>근거</dt><dd>공식 문서: Ultrafast는 사용량을 8배 속도로 차감.</dd></dl>
+        <div class="note red">깍이가 요금소 위로 날아 넘어가는 장면은 "한도를 피해 간다"로 읽힐 수 있다. 홍보 원칙("우회"를 팔지 않는다)과 충돌하므로, 쓰려면 깍이가 일반 차로로 동전 하나 내고 정상 통과하는 장면으로 다시 그린다.</div>
+      </div>
+    </article>
+  </div>
+</section>
+
+<section>
+  <h2>깍이가 무는 토큰</h2>
+  <div class="box" style="margin-bottom:18px">
+    <p style="margin:0">깍이가 토큰을 물고 있으면 <b>"깍이 = 토큰을 나르는 새"</b>가 한눈에 읽힌다. 까치는 원래 반짝이는 걸 물어 오는 새라 설정도 자연스럽다. 남은 문제는 토큰을 무엇으로 그리느냐다.</p>
+  </div>
+  <div class="cards">
+    <article class="card wide">
+      <a class="img" href="F-token-options.png" target="_blank"><img src="F-token-options.png" alt="토큰 표현 비교 시트"></a>
+      <div class="body">
+        <h3>F. 토큰 표현 비교 <span class="tag pick">추천: 쌀알 + 엽전</span></h3>
+        <div class="role">왼쪽 위부터 ① 쌀알 ② 엽전 ③ 글자 타일 ④ 쌀자루 시스템 · 아래 줄은 24px 아이콘 크기 가독성 테스트</div>
+        <table style="margin-top:12px">
+          <tr><th>안</th><th>읽히는 뜻</th><th>장점</th><th>약점</th></tr>
+          <tr><td><b>① 쌀알</b></td><td>밥줄, 한 톨도 아깝다</td><td>까치호랑이(C)의 쌀과 그대로 이어짐. "한 톨도 안 흘린다"가 "토큰 한 개도 낭비 안 한다"로 번역됨. 질소과자·자루 연출과도 연결</td><td>작게 그리면 알약·알처럼 보일 수 있어 반짝이 표시가 필요</td></tr>
+          <tr><td><b>② 엽전</b></td><td>돈, 내가 낸 값</td><td>24px에서도 가장 잘 읽힘. 한국적. "$200 내고 받은 몫"이라는 풍자와 직결</td><td>"돈 = 토큰"은 결제를 연상시켜 "요금을 아껴 준다"로 과장될 위험</td></tr>
+          <tr><td><b>③ 글자 타일</b></td><td>LLM 토큰 그 자체(글자 조각)</td><td>기술적으로 가장 정확. 개발자에게는 바로 통함</td><td>일반인에게는 "왜 글자를 무냐"로 설명이 필요. 영문권에서는 한글이 의미 전달 안 됨</td></tr>
+          <tr><td><b>④ 쌀자루</b></td><td>한도 = 자루, 토큰 = 쌀</td><td>한도를 채우고 비우는 그림으로 설명할 수 있음. 앱의 잔여량 막대를 자루로 바꾸는 장식으로 확장 가능</td><td>단독 아이콘은 아님. 장면용</td></tr>
+        </table>
+        <div class="note"><b>추천:</b> 깍이가 무는 토큰은 <b>① 쌀알</b>로 고정한다. 세계관(까치호랑이의 쌀), 카피("한 톨도 안 흘린다"), 풍자(질소과자)가 하나로 이어진다. 한도는 <b>④ 쌀자루</b>로, 비용·요금 이야기를 할 때만 <b>② 엽전</b>을 쓴다. ③ 글자 타일은 개발자 대상 이스터에그나 기술 설명 그림에만 쓴다.</div>
+        <div class="note red">메뉴바·작은 아이콘에서는 ① 쌀알이 알약처럼 보일 수 있다. 앱 아이콘(오작교 까치 로고)은 유지하므로 영향은 작지만, 16px 이하에서는 쌀알 대신 반짝이 점 하나로 단순화한다.</div>
+      </div>
+    </article>
+  </div>
+  <div class="box" style="margin-top:18px">
+    <h3 style="margin-top:0">토큰 = 쌀알로 바꾸면 따라오는 것</h3>
+    <ul class="plain">
+      <li><b>A 상태 6종</b>: "나름" 포즈의 편지를 쌀알로 교체. "기절"은 부리에서 쌀알이 굴러떨어짐. "급함"은 시계 옆에 쌀알 더미.</li>
+      <li><b>B 오작교</b>: 다리를 건너는 편지 대신 반짝이는 쌀알 행렬. 요청 = 쌀알 운반.</li>
+      <li><b>앱 잔여량</b>: HP 바 옆에 작은 쌀자루 아이콘. 비면 홀쭉, 차면 통통. 숫자 %는 그대로.</li>
+      <li><b>카피</b>: "깍이는 한 톨도 안 흘린다" · "요금제는 맨날 깍고, 깍이는 한 톨도 안 흘리고" · 영문 "Not a single grain wasted."</li>
+    </ul>
+  </div>
+</section>
+
+<section>
+  <h2>글로벌에서도 쌀알이 통할까</h2>
+  <div class="box">
+    <p style="margin-top:0"><b>결론: 통한다. 단, "쌀"이 아니라 "반짝이는 알갱이(grain)"로 읽히게 그린다.</b> 한국에서는 쌀알, 해외에서는 "새가 물어 나르는 귀한 알갱이"로 읽혀도 메시지가 깨지지 않게 하는 것이 핵심이다.</p>
+    <table>
+      <tr><th>관점</th><th>판단</th></tr>
+      <tr><td>새 + 알갱이</td><td>새가 곡식 알갱이를 부리로 나르는 그림은 문화권과 상관없이 바로 읽힌다. 설명이 필요 없다.</td></tr>
+      <tr><td>한도 비유</td><td>"한 톨도 안 흘린다"는 영어 <i>"not a single grain wasted"</i>로 자연스럽게 옮겨진다. 쌀은 아시아 전역(일본·중국·동남아·인도) 주식이라 시장 범위도 넓다.</td></tr>
+      <tr><td>오해 위험</td><td>그대로 작게 그리면 알약·알·코인으로 보일 수 있다. 특히 <b>금빛 코인처럼 보이면 크립토 토큰으로 읽혀</b> 제품 성격이 흐려진다. 진주빛 흰색 + 작은 반짝임으로 고정하고 금색은 쓰지 않는다.</td></tr>
+      <tr><td>민화·오작교</td><td>한국 고유 요소는 해외에서 오히려 신선하다. 다만 설명은 짧게 붙인다: <i>"Ojak is named after the Korean legend of magpies building a bridge."</i></td></tr>
+    </table>
+    <div class="note"><b>권장 운영:</b> 국내 카피는 "쌀알·한 톨·밥줄"을 그대로 쓰고, 영문 카피는 "grain"으로 쓴다. 그림은 하나로 통일한다. 영문권에서 "토큰"을 직접 설명해야 하는 기술 문서에서만 글자 타일(③)을 보조로 쓴다.</div>
+  </div>
+</section>
+
+<section>
+  <h2>작업 중 액션: 깍이가 쌀알을 나른다</h2>
+  <div class="cards">
+    <article class="card wide">
+      <a class="img" href="G-work-actions.png" target="_blank"><img src="G-work-actions.png" alt="작업 액션 스프라이트 8컷"></a>
+      <div class="body">
+        <h3>G. 작업 액션 8컷 <span class="tag pick">앱 애니메이션 기준</span></h3>
+        <div class="role">윗줄: 작업 루프 4프레임 · 아랫줄: 상황 4종</div>
+        <table style="margin-top:12px">
+          <tr><th>컷</th><th>장면</th><th>앱에서 언제</th><th>근거 데이터</th></tr>
+          <tr><td>1–4</td><td>자루에서 집기 → 물고 날기 → 노트북에 넣기 → 빈 부리로 돌아오기</td><td>관리 세션·브릿지 요청이 진행 중일 때 반복</td><td>활성 세션, 최근 브릿지 요청</td></tr>
+          <tr><td>5</td><td>빈 자루에서 꽉 찬 자루로 깡충</td><td>자동 배정이 다른 계정으로 바꿨을 때 한 번</td><td>계정 전환(교대) 기록</td></tr>
+          <tr><td>6</td><td>쌀알 세 개를 물고 땀 흘리며 급히 날기 + 시계</td><td>곧 리셋 계정을 먼저 쓰는 중</td><td><code>quotaSummaries[].expiring</code> + 먼저 쓰기 옵션</td></tr>
+          <tr><td>7</td><td>빈 자루 옆에 기절, 쌀알 하나 굴러감</td><td>쓰는 계정 소진</td><td>잔여량 <code>bad</code>/소진</td></tr>
+          <tr><td>8</td><td>자루가 반짝이며 다시 차고 깍이가 펄쩍</td><td>리셋 직후 한 번</td><td>소진 → 새 관측 회복</td></tr>
+        </table>
+        <div class="note"><b>속도 = 실제 사용량.</b> 루프 속도를 최근 요청 수에 맞춘다. 한가하면 천천히, 바쁘면 빠르게. 깍이 움직임만 보고도 지금 얼마나 쓰고 있는지 알 수 있다. 숫자 정보는 따로 그대로 보여 준다.</div>
+        <div class="note"><b>어디에:</b> 팝오버 상단(가로 줄 하나, 자루 → 노트북 왕복), 사용 현황의 "지금 쓰는 계정" 카드. 메뉴바 아이콘은 macOS 규칙상 단색 정지 이미지라 움직이지 않는다.</div>
+        <div class="note red"><b>고칠 점:</b> 7번 컷 뒤에 검은 얼룩(생성 오류)이 있어 리터칭 때 지운다. 컷마다 배경 얼룩이 조금씩 달라 애니메이션으로 이으면 깜빡이므로 배경은 단색으로 통일한다. 접근성 설정(동작 줄이기)을 켠 사용자에게는 정지 이미지로 보여 준다.</div>
+      </div>
+    </article>
+  </div>
+</section>
+
+<section>
+  <h2>호랑이의 저울을 전체 상황판으로</h2>
+  <div class="box" style="margin-bottom:18px">
+    <p style="margin:0">호랑이가 들고 있는 <b>저울</b>을 그대로 빌려 와 Ojak의 상황판으로 쓴다. 풍자 장면에서는 호랑이가 저울을 <b>속이고</b>, 앱 안에서는 깍이가 같은 저울을 <b>정직하게</b> 읽어 준다. 한 소품으로 풍자와 기능이 이어진다.</p>
+  </div>
+  <div class="cards">
+    <article class="card wide">
+      <a class="img" href="H-tiger-shop-scale.png" target="_blank"><img src="H-tiger-shop-scale.png" alt="호랑이 쌀가게와 저울 상태 4종"></a>
+      <div class="body">
+        <h3>H. 호랑이 쌀가게 + 저울 상황판 <span class="tag pick">풍자 메인 후보 · 앱 상태판</span></h3>
+        <div class="role">윗단: 풍자 장면 · 아랫단: 앱에서 쓰는 저울 상태 4종</div>
+        <p class="msg">호랑이는 엄지로 저울을 누르고, 깍이는 돋보기와 장부로 확인한다.</p>
+        <dl><dt>윗단</dt><dd>손님이 낸 엽전 한 닢(내가 낸 값) ↔ 반짝이는 쌀알(받는 한도). 호랑이가 엽전 쪽 접시를 엄지로 눌러 쌀이 많아 보이게 하고, 쌀알 일부는 속이 빈 공기 방울(질소). 깍이는 돋보기와 장부로 무표정하게 들여다본다. C(저울로 쌀 덜기)와 D(질소과자)를 한 장에 합친 버전.</dd></dl>
+        <table style="margin-top:12px">
+          <tr><th>앱 저울</th><th>왼쪽 접시</th><th>오른쪽 접시</th><th>뜻</th><th>근거 데이터</th></tr>
+          <tr><td>① 균형</td><td>쌀알 (남은 한도)</td><td>모래시계 (리셋까지 시간)</td><td>속도가 딱 맞음</td><td>남은 % ≈ 남은 시간 비율</td></tr>
+          <tr><td>② 쌀 쪽이 무거움</td><td>쌀알 많음</td><td>모래 거의 없음</td><td><b>곧 리셋인데 많이 남음 → 지금 쓰세요</b></td><td><code>quotaSummaries[].expiring</code></td></tr>
+          <tr><td>③ 시간 쪽이 무거움</td><td>쌀알 두 개</td><td>모래 많음</td><td>너무 빨리 쓰는 중 → 아껴 쓰세요</td><td>잔여량 <code>warn</code> + 리셋까지 많이 남음</td></tr>
+          <tr><td>④ 빈 접시</td><td>비어 있음</td><td>모래 남음</td><td>소진, 리셋 기다림</td><td>잔여량 <code>bad</code>/소진</td></tr>
+        </table>
+        <div class="note"><b>왜 좋은가:</b> 지금 앱의 막대는 "남은 양"만 보여 준다. 저울은 <b>"남은 양 대비 남은 시간"</b>을 한 그림으로 보여 준다. 앞서 만든 곧 리셋 판정(남은 % vs 리셋까지 시간)을 그대로 그림으로 옮긴 것이라 새 계산이 필요 없다. 숫자 %와 리셋 시각은 그 옆에 그대로 둔다.</div>
+        <div class="note"><b>어디에:</b> 팝오버의 계정 줄 아이콘, 사용 현황 카드의 상태 배지. 저울 기울기는 실제 비율에 맞춰 연속으로 움직인다(4단계는 그림 기준점).</div>
+        <div class="note red"><b>고칠 점:</b> 아랫단 배경이 크림·하늘·주홍·노랑으로 제각각인데, 지금 앱의 상태색(초록·주황·빨강·파랑)과 의미가 맞지 않는다. 앱용은 배경을 빼고 상태색 테두리만 쓴다. 윗단 가게 안의 일본풍 노렌(천 가림막)은 한국 쌀가게 소품(멍석·가마니·됫박)으로 바꾼다.</div>
+      </div>
+    </article>
+  </div>
+</section>
+
+<section>
+  <h2>추천 조합</h2>
+  <div class="combo">
+    <div><div class="k">B</div><div class="v">랜딩 첫 화면 (쌀알 행렬로 재생성)</div></div>
+    <div><div class="k">H</div><div class="v">풍자 메인 (C·D 통합)</div></div>
+    <div><div class="k">H′</div><div class="v">앱 저울 상황판</div></div>
+    <div><div class="k">A·G</div><div class="v">앱 마스코트·작업 액션</div></div>
+    <div><div class="k">D</div><div class="v">SNS 밈</div></div>
+  </div>
+</section>
+
+<section>
+  <h2>풍자 근거 (공식 문구만)</h2>
+  <div class="box">
+    <table>
+      <tr><th>사실 (OpenAI 공식 안내 요지)</th><th>풍자 각도</th></tr>
+      <tr><td class="fact">Pro 200 신규 가입을 다시 열었지만, 그랜드파더링 대상이 아닌 신규 가입은 <i>"a lower usage allowance"</i>. 가격은 월 $200 그대로.</td><td>질소과자 — 봉지 값은 그대로, 과자는 줄었다.</td></tr>
+      <tr><td class="fact">사유: <i>"to reflect our increasingly efficient models"</i></td><td>모델이 효율적이 되어서 내 몫이 줄었다.</td></tr>
+      <tr><td class="fact">기존 가입자는 2026-10-29까지만 이전 사용량, 이후 낮은 사용량으로 이동. 가격 유지.</td><td>유통기한 있는 혜택 (랜딩 배너용, 출시일과 무관).</td></tr>
+      <tr><td class="fact">같은 모델 기준 Fast 모드는 2.5배, GPT-6 Astra Ultrafast는 8배 속도로 사용량 차감.</td><td>속도세 — 빨리 가면 통행료 8배.</td></tr>
+      <tr><td class="fact">새 Pro 500($500/월)에만 Ultrafast 포함.</td><td>윗칸 진열 — 결론은 늘 더 비싼 봉지.</td></tr>
+    </table>
+    <p style="margin:14px 0 0;font-size:13px;color:var(--muted)">출처: OpenAI Help Center, <a href="https://help.openai.com/en/articles/9793128-about-chatgpt-pro-tiers" target="_blank">About ChatGPT Pro tiers</a> · 확인 2026-10-03. 게시 직전 원문을 다시 확인하고 날짜를 갱신한다. 문서에 없는 수치("N% 감소" 등)는 쓰지 않는다.</p>
+  </div>
+</section>
+
+<section>
+  <h2>캠페인 카피 초안</h2>
+  <div class="patch">
+    <div class="h">[Pro 200] 밸런스 패치 v2026.9</div>
+    가격 ........ 변경 없음<br>
+    사용량 ...... <span class="down">하향 ▼</span><br>
+    사유 ........ 모델이 너무 효율적이어서<br>
+    <br>
+    <div class="h">[Ojak] 대응 패치</div>
+    깍이 ........ 남은 한도, 리셋 전에 끝까지 나름<br>
+    낭비 ........ 0%를 목표로 함<br>
+    우회 ........ 안 함. 내가 낸 만큼만, 남김없이.
+    <div class="src">원문: "a lower usage allowance … to reflect our increasingly efficient models" — help.openai.com/en/articles/9793128 (2026-10-03 확인)</div>
+  </div>
+</section>
+
+<section>
+  <h2>지킬 선</h2>
+  <div class="grid2">
+    <div class="box"><h3 style="margin-top:0">쓴다</h3><ul class="plain ok">
+      <li>내가 낸 한도를 남김없이 · 리셋 전에 끝까지</li>
+      <li>여러 구독 계정의 사용량을 한눈에</li>
+      <li>본인 계정 전용 · 로컬에서만 동작</li>
+      <li>공식 문구 인용 + 출처 링크 + 확인 날짜</li>
+      <li>진지 모드 (마스코트·게임 용어 한 번에 끄기)</li>
+    </ul></div>
+    <div class="box"><h3 style="margin-top:0">쓰지 않는다</h3><ul class="plain no">
+      <li>한도 우회 · 무제한 · 계정 돌려쓰기 · rate limit 회피</li>
+      <li>타사 로고·색·글꼴 흉내, 사람 조롱</li>
+      <li>제3자 추정 수치</li>
+      <li>앱 안 문구에 경쟁사 이름 (풍자는 랜딩·SNS에만)</li>
+      <li>공유 카드·스크린샷에 이메일·프롬프트·경로</li>
+    </ul></div>
+  </div>
+  <div class="note" style="margin-top:16px">공개 전 확인: 약관 해석(여러 구독 운영, omp 브릿지) 법무 검토. AI 이미지 이용 조건은 2026-10-07에 OpenAI 이용약관(2026-01-01, 산출물 권리는 이용자)으로 확인했다. 기존 저작물 유사성은 약관이 보장하지 않는다. Galmuri 글꼴 파일은 이 저장소에 없다.</div>
+</section>
+
+<section>
+  <h2>다음 결정</h2>
+  <div class="box"><ul class="plain">
+    <li><b>시안 선택</b>: 추천 조합(B·C·A·D·E′)으로 갈지, 다른 장면을 더 뽑을지</li>
+    <li><b>E 재작업</b>: "정상 통과" 버전으로 다시 그릴지, 속도세는 텍스트 카피로만 쓸지</li>
+    <li><b>영문 카피</b>: 랜딩 영문 버전을 같이 진행할지</li>
+    <li><b>랜딩</b>: 별도 URL에서 진행 (사용자 담당)</li>
+  </ul></div>
+</section>
+
+<footer>Ojak · lio by lapal — 컨셉 문서. 이미지는 AI 생성 시안이며 최종 원화가 아닙니다. 생성 프롬프트: <a href="prompt-v1.md">prompt-v1.md</a> · 상세 스펙: <code>docs/specs/2026-10-03-brand-fun-pixel.md</code></footer>
+</main>
+</body>
+</html>

@@ -1,0 +1,30 @@
+[package]
+name = "aam-launcher"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+authors.workspace = true
+description.workspace = true
+repository.workspace = true
+homepage.workspace = true
+
+[lib]
+name = "aam_launcher"
+
+[[bin]]
+name = "aam"
+path = "src/main.rs"
+
+[dependencies]
+aam-protocol = { path = "../protocol" }
+aam-adapters = { path = "../adapters" }
+serde.workspace = true
+serde_json.workspace = true
+libc.workspace = true
+sha2.workspace = true
+toml = "0.8"
+uuid.workspace = true
+clap = { version = "4.5", features = ["derive"] }
+
+[target.'cfg(windows)'.dependencies]
+windows-sys = { version = "0.59", features = ["Win32_Foundation", "Win32_System_Console", "Win32_System_Environment", "Win32_System_Registry", "Win32_System_Threading", "Win32_UI_WindowsAndMessaging"] }

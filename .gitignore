@@ -1,0 +1,12 @@
+/target/
+/node_modules/
+**/node_modules/
+/apps/desktop/dist/
+/apps/desktop/src-tauri/binaries/
+/apps/desktop/src-tauri/gen/
+/artifacts/
+.DS_Store
+.env*
+.omp/
+.claude/
+apps/desktop/src-tauri/tauri.local-build.conf.json

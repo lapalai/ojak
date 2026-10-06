@@ -1,0 +1,26 @@
+version: 2
+updates:
+  - package-ecosystem: cargo
+    directory: "/"
+    schedule:
+      interval: weekly
+    open-pull-requests-limit: 5
+  - package-ecosystem: npm
+    directory: "/"
+    schedule:
+      interval: weekly
+    open-pull-requests-limit: 5
+  # Workflows pin actions to commit SHAs. The trailing comment is the version
+  # Dependabot should keep in sync. Do not switch those uses: lines back to
+  # floating tags. Current comments: actions/checkout v4.4.0,
+  # actions/setup-node v4.4.0, swatinem/rust-cache v2.9.2,
+  # actions/upload-artifact v4.6.2, actions/download-artifact v4.3.0.
+  # dtolnay/rust-toolchain is pinned to a SHA with comment "stable" and
+  # toolchain: stable. It has no semver tag, so it is ignored here.
+  - package-ecosystem: github-actions
+    directory: "/"
+    schedule:
+      interval: weekly
+    open-pull-requests-limit: 5
+    ignore:
+      - dependency-name: "dtolnay/rust-toolchain"

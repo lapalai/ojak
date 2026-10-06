@@ -1,0 +1,5 @@
+blank_issues_enabled: false
+contact_links:
+  - name: 보안 문제 / Security issue
+    url: https://github.com/lapalai/ojak/security/advisories/new
+    about: 공개 이슈로 올리지 마세요. 절차는 SECURITY.md입니다. Discussions는 없습니다. / Do not open a public issue. See SECURITY.md. Discussions are not enabled.

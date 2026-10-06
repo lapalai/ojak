@@ -1,0 +1,106 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1024 1024" width="1024" height="1024">
+  <!-- Ojak (오작) — 오작교, the magpie bridge. Plate inset 100px, corner radius 185 (macOS icon grid). -->
+  <defs>
+    <linearGradient id="sky" x1="0" y1="0" x2="0" y2="1">
+      <stop offset="0" stop-color="#3C4098"/>
+      <stop offset="0.55" stop-color="#1F2264"/>
+      <stop offset="1" stop-color="#0E1037"/>
+    </linearGradient>
+    <linearGradient id="gloss" x1="0" y1="0" x2="0" y2="1">
+      <stop offset="0" stop-color="#FFFFFF" stop-opacity="0.16"/>
+      <stop offset="0.4" stop-color="#FFFFFF" stop-opacity="0"/>
+    </linearGradient>
+    <radialGradient id="milky" cx="0.5" cy="0.5" r="0.5">
+      <stop offset="0" stop-color="#D2D7FF" stop-opacity="0.26"/>
+      <stop offset="0.55" stop-color="#D2D7FF" stop-opacity="0.08"/>
+      <stop offset="1" stop-color="#D2D7FF" stop-opacity="0"/>
+    </radialGradient>
+    <radialGradient id="starglow" cx="0.5" cy="0.5" r="0.5">
+      <stop offset="0" stop-color="#FF5DAD" stop-opacity="0.6"/>
+      <stop offset="0.35" stop-color="#FF5DAD" stop-opacity="0.2"/>
+      <stop offset="1" stop-color="#FF5DAD" stop-opacity="0"/>
+    </radialGradient>
+    <linearGradient id="arch" x1="0" y1="0" x2="0" y2="1">
+      <stop offset="0" stop-color="#FFFFFF"/>
+      <stop offset="1" stop-color="#D9DDF3"/>
+    </linearGradient>
+    <filter id="shadow" x="-20%" y="-20%" width="140%" height="140%">
+      <feGaussianBlur in="SourceAlpha" stdDeviation="18"/>
+      <feOffset dy="14" result="blur"/>
+      <feFlood flood-color="#000000" flood-opacity="0.32"/>
+      <feComposite in2="blur" operator="in"/>
+    </filter>
+    <clipPath id="plate">
+      <rect x="100" y="100" width="824" height="824" rx="185"/>
+    </clipPath>
+  </defs>
+
+  <!-- Plate shadow + plate -->
+  <rect x="100" y="100" width="824" height="824" rx="185" fill="#000000" filter="url(#shadow)"/>
+  <rect x="100" y="100" width="824" height="824" rx="185" fill="url(#sky)"/>
+
+  <g clip-path="url(#plate)">
+    <!-- Milky Way band -->
+    <ellipse cx="512" cy="430" rx="640" ry="190" fill="url(#milky)" transform="rotate(-20 512 430)"/>
+    <!-- Stars -->
+    <g fill="#FFFFFF">
+      <circle cx="300" cy="200" r="5" opacity="0.7"/>
+      <circle cx="402" cy="152" r="3.5" opacity="0.5"/>
+      <circle cx="470" cy="238" r="4" opacity="0.6"/>
+      <circle cx="642" cy="182" r="6" opacity="0.8"/>
+      <circle cx="722" cy="252" r="3.5" opacity="0.5"/>
+      <circle cx="842" cy="192" r="4.5" opacity="0.6"/>
+      <circle cx="182" cy="422" r="3.5" opacity="0.5"/>
+      <circle cx="882" cy="424" r="4" opacity="0.55"/>
+      <circle cx="152" cy="562" r="3" opacity="0.4"/>
+      <circle cx="898" cy="602" r="3.5" opacity="0.45"/>
+      <circle cx="562" cy="302" r="3" opacity="0.5"/>
+      <circle cx="352" cy="332" r="3" opacity="0.45"/>
+      <circle cx="742" cy="382" r="4" opacity="0.5"/>
+      <circle cx="242" cy="642" r="3" opacity="0.35"/>
+      <circle cx="822" cy="702" r="3" opacity="0.3"/>
+      <circle cx="512" cy="132" r="3" opacity="0.4"/>
+    </g>
+    <!-- Top gloss -->
+    <rect x="100" y="100" width="824" height="824" fill="url(#gloss)"/>
+  </g>
+  <rect x="101" y="101" width="822" height="822" rx="184" fill="none" stroke="#FFFFFF" stroke-opacity="0.09" stroke-width="2"/>
+
+  <!-- 견우·직녀: two pink stars the bridge joins -->
+  <g>
+    <circle cx="232" cy="316" r="92" fill="url(#starglow)"/>
+    <path d="M232 286 Q232 316 262 316 Q232 316 232 346 Q232 316 202 316 Q232 316 232 286 Z" fill="#FF5DAD"/>
+    <circle cx="232" cy="316" r="9" fill="#FFD3E8"/>
+    <circle cx="792" cy="296" r="92" fill="url(#starglow)"/>
+    <path d="M792 266 Q792 296 822 296 Q792 296 792 326 Q792 296 762 296 Q792 296 792 266 Z" fill="#FF5DAD"/>
+    <circle cx="792" cy="296" r="9" fill="#FFD3E8"/>
+  </g>
+
+  <!-- Bridge arch -->
+  <path d="M212 770 A300 230 0 0 1 812 770" fill="none" stroke="url(#arch)" stroke-width="76" stroke-linecap="round"/>
+
+  <!-- Magpie perched on the crown, facing right -->
+  <g id="magpie" transform="translate(540 508) scale(1.15) translate(-540 -512)">
+    <!-- white belly (upper edge hidden under the cape); navy rim separates it from the arch -->
+    <path fill="#FFFFFF" stroke="#1F2264" stroke-width="12" stroke-linejoin="round" paint-order="stroke" d="M440 440
+      C480 420 600 420 638 456
+      C638 496 606 520 560 520
+      C514 520 476 500 458 470
+      C450 458 440 450 440 440 Z"/>
+    <!-- black head, breast, back, wing and tail -->
+    <path fill="#0A0C24" d="M664 376
+      L628 358
+      C616 320 566 316 546 342
+      C528 360 500 386 468 402
+      C418 414 348 446 288 478
+      C280 490 282 500 292 508
+      C358 496 424 478 466 470
+      C510 504 575 504 614 474
+      C626 450 630 420 622 402
+      C636 392 650 386 664 376 Z"/>
+    <!-- white scapular patch -->
+    <ellipse cx="520" cy="428" rx="34" ry="15" fill="#FFFFFF" transform="rotate(-20 520 428)"/>
+    <!-- eye -->
+    <circle cx="598" cy="354" r="5" fill="#3C4098"/>
+  </g>
+</svg>

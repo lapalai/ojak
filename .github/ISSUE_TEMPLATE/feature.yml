@@ -1,0 +1,21 @@
+name: 기능 제안 / Feature request
+description: 새 기능이나 개선 / New feature or improvement
+labels: [enhancement]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        한도 우회, 계정 공유, API 키·다른 공급자로의 자동 전환처럼 인증을 우회하는 기능은 받지 않습니다.
+        Requests that evade limits, share accounts, or bypass authentication will be closed.
+  - type: textarea
+    id: problem
+    attributes:
+      label: 어떤 문제를 풀고 싶나요? / What problem does this solve?
+    validations:
+      required: true
+  - type: textarea
+    id: idea
+    attributes:
+      label: 제안 / Proposal
+    validations:
+      required: true

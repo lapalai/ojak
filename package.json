@@ -1,0 +1,29 @@
+{
+  "name": "ai-account-manager",
+  "private": true,
+  "version": "0.1.1",
+  "description": "Local menu-bar and tray app that assigns your own Claude Code, Codex, and omp subscription accounts",
+  "author": "lapal",
+  "license": "MIT",
+  "homepage": "https://github.com/lapalai/ojak",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/lapalai/ojak.git"
+  },
+  "bugs": {
+    "url": "https://github.com/lapalai/ojak/issues"
+  },
+  "type": "module",
+  "workspaces": [
+    "apps/desktop"
+  ],
+  "scripts": {
+    "dev": "node scripts/dev.mjs",
+    "build": "node scripts/build.mjs",
+    "typecheck": "npm --workspace apps/desktop run typecheck",
+    "test:desktop": "npm --workspace apps/desktop run test"
+  },
+  "devDependencies": {
+    "@tauri-apps/cli": "^2.10.0"
+  }
+}
