@@ -326,7 +326,9 @@ pub(crate) fn choose(
             .iter()
             .enumerate()
             .filter(|(_, candidate)| {
+                // 사용자가 제외한(enabled=false) 계정에는 절대 과금 경로를 쓰지 않는다. 일반 경로와 같은 조건이다.
                 candidate.healthy
+                    && candidate.enabled
                     && !tried.contains(&candidate.key)
                     && !blocked(blocks, &candidate.key, scope.as_deref(), now)
                     && candidate.paid_fallback.is_some_and(|fresh_ms| paid_cover(&candidate.buckets, model, now, fresh_ms))
@@ -1978,6 +1980,33 @@ mod tests {
         // 모델 전용 한도 소진은 공용 크레딧이 대신 받지 않는다.
         let model_only = Candidate { paid_fallback: Some(fresh), ..candidate("paid", vec![bucket("7d", None, 20.0, 5 * DAY, now), bucket("spark", Some("fable"), 100.0, DAY, now)]) };
         assert_eq!(choose(&[model_only], "anthropic", "claude-fable-5-1", None, &none, &[], &[], 0.0, now), None);
+    }
+
+    #[test]
+    fn disabled_accounts_are_never_billed_through_paid_fallback() {
+        let now = 1_000_000_000_000;
+        let fresh = 900_000;
+        let none = HashMap::new();
+        let spent = |key: &str, enabled: bool| Candidate {
+            enabled,
+            paid_fallback: Some(fresh),
+            ..candidate(key, vec![bucket("7d", None, 100.0, DAY, now)])
+        };
+        // 사용자가 제외한 계정 하나뿐이면 크레딧이 있어도 고르지 않는다.
+        assert_eq!(choose(&[spent("off", false)], "openai-codex", "gpt-6-astra", None, &none, &[], &[], 0.0, now), None);
+        // 제외한 계정과 쓸 수 있는 소진 계정이 섞여 있으면 활성 계정만 고른다(순서와 무관하게).
+        let pool = [spent("off", false), spent("on", true)];
+        assert_eq!(choose(&pool, "openai-codex", "gpt-6-astra", None, &none, &[], &[], 0.0, now), Some(1));
+        let reversed = [spent("on", true), spent("off", false)];
+        assert_eq!(choose(&reversed, "openai-codex", "gpt-6-astra", None, &none, &[], &[], 0.0, now), Some(0));
+        // 제외한 계정에 세션이 붙어 있어도 그 계정으로 계속 보내지 않는다.
+        let mut stickies = HashMap::new();
+        stickies.insert("s".to_owned(), Sticky { key: "off".into(), model: "gpt-6-astra".into(), cwd: None, last_used: now, requests: 2 });
+        assert_eq!(choose(&pool, "openai-codex", "gpt-6-astra", Some("s"), &stickies, &[], &[], 0.0, now), Some(1));
+        assert_eq!(choose(&[spent("off", false)], "openai-codex", "gpt-6-astra", Some("s"), &stickies, &[], &[], 0.0, now), None);
+        // 추가 사용량(Claude)도 같다.
+        let claude_off = Candidate { enabled: false, paid_fallback: Some(fresh), ..candidate("off", vec![bucket("7d", None, 100.0, DAY, now)]) };
+        assert_eq!(choose(&[claude_off], "anthropic", "claude-opus-5-5", None, &none, &[], &[], 0.0, now), None);
     }
 
     #[test]

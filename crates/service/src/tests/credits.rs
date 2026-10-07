@@ -79,6 +79,28 @@ fn credits_account_is_a_last_resort_behind_every_account_with_subscription_left(
 }
 
 #[test]
+fn accounts_the_user_excluded_are_never_billed_even_when_credits_exist() {
+    let now = now_ms();
+    let mut off = codex_account("off", now);
+    spend(&mut off);
+    off.credits = Some(credits(now));
+    off.enabled = false;
+    // 제외한 계정 하나뿐이면 옵트인이 켜져 있어도 선택되지 않는다.
+    let alone = scheduler::decide(std::slice::from_ref(&off), &[], &on(), &codex_intent(), now).unwrap();
+    assert_eq!(alone.selected_account_id, None);
+    assert!(!scheduler::chose_credits(&alone));
+    assert!(reasons(&alone, "off").iter().any(|reason| reason.starts_with("ACCOUNT_DISABLED")));
+    // 활성 크레딧 계정과 섞여 있으면 활성 계정만 고른다.
+    let mut on_account = codex_account("on", now);
+    spend(&mut on_account);
+    on_account.credits = Some(credits(now));
+    let mixed = scheduler::decide(&[off.clone(), on_account.clone()], &[], &on(), &codex_intent(), now).unwrap();
+    assert_eq!(mixed.selected_account_id.as_deref(), Some("on"));
+    let reversed = scheduler::decide(&[on_account, off], &[], &on(), &codex_intent(), now).unwrap();
+    assert_eq!(reversed.selected_account_id.as_deref(), Some("on"));
+}
+
+#[test]
 fn missing_stale_or_unconfirmed_credits_are_not_available() {
     let now = now_ms();
     let pick = |mutate: &dyn Fn(&mut Account)| {
