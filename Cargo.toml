@@ -4,7 +4,7 @@ members = ["crates/protocol", "crates/adapters", "crates/service", "crates/launc
 default-members = ["crates/protocol", "crates/adapters", "crates/service", "crates/launcher"]
 
 [workspace.package]
-version = "0.1.1"
+version = "0.2.0"
 edition = "2021"
 license = "MIT"
 authors = ["lapal"]

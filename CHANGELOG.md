@@ -2,7 +2,7 @@
 
 규칙은 `docs/release-policy.md`를 따른다.
 
-## 다음 버전
+## 0.2.0 (2026-10-07)
 - DMG로 앱만 바꿔 설치하면 화면은 새 버전인데 예전 서비스가 남던 문제를 알려 줍니다. 서비스가 버전을 알리고, 앱과 다르거나 알 수 없으면(이 기능 이전 서비스) 대시보드에 [서비스 다시 시작] 안내가 뜹니다. 누를 때만 쓰는 중인 세션이 없는지 확인하고 다시 시작하며, 끝나면 버전이 맞는지 확인합니다. `aam service restart`, `aam service status`의 서비스 버전 줄, `aam setup --check`의 `serviceVersionMismatch`도 같은 기준입니다. 조용히 재시작하지 않습니다.
 - 화면 문구는 한국어·영어·인도네시아어 모두 짧고 자연스러운 말투로 다듬었고, 내부 용어(broker·bridge·gateway·shim)는 사용자 문구에서 뺐습니다. CLI(`aam`)·서비스·설치기가 내는 메시지는 아직 한국어로만 나옵니다.
 - 화면의 오류 안내가 표시 언어로 나옵니다. `AUTH_OVERRIDE_CONFLICT`·`BRIDGE_NOT_READY`·`NO_ELIGIBLE_ACCOUNT`·`UPDATE_FAILED`·`SERVICE_START_TIMEOUT` 등 약 200개 오류 코드에 무엇이 일어났고 다음에 무엇을 하면 되는지 짧게 적었습니다. CLI·서비스가 보낸 한국어 원문은 오류 아래 접힌 "자세히"에 그대로 남아 변수 이름·옵션 이름·경로를 확인할 수 있고 지원 문의에 쓸 수 있습니다. 새 코드나 아직 안내가 없는 코드는 예전처럼 원문을 그대로 보여 줍니다. 앱이 `aam` 실패를 받을 때 오류 코드를 잃던 문제(모두 `INSTALLATION_ERROR`)도 고쳤습니다.
