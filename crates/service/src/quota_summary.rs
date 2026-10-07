@@ -1,5 +1,5 @@
 //! Current quota facts, not an admission promise: model/project/capacity checks remain in the scheduler.
-use aam_protocol::{Account, AccountQuotaSummary, ExpiringQuota, Policy, QuotaBucket};
+use aam_protocol::{Account, AccountQuotaSummary, CreditsSummary, ExpiringQuota, ExtraUsageSummary, Policy, QuotaBucket};
 use crate::bridge::BlockStatus;
 use std::collections::{BTreeMap, BTreeSet};
 
@@ -102,10 +102,51 @@ fn matches_block(account: &Account, block: &BlockStatus) -> bool {
             .is_some_and(|subject| block.email.eq_ignore_ascii_case(&format!("account:{subject}")))
 }
 
+/// 같은 실제 계정 묶음에서 신선한 추가 사용량(USD) 관측 중 가장 최근 것. 꺼져 있거나 오래됐으면 `None`.
+fn extra_usage_of(members: &[&Account], policy: &Policy, now: i64) -> Option<ExtraUsageSummary> {
+    let freshness = policy.stale_after_seconds.saturating_mul(1000).min(i64::MAX as u64) as i64;
+    members
+        .iter()
+        .filter(|account| account.provider == "anthropic" && account.enabled)
+        .filter_map(|account| account.extra_usage.as_ref())
+        .filter(|extra| {
+            extra.enabled
+                && extra.observed_at > 0
+                && extra.observed_at <= now.saturating_add(30_000)
+                && now.saturating_sub(extra.observed_at) <= freshness
+        })
+        .max_by_key(|extra| extra.observed_at)
+        .map(|extra| ExtraUsageSummary {
+            active: false,
+            used_usd: extra.used_usd,
+            limit_usd: extra.limit_usd,
+            limit_reached: !extra.usable(now, policy.stale_after_seconds),
+        })
+}
+
+/// 같은 실제 계정 묶음에서 신선하고 명시된 크레딧 관측 중 가장 최근 것. 오래됐거나 없으면 `None`.
+fn credits_of(members: &[&Account], policy: &Policy, now: i64) -> Option<CreditsSummary> {
+    members
+        .iter()
+        .filter(|account| account.tool == "codex" && account.enabled)
+        .filter_map(|account| account.credits.as_ref())
+        .filter(|credits| credits.usable(now, policy.stale_after_seconds))
+        .max_by_key(|credits| credits.observed_at)
+        .map(|credits| CreditsSummary { active: false, unlimited: credits.unlimited, balance: credits.balance.clone() })
+}
+
+/// 구독 한도가 남아 새 작업을 받을 수 있어 보이는 묶음인지.
+fn has_subscription_left(summary: &AccountQuotaSummary) -> bool {
+    matches!(summary.kind.as_str(), "available" | "reserve" | "partial")
+}
+
+/// 스냅샷마다 새로 계산한다. 크레딧 사용 상태를 저장하지 않으므로 한도가 리셋되거나 관측이 오래되면 배지가 곧 사라진다.
 pub(crate) fn summaries(accounts: &[Account], policy: &Policy, blocks: &[BlockStatus], now: i64) -> Vec<AccountQuotaSummary> {
     let groups = groups(accounts);
-    groups.iter().map(|members| {
-        let mut result = AccountQuotaSummary { account_ids: members.iter().map(|a| a.id.clone()).collect(), kind: "unknown".into(), until: None, models: vec![], label: None, rate: false, expiring: None };
+    let mut results: Vec<AccountQuotaSummary> = groups.iter().map(|members| {
+        let mut result = AccountQuotaSummary { account_ids: members.iter().map(|a| a.id.clone()).collect(), kind: "unknown".into(), until: None, models: vec![], label: None, rate: false, expiring: None, credits: None, extra_usage: None };
+        result.credits = credits_of(members, policy, now);
+        result.extra_usage = extra_usage_of(members, policy, now);
         if members.iter().all(|a| !a.enabled) { result.kind = "excluded".into(); return result; }
         if members.iter().filter(|a| a.enabled).all(|a| a.auth_status == "auth-required") { result.kind = "login".into(); return result; }
         // The newest observation wins for the same upstream bucket; different buckets remain independent.
@@ -150,5 +191,31 @@ pub(crate) fn summaries(accounts: &[Account], policy: &Policy, blocks: &[BlockSt
         else if let Some(label) = reserve { result.kind = "reserve".into(); result.label = Some(label); }
         else { result.kind = "available".into(); }
         result
-    }).collect()
+    }).collect();
+    // 구독 한도가 남은 Codex 묶음이 하나라도 있으면 스케줄러는 크레딧 계정을 고르지 않는다. 표시도 같은 기준이다.
+    let codex_left = groups.iter().zip(&results).any(|(members, summary)| members.iter().any(|a| a.tool == "codex") && has_subscription_left(summary));
+    if policy.use_credits_after_limit && !codex_left {
+        for summary in &mut results {
+            // 속도 제한(rate)만으로 쉬는 묶음은 구독 한도 소진이 아니므로 크레딧 사용으로 보지 않는다.
+            if summary.kind == "resting" && !summary.rate {
+                if let Some(credits) = summary.credits.as_mut() {
+                    credits.active = true;
+                    summary.kind = "credits".into();
+                }
+            }
+        }
+    }
+    // Claude 추가 사용량은 Codex 크레딧과 단위(USD)·의미가 달라 따로 계산한다. 상한에 닿은 묶음은 쓸 수 없으므로 켜지 않는다.
+    let claude_left = groups.iter().zip(&results).any(|(members, summary)| members.iter().any(|a| a.provider == "anthropic") && has_subscription_left(summary));
+    if policy.use_extra_usage_after_limit && !claude_left {
+        for summary in &mut results {
+            if summary.kind == "resting" && !summary.rate {
+                if let Some(extra) = summary.extra_usage.as_mut().filter(|extra| !extra.limit_reached) {
+                    extra.active = true;
+                    summary.kind = "extra".into();
+                }
+            }
+        }
+    }
+    results
 }

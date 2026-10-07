@@ -74,6 +74,54 @@ pub(crate) fn short_window(bucket: &QuotaBucket) -> bool {
     .any(|part| text.contains(part))
 }
 
+/// 크레딧 fallback(codex)으로 고른 후보에 붙는 이유 코드.
+pub(crate) const CREDITS_FALLBACK: &str = "CREDITS_FALLBACK";
+/// 추가 사용량 fallback(claude)으로 고른 후보에 붙는 이유 코드.
+pub(crate) const EXTRA_USAGE_FALLBACK: &str = "EXTRA_USAGE_FALLBACK";
+
+fn chose_with(decision: &Decision, code: &str) -> bool {
+    decision.selected_account_id.as_ref().is_some_and(|id| {
+        decision.candidates.iter().any(|candidate| {
+            &candidate.account_id == id && candidate.reasons.iter().any(|reason| reason.starts_with(code) && reason[code.len()..].starts_with(':'))
+        })
+    })
+}
+
+/// 이 판정이 크레딧 fallback으로 계정을 골랐는지.
+pub(crate) fn chose_credits(decision: &Decision) -> bool {
+    chose_with(decision, CREDITS_FALLBACK)
+}
+
+/// 이 판정이 추가 사용량 fallback으로 계정을 골랐는지.
+pub(crate) fn chose_extra_usage(decision: &Decision) -> bool {
+    chose_with(decision, EXTRA_USAGE_FALLBACK)
+}
+
+/// 한도를 다 썼다는 관측이 지금도 믿을 만한지. 신선하고 리셋 시각이 남아 있어야 한다.
+/// 크레딧 fallback과 브릿지가 같은 기준을 쓴다. 리셋 시각이 지났거나 관측이 오래되면 false다.
+pub(crate) fn exhausted_observation_fresh(bucket: &QuotaBucket, now: i64, freshness_ms: i64) -> bool {
+    bucket.status == "exhausted"
+        && bucket.observed_at > 0
+        && bucket.observed_at <= now.saturating_add(30_000)
+        && now.saturating_sub(bucket.observed_at) <= freshness_ms
+        && bucket.resets_at.is_some_and(|reset| reset > now)
+}
+
+/// 크레딧 fallback을 켠 정책에서 이 계정의 크레딧을 쓸 수 있는지. 신선한 관측이 명시적으로 알려 줄 때만 true다.
+pub(crate) fn credits_usable(account: &Account, policy: &Policy, now: i64) -> bool {
+    policy.use_credits_after_limit
+        && account.tool == "codex"
+        && account.credits.as_ref().is_some_and(|credits| credits.usable(now, policy.stale_after_seconds))
+}
+
+/// 추가 사용량 fallback을 켠 정책에서 이 Claude 계정의 추가 사용량을 쓸 수 있는지.
+/// 신선한 관측에서 켜져 있고 상한이 없거나 아직 안 찼을 때만 true다.
+pub(crate) fn extra_usage_usable(account: &Account, policy: &Policy, now: i64) -> bool {
+    policy.use_extra_usage_after_limit
+        && account.tool == "claude"
+        && account.extra_usage.as_ref().is_some_and(|extra| extra.usable(now, policy.stale_after_seconds))
+}
+
 fn reason(code: &str, text: &str) -> String {
     format!("{code}: {text}")
 }
@@ -193,6 +241,12 @@ pub fn decide_with(
                 .map(|(rank, id)| (id.as_str(), rank))
                 .collect()
         });
+    // 크레딧(codex)·추가 사용량(claude) fallback 후보: 구독 한도만 막혀 있고 해당 과금 경로가 명시된 계정.
+    // 구독 계정이 하나도 없을 때만 쓴다. 두 경로는 단위가 달라 서로 섞지 않는다.
+    let credits_on = policy.use_credits_after_limit && !manual && intent.tool == "codex";
+    let extra_on = policy.use_extra_usage_after_limit && !manual && intent.tool == "claude";
+    let mut fallback_pool: Vec<(&Account, usize, i64, usize, bool)> = Vec::new();
+    let mut busy_subscription = false;
     let mut candidates = Vec::new();
     let mut ranked: Vec<(&Account, f64, usize, i64, bool)> = Vec::new();
     for account in accounts
@@ -319,6 +373,8 @@ pub fn decide_with(
             .stale_after_seconds
             .saturating_mul(1000)
             .min(i64::MAX as u64) as i64;
+        let mut any_exhausted = false;
+        let mut credits_cover = true;
         for bucket in &applicable {
             if bucket.status == "exhausted" || bucket.used_percent.is_some_and(|used| used >= 100.0)
             {
@@ -326,6 +382,8 @@ pub fn decide_with(
                     "QUOTA_EXHAUSTED",
                     "적용되는 한도를 다 썼어요.",
                 ));
+                any_exhausted = true;
+                credits_cover &= bucket.model.is_none() && exhausted_observation_fresh(bucket, now, freshness_ms);
                 continue;
             }
             if policy.safety_reserve_percent > 0.0 && bucket.used_percent.is_some_and(|used| {
@@ -363,6 +421,16 @@ pub fn decide_with(
         }
         exclusions.sort();
         exclusions.dedup();
+        // 한도는 남았지만 동시 사용 자리만 없는 계정이 있으면 크레딧으로 넘어가지 않고 자리를 기다린다.
+        busy_subscription |= exclusions.len() == 1 && exclusions[0].starts_with("CAPACITY_RESERVED:");
+        let fallback_kind = (credits_on && credits_usable(account, policy, now))
+            .then_some(false)
+            .or_else(|| (extra_on && extra_usage_usable(account, policy, now)).then_some(true));
+        if let Some(extra) = fallback_kind.filter(|_| {
+            any_exhausted && credits_cover && exclusions.len() == 1 && exclusions[0].starts_with("QUOTA_EXHAUSTED:")
+        }) {
+            fallback_pool.push((account, active, last, candidates.len(), extra));
+        }
         let eligible = exclusions.is_empty();
         let score = if eligible {
             // 모델 전용 bucket을 우선하고 공통 bucket은 별도 hard guard로 유지합니다.
@@ -496,7 +564,7 @@ pub fn decide_with(
     } else {
         ranked.iter().filter(|entry| expiring.contains(&entry.0.id.as_str())).collect()
     };
-    let selected_account_id = priority_account.or_else(|| {
+    let mut selected_account_id = priority_account.or_else(|| {
         // 다른 plan의 percentage는 처리량 비교 근거가 아닙니다. 먼저 plan별 공정 순서를 정합니다.
         let selected_plan = pool
             .iter()
@@ -514,6 +582,32 @@ pub fn decide_with(
             })
             .map(|entry| entry.0.id.clone())
     });
+    // 크레딧 fallback: 구독 한도가 남아 입장 가능한 계정이 하나도 없을 때만, 이번 판정에서 새로 계산해 고른다.
+    // 선택 상태를 저장하지 않으므로 리셋·회복 관측이 들어오면 다음 판정부터 곧바로 구독 계정이 이긴다.
+    if selected_account_id.is_none() && !busy_subscription {
+        let rank = |id: &str| priority_ranks.as_ref().and_then(|ranks| ranks.get(id).copied()).unwrap_or(usize::MAX);
+        if let Some((account, _, _, index, extra)) = fallback_pool
+            .iter()
+            .min_by(|a, b| (rank(&a.0.id), a.1, a.2, &a.0.id).cmp(&(rank(&b.0.id), b.1, b.2, &b.0.id)))
+        {
+            let candidate = &mut candidates[*index];
+            candidate.reasons.retain(|reason| !reason.starts_with("QUOTA_EXHAUSTED:"));
+            candidate.reasons.push(if *extra {
+                reason(
+                    EXTRA_USAGE_FALLBACK,
+                    "구독 한도를 다 써서 추가 사용량으로 배정해요. API 요금으로 과금될 수 있고, Ojak은 쓴 금액을 막을 수 없어요.",
+                )
+            } else {
+                reason(
+                    CREDITS_FALLBACK,
+                    "구독 한도를 다 써서 크레딧으로 배정해요. 크레딧은 OpenAI가 과금할 수 있고, Ojak은 쓴 금액을 볼 수 없어요.",
+                )
+            });
+            candidate.eligible = true;
+            candidate.score = Some(0.0);
+            selected_account_id = Some(account.id.clone());
+        }
+    }
     candidates.sort_by(|a, b| a.account_id.cmp(&b.account_id));
     Ok(Decision {
         pin_unavailable: provider_pin.filter(|_| pinned_account.is_none()).map(|pin| pin.id.clone()),

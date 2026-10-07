@@ -636,10 +636,11 @@ pub fn service_install(paths: &Paths) -> Result<String, ApiError> {
                 call(paths, "service.resumeAdmission", json!({}))?;
                 previous.uninstall_permit = None;
                 save(&record_path, &previous)?;
-                return Ok(
-                    "같은 관리 서비스가 이미 실행 중이고, 새 배정을 다시 열었어요."
-                        .into(),
-                );
+                let mut message = String::from("같은 관리 서비스가 이미 실행 중이고, 새 배정을 다시 열었어요.");
+                if crate::service_version::read_report(paths).is_ok_and(|report| report.mismatch) {
+                    message.push_str(" 실행 중인 서비스 버전이 앱과 달라요. 쓰는 중인 세션이 없을 때 `aam service restart`로 다시 시작해 주세요.");
+                }
+                return Ok(message);
             }
             // 앱 이름이나 위치가 바뀌어 예전 서비스 실행 파일이 사라졌으면, 앱 소유 LaunchAgent를 새 위치로 옮깁니다.
             // 서비스 재시작과 같으며 실행 중인 세션과 lease 기록은 그대로 둡니다.
@@ -722,6 +723,42 @@ pub fn service_status(paths: &Paths) -> Result<String, ApiError> {
         if loaded { "등록됨" } else { "없음" },
         if healthy { "정상" } else { "연결 안 됨" }
     ))
+}
+
+/// 앱이 등록한 LaunchAgent만 `launchctl kickstart -k`로 다시 시작한다. 새 배정 차단·lease 검사는 호출한 쪽
+/// (`service_version::restart`)이 이미 했다. 앱이 설치한 기록과 plist가 그대로일 때만 하고, 실행 파일이 사라졌으면
+/// 서비스를 건드리지 않는다.
+#[cfg(unix)]
+pub(crate) fn service_kickstart(paths: &Paths) -> Result<(), ApiError> {
+    platform()?;
+    let Some(record): Option<ServiceInstall> = read_owned(&paths.home.join("service-install.json"))? else {
+        return Err(error(
+            "UNMANAGED_SERVICE",
+            "앱이 설치한 자동 실행 기록이 없어 서비스를 다시 시작하지 않았어요. `aam service install`로 먼저 등록해 주세요.",
+        ));
+    };
+    let expected = user_home()?.join("Library/LaunchAgents").join(format!("{LABEL}.plist"));
+    if record.owner != OWNER || record.plist_path != expected {
+        return Err(error("FOREIGN_INSTALL", "앱이 설치한 자동 실행 기록이 아니라서 다시 시작하지 않았어요."));
+    }
+    if fs::symlink_metadata(&expected).map_err(io_error)?.file_type().is_symlink()
+        || fs::read_to_string(&expected).map_err(io_error)? != record.plist_contents
+    {
+        return Err(error("LAUNCH_AGENT_MODIFIED", "사용자가 바꾼 자동 실행은 다시 시작하지 않아요."));
+    }
+    if !record.binary_path.exists() {
+        return Err(error(
+            "BINARY_MISSING",
+            "등록된 서비스 파일이 없어요. 서비스는 그대로 뒀어요. `aam service install`로 이 앱의 서비스를 다시 등록해 주세요.",
+        ));
+    }
+    if !launchctl(&["print".into(), target()])? {
+        return Err(error("SERVICE_NOT_LOADED", "자동 실행이 등록돼 있지 않아요. `aam service install`로 먼저 등록해 주세요."));
+    }
+    if !launchctl(&["kickstart".into(), "-k".into(), target()])? {
+        return Err(error("SERVICE_RESTART_FAILED", "서비스를 다시 시작하지 못했어요. 서비스는 그대로 뒀어요. 잠시 뒤 다시 시도해 주세요."));
+    }
+    Ok(())
 }
 
 #[cfg(unix)]

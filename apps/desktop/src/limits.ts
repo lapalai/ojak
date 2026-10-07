@@ -73,3 +73,16 @@ export function allResting(verdicts: { kind: string; until: number | null; off: 
   return { until: times.length ? Math.min(...times) : null };
 }
 
+/// Codex 크레딧 잔액을 "N개"로 보일 숫자로. 숫자로 읽히고 반올림해 1 이상일 때만(Codex /status와 같은 반올림). 금액이 아니다.
+export function creditCount(balance: string | null | undefined): number | null {
+  if (balance === null || balance === undefined) return null;
+  const text = balance.trim();
+  if (!/^\d+(\.\d+)?$/.test(text)) return null;
+  const rounded = Math.round(Number(text));
+  return Number.isFinite(rounded) && rounded > 0 ? rounded : null;
+}
+
+/// Claude 추가 사용량 금액(USD). 쓴 금액은 센트까지, 상한은 정수면 정수로 보인다. 크레딧 표기와 섞지 않는다.
+export function usdUsed(value: number): string { return `$${value.toFixed(2)}`; }
+export function usdLimit(value: number): string { return Number.isInteger(value) ? `$${value}` : `$${value.toFixed(2)}`; }
+

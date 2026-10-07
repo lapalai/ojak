@@ -20,7 +20,7 @@ use aam_protocol::{
     ToolStatus, NATIVE_DEFAULT_MODEL,
 };
 use native::{blank_account, inspect, profile_env, OMP_GATE};
-use quota::{omp_buckets, provider_id, report_identity, stable_id, text};
+use quota::{omp_buckets, omp_extra_usage, provider_id, report_identity, stable_id, text};
 use serde_json::Value;
 use std::{
     collections::{BTreeMap, BTreeSet},
@@ -140,6 +140,8 @@ fn refresh_bound(old: &Account, binary: Option<&Path>) -> Account {
         }
         fresh.id = old.id.clone();
         fresh.omp_credential_pins = old.omp_credential_pins.clone();
+        // 추가 사용량은 omp 조회에서만 오므로 이 점검이 지우지 않는다. 관측 시각이 오래되면 쓰지 않는다.
+        fresh.extra_usage = old.extra_usage.clone();
         if fresh.buckets.is_empty() {
             fresh.buckets = old.buckets.clone();
             for bucket in &mut fresh.buckets {
@@ -251,6 +253,7 @@ fn add_omp_reports(
             continue;
         }
         let buckets = omp_buckets(report, &identity);
+        let extra_usage = omp_extra_usage(report);
         let matching: Vec<_> = result
             .accounts
             .iter()
@@ -265,6 +268,10 @@ fn add_omp_reports(
                     if !result.accounts[index].omp_credential_pins.contains(&pin) {
                         result.accounts[index].omp_credential_pins.push(pin);
                     }
+                }
+                // 추가 사용량은 Claude 계정에만 붙인다. 이번 보고에 없으면 켜졌다고 보지 않고 비운다.
+                if result.accounts[index].tool == "claude" {
+                    result.accounts[index].extra_usage = extra_usage.clone();
                 }
                 if result.accounts[index].tool != "codex"
                     || result.accounts[index].buckets.is_empty()
@@ -304,6 +311,7 @@ fn add_omp_reports(
             last_checked_at: buckets.iter().map(|b| b.observed_at).max().unwrap_or(0),
             omp_credential_pins: quota::credential_pin(report).into_iter().collect(),
             buckets,
+            extra_usage,
             ..Account::default()
         };
         if let Some(old) = old {

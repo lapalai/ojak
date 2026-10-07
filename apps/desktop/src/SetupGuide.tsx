@@ -1,11 +1,79 @@
 import { useEffect, useRef, useState } from "react";
 import { CheckCircle2, Circle, Loader2 } from "lucide-react";
-import { setupCheck, setupInstall, setupStatus, toApiError } from "./api";
-import type { SetupStatus } from "./api";
+import { ompBridgeAction, serviceRestart, serviceVersionStatus, setupCheck, setupInstall, setupStatus, toApiError } from "./api";
+import type { ServiceVersionReport, SetupStatus } from "./api";
 import { ActionFeedback, Modal } from "./components";
 import { useAction } from "./state";
 import type { ApiError, Snapshot } from "./types";
 import { setupNotice, t } from "./i18n";
+import { restartNeedsWarning, updateInterruptCounts } from "./updates";
+
+/// 서비스가 쓰는 중인 세션 때문에 거절하면 화면 언어로 바꿔 보여 준다. 그 밖의 오류는 서비스가 보낸 문장 그대로다.
+export function restartFailure(error: ApiError): ApiError {
+  return error.code === "SESSION_BUSY" ? { ...error, message: t("serviceVersion.busy"), retryable: true } : error;
+}
+
+/// 앱만 새로 덮어써서 예전 서비스가 남았을 때의 안내. 버튼은 하나이고, 누를 때만 안전하게 다시 시작한다(조용히 재시작하지 않는다).
+/// 서비스는 쓰는 중인 세션이 있으면 거절한다. 최근 15분 안에 쓴 omp 연결이 있으면 먼저 경고하고 한 번 더 누르게 한다.
+export function ServiceVersionNotice({ snapshot, onReload }: { snapshot: Snapshot | null; onReload: () => Promise<void> }) {
+  const [report, setReport] = useState<ServiceVersionReport | null>(null);
+  const [warn, setWarn] = useState<{ managed: number; bridge: number; unknown: boolean } | null>(null);
+  const [done, setDone] = useState<string | null>(null);
+  const action = useAction();
+  const startedAt = snapshot?.serviceStartedAt ?? 0;
+  const reported = snapshot?.serviceVersion ?? "";
+
+  useEffect(() => {
+    if (!snapshot) { setReport(null); return; }
+    let active = true;
+    void serviceVersionStatus().then(next => { if (active) setReport(next); }).catch(() => { if (active) setReport(null); });
+    return () => { active = false; };
+  }, [Boolean(snapshot), startedAt, reported]);
+  useEffect(() => {
+    if (!done) return;
+    const timer = window.setTimeout(() => setDone(null), 8000);
+    return () => window.clearTimeout(timer);
+  }, [done]);
+
+  const restart = (confirmed: boolean) => {
+    void action.run(async () => {
+      if (!confirmed) {
+        let bridgeSessions: { lastUsedAt: number }[] = [];
+        let unknown = false;
+        try { bridgeSessions = (await ompBridgeAction("status")).bridge?.sessions ?? []; } catch { unknown = true; }
+        const counts = updateInterruptCounts(snapshot?.sessions ?? [], bridgeSessions, Date.now());
+        // 쓰는 중인 관리 세션은 서비스가 직접 거절하고 이유를 알려 준다. 여기서는 서비스가 모르는 omp 연결만 미리 경고한다.
+        if (restartNeedsWarning(counts, unknown)) { setWarn({ managed: counts.managed, bridge: counts.bridge, unknown }); return undefined; }
+      }
+      setWarn(null);
+      try {
+        await serviceRestart();
+      } catch (failure) {
+        throw restartFailure(toApiError(failure));
+      }
+      // 다시 시작했다고 끝이 아니다. 새 서비스가 앱과 같은 버전인지 읽어서 확인한다.
+      const next = await serviceVersionStatus();
+      setReport(next);
+      if (next.mismatch) throw { code: "SERVICE_VERSION_STALE", message: t("serviceVersion.stale"), retryable: true } satisfies ApiError;
+      setDone(next.serviceVersion ?? next.appVersion);
+      await onReload();
+      return undefined;
+    });
+  };
+
+  if (done) return <div className="launch-notice" role="status"><CheckCircle2 size={16} /><span>{t("serviceVersion.done", { version: done })}</span></div>;
+  if (!report?.mismatch) return null;
+  return <div className="update-box service-version-notice" role="status">
+    <p><strong>{t("serviceVersion.title")}</strong></p>
+    <p>{t(report.serviceVersion ? "serviceVersion.body" : "serviceVersion.bodyUnknown", { service: report.serviceVersion ?? "", app: report.appVersion })}</p>
+    {warn && <p className="field-help warning-text">{warn.unknown ? t("update.warnUnknown") : t("update.warn", { managed: warn.managed, bridge: warn.bridge })}</p>}
+    <ActionFeedback error={action.error} message={null} />
+    <div className="update-actions">
+      <button type="button" className="primary" disabled={action.pending} onClick={() => restart(Boolean(warn))}>{action.pending ? <Loader2 size={14} className="spinner" /> : null}{t("serviceVersion.restart")}</button>
+      {warn && <button type="button" disabled={action.pending} onClick={() => setWarn(null)}>{t("update.later")}</button>}
+    </div>
+  </div>;
+}
 
 const SKIP_KEY = "ojak.setupSkipped";
 
@@ -88,6 +156,7 @@ export function SetupGuide({ snapshot, onAdd, onReload, request = 0, suspended =
         {!step.done && forStep(step.id).map(notice => <p key={`${notice.code}:${notice.tool ?? ""}`} className="field-help warning-text setup-next">{setupNotice(notice)}</p>)}
       </li>)}
     </ol>
+    {forStep("service-version").map(notice => <p key={notice.code} className="field-help warning-text setup-next">{setupNotice(notice)}</p>)}
     <div className="setup-body">
       {status.tools.map(tool => <p key={tool.tool}>
         <strong>{tool.tool}</strong> · {t(!tool.account ? "setup.stepAccount" : tool.verified === true ? "setup.verified" : tool.verified === false ? "setup.verifyFailed" : tool.connected ? "setup.configured" : "setup.notConnected")}

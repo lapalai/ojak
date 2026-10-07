@@ -1,6 +1,6 @@
 //! 첫 실행 준비. 앱의 준비 화면이 한 번의 동의로 서비스·명령 연결·터미널 PATH를 차례로 설치하고,
 //! 끝난 뒤 실제로 `claude`·`codex`가 관리 실행으로 이어지는지 점검한다.
-use crate::{install, read_snapshot};
+use crate::{install, read_snapshot, service_version};
 use aam_protocol::{ApiError, Paths};
 use serde::Serialize;
 #[cfg(not(windows))]
@@ -48,6 +48,8 @@ pub struct SetupStatus {
     pub ready: bool,
     /// 설치·점검이 남긴 경고. 성공만 알리는 문장은 넣지 않는다.
     pub notices: Vec<SetupNotice>,
+    /// 실행 중인 서비스 버전이 앱과 다르거나 알 수 없다(앱만 덮어쓴 경우). `aam service restart`로 맞춘다.
+    pub service_version_mismatch: bool,
 }
 
 struct VerifyFailure {
@@ -120,6 +122,16 @@ fn service_missing_failure() -> VerifyFailure {
     )
 }
 
+/// 서비스가 앱보다 예전이거나 버전을 알리지 못할 때의 안내. 서비스 단계와 분리해 설치 단계를 미완료로 만들지 않는다.
+fn service_version_failure(service: Option<&str>) -> VerifyFailure {
+    let shown = service.unwrap_or("알 수 없음");
+    notice(
+        "service-version-mismatch",
+        format!("실행 중인 서비스(버전 {shown})가 앱(버전 {})과 달라요. 쓰는 중인 세션이 없을 때 `aam service restart`를 실행하거나 앱의 [서비스 다시 시작]을 눌러 주세요.", service_version::APP_VERSION),
+        params(&[("service", shown), ("app", service_version::APP_VERSION)]),
+    )
+}
+
 /// 설치 함수가 돌려준 문장에서 경고만 준비 결과에 붙인다. 성공 안내만 있는 문장은 버린다.
 fn attach_step_warning(status: &mut SetupStatus, step: &str, message: &str) {
     let Some(index) = message.find("주의:") else { return };
@@ -166,9 +178,14 @@ pub fn setup_status(paths: &Paths) -> SetupStatus {
         omp_supported: cfg!(any(unix, windows)),
         ready: false,
         notices: Vec::new(),
+        service_version_mismatch: snapshot.as_ref().is_some_and(|snapshot| service_version::report_for(snapshot).mismatch),
     };
     if snapshot.is_none() {
         push_notice(&mut status, "service", None, &service_missing_failure());
+    }
+    if status.service_version_mismatch {
+        let failure = service_version_failure(snapshot.as_ref().and_then(|snapshot| snapshot.service_version.as_deref()));
+        push_notice(&mut status, "service-version", None, &failure);
     }
     let missing: Vec<String> = status.tools.iter().filter(|tool| tool.account && !tool.connected).map(|tool| tool.tool.clone()).collect();
     for tool in missing {
@@ -336,6 +353,7 @@ mod tests {
             omp_supported: true,
             ready: false,
             notices: Vec::new(),
+            service_version_mismatch: false,
         }
     }
 
@@ -352,6 +370,19 @@ mod tests {
         assert!(message.contains("claude"), "{message}");
         assert!(message.contains("aam run"), "{message}");
         assert!(message.contains("새 터미널"), "{message}");
+    }
+
+    #[test]
+    fn version_mismatch_is_reported_with_the_next_action() {
+        let mut status = blank_status();
+        status.service_version_mismatch = true;
+        push_notice(&mut status, "service-version", None, &service_version_failure(None));
+        let value = serde_json::to_value(&status).unwrap();
+        assert_eq!(value["serviceVersionMismatch"], true);
+        let notice = &value["notices"][0];
+        assert_eq!(notice["code"], "service-version-mismatch");
+        assert_eq!(notice["params"]["service"], "알 수 없음");
+        assert!(notice["message"].as_str().unwrap().contains("aam service restart"));
     }
 
     #[test]

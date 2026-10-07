@@ -1,4 +1,5 @@
 mod allocation;
+mod credits;
 mod routing;
 mod takeover;
 use super::*;
@@ -632,6 +633,16 @@ fn uninstall_and_admission_are_atomic_and_permit_is_required_to_cancel() {
     } else {
         assert_eq!(permit.unwrap_err().code, "SESSION_BUSY");
     }
+}
+
+/// 앱이 재시작 필요 여부를 판단할 수 있도록 서비스는 자기 실행 파일 버전을 snapshot에 담는다.
+#[test]
+fn snapshot_reports_the_service_version() {
+    let fixture = Fixture::new();
+    let snapshot = fixture.service.snapshot().unwrap();
+    assert_eq!(snapshot.service_version.as_deref(), Some(env!("CARGO_PKG_VERSION")));
+    let json = serde_json::to_value(&snapshot).unwrap();
+    assert_eq!(json["serviceVersion"], env!("CARGO_PKG_VERSION"));
 }
 
 /// 자손 기록이 없는 ORPHANED 세션은 같은 부팅에서는 유지하고, 기록된 identity가 모두 이전 부팅이면 반환한다.

@@ -1,6 +1,6 @@
 use crate::{
     process::{base_env, run_json, Probe},
-    quota::{codex_buckets, stable_id, text},
+    quota::{codex_buckets, codex_credits, stable_id, text},
     safety::{check_settings, profile_var},
 };
 use aam_protocol::{now_ms, Account, ApiError};
@@ -219,6 +219,8 @@ pub(crate) fn inspect_at(
                         account.identity_key.as_deref().unwrap_or(&account.id),
                         now_ms(),
                     );
+                    // 크레딧은 이 응답에 명시된 경우에만 기록한다. 조회에 실패하면 이전 값을 이어 쓰지 않는다.
+                    account.credits = codex_credits(&limits, now_ms());
                 }
             }
             Ok(account)

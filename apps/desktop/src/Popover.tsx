@@ -5,9 +5,9 @@ import { ArrowUpRight, RefreshCw } from "lucide-react";
 import { native, updatesStatus } from "./api";
 import type { UpdateStatus } from "./api";
 import { bucketState, canonicalProvider, groupAccounts, isCurrentGroup, providerColor, providerNames, relativeTime, useBridge, useSnapshot } from "./state";
-import { limitsOf, remainingTone as tone, tightestOf } from "./limits";
+import { creditCount, limitsOf, remainingTone as tone, tightestOf, usdLimit, usdUsed } from "./limits";
 import type { Limit } from "./limits";
-import type { Snapshot } from "./types";
+import type { AccountQuotaSummary, Snapshot } from "./types";
 import ojakIcon from "./assets/ojak-icon.png";
 import { t, limitLabel } from "./i18n";
 import { UPDATE_CHECK_INTERVAL_MS, updateBadgeVisible } from "./updates";
@@ -22,7 +22,26 @@ const MAX_HEIGHT = 560;
 /// 좁은 팝오버용 짧은 공급자 이름. 사용자가 부르는 이름을 쓴다.
 const SHORT_NAMES: Record<string, string> = { anthropic: "Claude", openai: "Codex", google: "Gemini", xai: "Grok", other: "Z.AI" };
 
-interface AccountLine { key: string; name: string; models: string[]; limits: Limit[]; tightest: number | null; inUse: boolean }
+interface PaidBadge { label: string; title: string | null }
+interface AccountLine { key: string; name: string; models: string[]; limits: Limit[]; tightest: number | null; inUse: boolean; paid: PaidBadge | null }
+
+/// 구독 한도 대신 크레딧(Codex)·추가 사용량(Claude, USD)으로 가는 중이면 그 사실, 옵션이 꺼져 있으면 중립 안내. 서비스가 매 스냅샷마다 다시 계산한다.
+function paidBadge(summary: AccountQuotaSummary | undefined): PaidBadge | null {
+  if (!summary) return null;
+  const { credits, extraUsage: extra } = summary;
+  if (summary.kind === "extra" && extra) {
+    const amount = extra.limitUsd !== null ? t("usage.extra.amount", { used: usdUsed(extra.usedUsd), limit: usdLimit(extra.limitUsd) }) : t("usage.extra.amountOpen", { used: usdUsed(extra.usedUsd) });
+    return { label: `${t("usage.verdict.extra")} · ${amount}`, title: t("usage.reason.extra") };
+  }
+  if (summary.kind === "credits" && credits) {
+    const count = creditCount(credits.balance);
+    const balance = credits.unlimited ? t("usage.credits.unlimited") : count !== null ? t("usage.credits.balance", { count }) : null;
+    return { label: balance ? `${t("usage.verdict.credits")} · ${balance}` : t("usage.verdict.credits"), title: t("usage.reason.credits") };
+  }
+  if (extra && !extra.active && !extra.limitReached) return { label: t("usage.extra.hint"), title: t("usage.extra.hintTitle") };
+  if (credits && !credits.active) return { label: t("usage.credits.hint"), title: t("usage.credits.hintTitle") };
+  return null;
+}
 interface ProviderCard { provider: string; accounts: AccountLine[]; tightest: number | null; inUse: boolean }
 
 function buildCards(snapshot: Snapshot, sessions: { provider: string; email: string; model: string; lastUsedAt: number }[], masked: boolean): ProviderCard[] {
@@ -39,7 +58,8 @@ function buildCards(snapshot: Snapshot, sessions: { provider: string; email: str
     for (const session of snapshot.sessions) if (session.state === "ACTIVE" && ids.has(session.accountId) && session.model !== "native-default") models.add(session.model);
     const limits = limitsOf(group.buckets, [...models], bucket => bucketState(bucket, staleAfter));
     const card = cards.get(provider) ?? { provider, accounts: [], tightest: null, inUse: false };
-    const line = { key: group.key, name: group.email ?? "", models: [...models], limits, tightest: limits.length ? tightestOf(limits) : null, inUse: models.size > 0 };
+    const summary = snapshot.quotaSummaries?.find(item => group.members.some(member => item.accountIds.includes(member.id)));
+    const line = { key: group.key, name: group.email ?? "", models: [...models], limits, tightest: limits.length ? tightestOf(limits) : null, inUse: models.size > 0, paid: paidBadge(summary) };
     card.accounts.push(line);
     card.inUse ||= line.inUse;
     cards.set(provider, card);
@@ -76,6 +96,7 @@ function Line({ line, reserve }: { line: AccountLine; reserve: number }) {
       <span className={`pop-limit-value ${tone(line.tightest, reserve)}`}>{line.tightest === null ? "—" : `${Math.round(line.tightest)}%`}</span>
       {reset !== undefined && <span className="pop-limit-reset">{reset <= Date.now() ? t("time.resetPending") : relativeTime(reset, true)}</span>}
     </button>
+    {line.paid && <div className="pop-paid" title={line.paid.title ?? undefined}>{line.paid.label}</div>}
     {open && line.models.length > 0 && <div className="pop-account-model">{line.models.join(", ")}</div>}
     {open && line.limits.map(limit => <div key={limit.key} className={`pop-limit${limit.relevant ? "" : " dim"}`}>
       <span className="pop-limit-label">{limitLabel(limit.label)}</span>

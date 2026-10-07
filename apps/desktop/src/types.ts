@@ -32,6 +32,10 @@ export interface Account {
   maxConcurrency: number;
   buckets: QuotaBucket[];
   lastCheckedAt: number;
+  /// Codex 크레딧 관측. 있으면 공급자가 명시한 값이다.
+  credits?: { available: boolean; unlimited: boolean; balance: string | null; ordinaryUsageAllowed?: boolean | null; observedAt: number } | null;
+  /// Claude 추가 사용량 관측(USD). 켜져 있을 때만 있다.
+  extraUsage?: { enabled: boolean; usedUsd: number; limitUsd: number | null; observedAt: number } | null;
 }
 
 export interface ToolStatus {
@@ -86,6 +90,10 @@ export interface Policy {
   expiringWindowHours?: number;
   /// 안전 여유량을 뺀 남은 한도가 이 % 이상일 때만 알린다.
   expiringMinPercent?: number;
+  /// 구독 한도를 다 쓴 Codex 계정에서 크레딧(과금될 수 있음)을 쓰도록 배정한다. 기본 꺼짐.
+  useCreditsAfterLimit?: boolean;
+  /// 구독 한도를 다 쓴 Claude 계정에서 추가 사용량(API 요금)을 쓰도록 배정한다. 기본 꺼짐.
+  useExtraUsageAfterLimit?: boolean;
 }
 
 export interface ProcessIdentity {
@@ -176,17 +184,23 @@ export interface Snapshot {
   lastRefreshAt: number | null;
   takeovers?: Takeover[];
   quotaSummaries?: AccountQuotaSummary[];
+  /// 서비스 실행 파일의 버전. 이 필드가 없는 이전 서비스는 알 수 없음으로 본다.
+  serviceVersion?: string;
 }
 
 export interface AccountQuotaSummary {
   accountIds: string[];
-  kind: "available" | "partial" | "reserve" | "resting" | "excluded" | "login" | "unknown";
+  kind: "available" | "partial" | "reserve" | "resting" | "excluded" | "login" | "unknown" | "credits" | "extra";
   until: number | null;
   models: string[];
   label: string | null;
   rate: boolean;
   /// 곧 리셋되는데 많이 남은 긴 주기 한도. 리셋 전에 쓰면 아낄 수 있다.
   expiring?: ExpiringQuota | null;
+  /// Codex 크레딧(ChatGPT 크레딧 단위, 금액 아님). 신선한 관측이 명시한 경우에만 있다. `active`는 지금 구독 한도 대신 크레딧으로 배정되는 상태.
+  credits?: { active: boolean; unlimited: boolean; balance: string | null } | null;
+  /// Claude 추가 사용량(USD, API 요금). 신선한 관측에서 켜져 있을 때만 있다. `limitReached`면 쓸 수 없다.
+  extraUsage?: { active: boolean; usedUsd: number; limitUsd: number | null; limitReached: boolean } | null;
 }
 
 export interface ExpiringQuota {

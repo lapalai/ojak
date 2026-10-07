@@ -10,7 +10,7 @@
 3. 그 외 → `aam <command>`
 
 ## 명령 (`main.rs:24-78`)
-`status`, `doctor`, `refresh`, `explain --tool`, `run <claude|codex> [-- native args]`, `account {add, login, settings-preview}`, `service {install, uninstall, stop, status}`, `integration {install, uninstall}`, `omp-broker|omp-bridge {status, connect, disconnect}`, `omp-observer {status, install, uninstall}`, `takeover {list, adopt, release}`, `shell {install, uninstall}`.
+`status`, `doctor`, `refresh`, `explain --tool`, `run <claude|codex> [-- native args]`, `account {add, login, settings-preview}`, `service {install, uninstall, stop, restart, status}`, `integration {install, uninstall}`, `omp-broker|omp-bridge {status, connect, disconnect}`, `omp-observer {status, install, uninstall}`, `takeover {list, adopt, release}`, `shell {install, uninstall}`.
 
 ## 관리 실행 흐름 (`lib.rs`)
 shim → `route.resolve` → `lease.acquire`(PREPARED) → 실행 계획·identity 재확인(`IDENTITY_MISMATCH`) → `lease.starting` → supervisor로 spawn → `lease.started` → 10초 heartbeat → release/abort.
@@ -35,6 +35,7 @@ shim → `route.resolve` → `lease.acquire`(PREPARED) → 실행 계획·identi
 
 `NO_ELIGIBLE_ACCOUNT`, `QUOTA_*`, `DAEMON_UNAVAILABLE` 등 "관리할 수 없음" 코드일 때만, shim 모드에서만 원본 CLI로 넘긴다. 사용자가 건 제한(`ROUTE_CONFLICT` 등)과 `AUTH_OVERRIDE_CONFLICT`·`NATIVE_OPTION_UNSUPPORTED`는 이 목록에 넣지 않는다. `aam run`은 통과하지 않는다.
 계정이 모두 한도를 다 써 `NO_ELIGIBLE_ACCOUNT`·`QUOTA_EXHAUSTED`로 원본에 넘길 때는 '배정 설명' 화면을 가리키지 않는다. Ojak 계정이 모두 소진된 시각(가장 빠른 리셋), 원본 CLI가 쓸 기본 프로필 계정, `aam explain --tool`을 한 번에 적는다.
+원본으로 그냥 넘기면 공급자가 구독 한도 뒤에 크레딧(Codex)·추가 사용량(Claude, API 요금)을 쓸 수 있다. Ojak의 해당 옵트인(`use_credits_after_limit`/`use_extra_usage_after_limit`)이 꺼져 있는데 원본 CLI가 쓸 기본 프로필 계정에 공급자가 명시한 과금 경로가 있고(크레딧 `available`·`ordinaryUsageAllowed!=true` / 추가 사용량 `enabled`이고 상한 미도달) 구독 한도가 지금도 남았다고 확실하지 않으면(소진·낡은 관측·미확인 포함, 더 묻는 쪽이 안전) `passthrough`가 조용히 넘기지 않는다. Ojak 설정이 꺼져 있고 원본 CLI가 과금될 수 있다는 한국어 안내를 먼저 보이고, 터미널이면 `[y/N]`(기본 N)로 확인, 터미널이 아니면 `SPEND_CONFIRMATION_REQUIRED`로 실행을 거절한다. 거절하면 `SPEND_CONFIRMATION_DECLINED`. 한도가 남았거나 과금 경로가 없거나 관측이 없으면 기존 통과 동작 그대로다. 이 확인은 Ojak이 크레딧으로 배정하지 않겠다는 설정과 안내일 뿐이다. 이미 실행 중인 원본 CLI의 공급자 쪽 과금 전환은 Ojak이 막을 수 없고, 쓴 금액도 볼 수 없다. 안내와 확인 문구에 그 한계를 적는다. Ojak이 크레딧·추가 사용량으로 배정하면 TTY 안내 줄(`announce_chosen_account`)이 "구독 한도를 다 써서 크레딧을 쓰고 있어요"(Claude는 추가 사용량)로 바뀐다.
 
 ## 설치 (`src/install.rs`)
 - `integration.json`(`version: 2`)은 원본 CLI **진입 경로**를 저장한다. 판이 없는 이전 기록의 `prior`/서비스 관측 경로는 다시 고정하지 않는다 (`install.rs:292-320`).
@@ -45,6 +46,8 @@ shim → `route.resolve` → `lease.acquire`(PREPARED) → 실행 계획·identi
 - `aam setup --status`는 설정 조회만 하며 셸 시작 파일을 실행하지 않는다. `--check`는 설치 없이 명령을 재검증한다. `configured`는 설정 파일 기준, `tools[].verified`는 실제 검사(true/false/null), `ready`는 명시적 검사 완료다. 기존 터미널·IDE·omp 세션 전환이나 실모델 요청 성공을 뜻하지 않는다. `notices`는 실패한 단계의 이유와 다음 행동이다.
 - Unix 명령 검사는 `$SHELL`의 `/bin/zsh`, `/bin/bash`, `/bin/sh` 로그인 셸에서 `command -v`가 관리 shim과 같은 파일인지(`-ef`, symlink 허용) 확인한다. 그 외 셸은 `unsupported-shell`로 지원 셸과 직접 넣을 PATH를 알린다. 상속 PATH의 Ojak 경로를 먼저 제거하며, 명령별 5초 제한 후 프로세스 그룹을 종료한다. 셸 출력은 버리고 구조화된 결과만 보고한다. 인수 없는 `aam`은 짧은 도움말을 출력한다. 사용법 오류는 빠진 인수·알 수 없는 명령처럼 종류와 사용법 틀만 알리고 입력 값은 출력하지 않는다. shim 경로는 바꾸지 않는다.
 - Windows 명령 검사는 별도 프로세스를 띄우지 않는다. 레지스트리의 저장된 시스템 PATH → 사용자 PATH 순서와 PATHEXT로 첫 실행 파일을 찾아 관리 shim과 비교한다(`install_windows.rs` `effective_command`). 숨긴 PowerShell 실행은 서명 없는 바이너리에서 Defender 행위 탐지(`Behavior:Win32/Execution.A!ml`)를 불러 제거했다. 기존 터미널의 별칭·프로필·IDE 환경까지 확인한 것은 아니다.
+- 서비스 버전 맞춤 (`src/service_version.rs`): 앱을 DMG로 덮어쓰면 `service_install`은 같은 실행 파일 경로의 서비스를 그대로 두므로(재시작 없음) 화면은 새 버전인데 서비스는 예전 프로세스일 수 있다. 서비스는 `Snapshot.serviceVersion`(`CARGO_PKG_VERSION`)을 알리고, `aam`은 자기 버전과 비교한다(`compare`: `current`·`older`·`newer`·`unknown`). 이 필드가 없던 이전 서비스는 `unknown`이며 `older`와 함께 재시작 대상(`mismatch: true`), 더 새 서비스는 되돌리지 않는다. `aam setup --status|--check` JSON은 `serviceVersionMismatch`와 notice `service-version-mismatch`(step `service-version`)를, `aam service status`는 `서비스 버전` 줄과 다음 행동을 보여 준다. 조용히 재시작하지 않는다.
+- `aam service restart` (`service_version::restart`): 같은 버전이면 아무것도 안 한다. 아니면 `service.prepareUninstall`(stop과 같은 lease 검사: 점유·불확실 lease가 있으면 `SESSION_BUSY`로 멈추고 아무것도 바꾸지 않음)으로 새 배정을 닫고 → macOS `launchctl kickstart -k`(`install::service_kickstart`: 앱이 설치한 기록·plist가 그대로일 때만) / Windows 기존 `service_restart`(안전 종료 + 기록된 실행 파일 시작) → 시작 시각이 바뀐 새 프로세스가 응답하면 `service.resumeAdmission` → 버전이 앱과 같은지 확인한다. 시작 실패 시 배정을 다시 열고 기존 서비스를 둔다. 새 프로세스를 20초 안에 확인하지 못하면 `SERVICE_NOT_READY`, 재시작했는데 버전이 다르면 `SERVICE_VERSION_STALE`. 시간 초과만으로 lease를 풀지 않는다.
 - macOS와 Windows 모두 `ompSupported: true`이며 같은 준비 흐름을 사용한다. 지원 여부와 실제 broker·bridge·observer 연결 완료는 별도 값이다.
 - Windows NSIS는 `installer prepare|finish|recover|remove`로 앱 소유 서비스의 활성·불확실 lease를 검사하고, 기존 실행 파일 백업 → 안전 종료 → 새 파일 hash 확인 → 서비스 재시작을 수행한다. 새 설치를 자동으로 서비스 등록하지 않으며, 실패하면 복구 기록을 보존하고 검증된 원본으로 복구한다. `remove`는 서비스를 끄기 전에 `aam deactivate`와 같은 순서로 omp bridge·broker·observer를 푼다. 앱이 만든 HKCU Run `Ojak`(로그인 자동 실행)만 지운다.
 - Windows 업데이트·복구는 종료 permit에 대응하는 `service.cancelUninstall` RPC로 DB의 신규 배정 차단까지 해제한 뒤 설치 기록을 정리한다. 명시적인 `service install`과 앱의 서비스 재시작도 DB 배정을 재개하며, 앱의 재시작은 `service_stop`의 안전 검사를 거친다.
@@ -78,7 +81,7 @@ aam                                    # clap derive (main.rs:13-78) · --help/-
 │   ├── login --tool <T> (--label <L> (--settings-digest D | --fresh-settings) | --account <ID>)
 │   │                                  # 새 프로필 로그인, 또는 기존 프로필 다시 로그인 → 성공 시 등록
 │   └── settings-preview --tool <T>    # (JSON)
-├── service {install | uninstall | stop | status}          # LaunchAgent ai.aam.service (text)
+├── service {install | uninstall | stop | restart | status} # LaunchAgent ai.aam.service (text). restart = 버전이 다른 서비스를 lease 검사 후 안전 재시작
 ├── integration {install | uninstall}  # Unix symlink / Windows .cmd shim: aam·claude·codex (text)
 ├── omp-broker {status [--json] | connect | disconnect}   # connect/disconnect → JSON
 ├── omp-bridge {status [--json] | connect | disconnect}   # connect는 omp-broker 연결 선행 필요

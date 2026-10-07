@@ -157,6 +157,13 @@ kill -TERM <pid> && kill -CONT <pid>
 
 공개키가 비어 있거나 `REPLACE_WITH_TAURI_UPDATER_PUBKEY`이면 업데이트 UI는 나타나지 않습니다. 지금 저장소의 공개키는 그 자리표시자가 아닙니다. 앱 안 업데이트가 없으면 새 DMG를 받거나, Windows에서는 새 setup.exe를 같은 사용자로 다시 설치하세요.
 
+### 직접 다시 설치할 때 (서비스 새로 고침)
+
+0.1.0에서 0.1.1로 올릴 때처럼 업데이터 서명 키가 바뀌면 앱 안 업데이트가 안 되어 직접 다시 설치해야 합니다. 앱만 바꿔도 이미 켜져 있던 예전 `aam-service`가 그대로 남을 수 있습니다. Ojak은 이 불일치를 서비스 버전과 앱 버전을 비교해 알려 주고, 조용히 다시 시작하지는 않습니다.
+
+- **Mac**: 새 DMG의 `Ojak.app`을 `Applications`에 덮어쓰고 Ojak을 엽니다. 서비스가 앱보다 예전이면 대시보드 위에 "서비스가 앱보다 예전 버전이에요" 안내가 뜹니다. [서비스 다시 시작]을 누르세요. 쓰는 중인 관리 세션이 있으면 다시 시작하지 않고 이유를 알려 주며, 끝낸 뒤 다시 누르면 됩니다. 최근 15분 안에 쓴 omp 연결이 있으면 먼저 경고합니다. 앱 없이 하려면 `launchctl kickstart -k gui/$(id -u)/ai.aam.service` 다음에 `aam integration install`을 실행하세요(이 방법은 쓰는 중인 세션을 확인하지 않습니다). `aam service restart`는 같은 안전 검사를 거치고, `aam service status`와 `aam setup --check`(`serviceVersionMismatch`)로 버전이 맞는지 볼 수 있습니다.
+- **Windows**: setup.exe가 앱 소유 서비스의 활성·불확실 세션을 먼저 검사하고(있으면 설치가 멈춥니다), 서비스를 안전하게 끈 뒤 파일을 교체하고 새 파일을 확인해 서비스를 다시 시작합니다. 서비스를 따로 다시 시작할 필요는 없습니다. 서비스를 로그인 자동 실행으로 등록하지 않은 설치는 서비스를 새로 켜지 않습니다.
+
 ## 제거
 
 Mac:
@@ -191,6 +198,8 @@ omp 브릿지는 구독 자격 증명을 로컬 프록시로 통과시킵니다.
 
 - https://code.claude.com/docs/en/legal-and-compliance
 - https://openai.com/policies/row-terms-of-use/
+
+**크레딧·추가 사용량(선택, 기본 꺼짐):** 설정에서 켜면 구독 한도를 다 쓴 뒤 Codex 크레딧이나 Claude 추가 사용량(API 요금)이 켜진 계정으로 새 작업을 보낼 수 있어요. 이 경우 공급자가 과금할 수 있고, Ojak은 쓴 금액을 볼 수 없어요. 한도가 리셋되면 다시 구독 한도가 남은 계정부터 써요. Ojak은 자신이 보내는 새 작업만 정해요. 이미 실행 중인 원본 CLI가 공급자 쪽에서 크레딧으로 넘어가는 건 막을 수 없어요. 크레딧 잔액은 Codex가 알려 줄 때만 보이고, 실제 계정에서 아직 확인하지 못한 기능이에요.
 
 사용에 대한 책임은 사용자에게 있습니다. 계정 정지가 있을 수 있습니다. 이 문서는 적법성이나 안전성을 주장하지 않습니다.
 
@@ -419,6 +428,13 @@ When the signing public key is configured, the app checks on startup and every 2
 
 If the public key is empty or still `REPLACE_WITH_TAURI_UPDATER_PUBKEY`, the update UI is hidden and no update request is made. The key committed in this repository is not that placeholder. If in-app update is unavailable, install a new DMG, or on Windows a new setup.exe.
 
+### Reinstalling by hand (refresh the service)
+
+When the updater signing key changes, as from 0.1.0 to 0.1.1, in-app update can't verify the new build and you reinstall by hand. Replacing only the app can leave the old `aam-service` process running. Ojak compares the service version with the app version and tells you about a mismatch. It never restarts the service silently.
+
+- **Mac**: replace `Ojak.app` in `Applications` with the one from the new DMG, then open Ojak. If the service is older than the app, a "The service is older than the app" notice appears above the dashboard. Press Restart service. If a managed session is in use, the service refuses to restart and the notice says why; press it again after the session ends. If an omp connection was used in the last 15 minutes, the app warns first. Without the app, run `launchctl kickstart -k gui/$(id -u)/ai.aam.service`, then `aam integration install` (this way does not check for running sessions). `aam service restart` applies the same safety check, and `aam service status` or `aam setup --check` (`serviceVersionMismatch`) shows whether the versions match.
+- **Windows**: setup.exe first checks the app-owned service for active or uncertain sessions (installation stops if there are any), stops the service safely, replaces the files, verifies the new files, and starts the service again. You don't need to restart the service separately. An install that never registered the service for sign-in doesn't get a new service started.
+
 ## Uninstall
 
 On Mac:
@@ -453,6 +469,8 @@ The omp bridge routes subscription credentials through a local proxy and may con
 
 - https://code.claude.com/docs/en/legal-and-compliance
 - https://openai.com/policies/row-terms-of-use/
+
+**Credits and extra usage (optional, off by default):** If you turn it on in settings, Ojak can send new work to an account that has Codex credits or Claude extra usage (API pricing) after its subscription limit runs out. The provider may charge you, and Ojak cannot see the amount spent. When a limit resets, Ojak goes back to accounts with subscription limit left. Ojak only decides where its own new work goes; it cannot stop an already-running official CLI from switching to credits on the provider's side. This feature is built from the documented fields and has not yet been confirmed on a real account.
 
 You are responsible for how you use it. Account suspension is possible. This document does not claim that use is legal or safe.
 

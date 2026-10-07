@@ -1,6 +1,6 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { allResting, bucketState, limitsOf, remainingTone, tightestOf } from "./limits.ts";
+import { allResting, bucketState, creditCount, limitsOf, remainingTone, tightestOf, usdLimit, usdUsed } from "./limits.ts";
 import type { QuotaBucket } from "./types.ts";
 
 const bucket = (id: string, label: string, used: number, model: string | null = null): QuotaBucket =>
@@ -60,5 +60,20 @@ test("an exhausted bucket whose reset passed or whose observation is old is stal
   assert.equal(bucketState(exhausted(now - 60_000, now - 1), 900, now), "stale");
   assert.equal(bucketState(exhausted(now - 901_000, now + 60_000), 900, now), "stale");
   assert.equal(tightestOf(limitsOf([exhausted(now - 60_000, now - 1)], [], candidate => bucketState(candidate, 900, now))), null);
+});
+
+test("credit balance shows only when it parses as a number (rounded), and USD stays separate", () => {
+  assert.equal(creditCount("12.5"), 13);
+  assert.equal(creditCount("12.4"), 12);
+  assert.equal(creditCount(" 7 "), 7);
+  assert.equal(creditCount("0"), null);
+  assert.equal(creditCount("0.2"), null);
+  assert.equal(creditCount("약 열두 개"), null);
+  assert.equal(creditCount("NaN"), null);
+  assert.equal(creditCount("-3"), null);
+  assert.equal(creditCount(null), null);
+  assert.equal(usdUsed(12.4), "$12.40");
+  assert.equal(usdLimit(50), "$50");
+  assert.equal(usdLimit(50.5), "$50.50");
 });
 

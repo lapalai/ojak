@@ -1,4 +1,4 @@
-use aam_protocol::{now_ms, QuotaBucket};
+use aam_protocol::{now_ms, CreditsState, ExtraUsageState, QuotaBucket};
 use serde_json::Value;
 use sha2::{Digest, Sha256};
 
@@ -78,23 +78,68 @@ pub(crate) fn report_identity(report: &Value) -> Option<String> {
     }
 }
 
-pub(crate) fn omp_buckets(report: &Value, identity: &str) -> Vec<QuotaBucket> {
+/// omp 보고서가 말하는 관측 시각. 조회 시각과 헤더 시각 중 더 오래된 값을 쓴다. 없으면 0.
+fn report_observed(report: &Value) -> i64 {
     let fetched = millis(report.get("fetchedAt"));
     let headers = millis(
         report
             .get("metadata")
             .and_then(|v| v.get("headersUpdatedAt")),
     );
-    let observed = match (fetched, headers) {
+    match (fetched, headers) {
         (Some(a), Some(b)) => a.min(b),
         (a, b) => a.or(b).unwrap_or(0),
+    }
+}
+
+/// 추가 사용량(USD 금액) 항목인지. 퍼센트 한도와 섞이지 않게 `omp_buckets`는 이 항목을 건너뛴다.
+fn usd_limit(limit: &Value) -> bool {
+    limit["amount"]
+        .get("unit")
+        .and_then(Value::as_str)
+        .is_some_and(|unit| unit.eq_ignore_ascii_case("usd"))
+}
+
+/// Claude 추가 사용량(`anthropic:extra`, 단위 USD)을 읽는다. omp가 `spend`/`extra_usage` 응답에서 켜져 있고
+/// USD일 때만 이 항목을 내보내므로 항목이 있으면 켜진 상태다. 항목이 없으면 `None`(켜졌다고 보지 않는다).
+/// 이 Mac에서 켜진 상태는 관측한 적 없고 omp 소스의 필드 형태 기준이다. 금액이 음수·비유한이면 무시한다.
+pub(crate) fn omp_extra_usage(report: &Value) -> Option<ExtraUsageState> {
+    if text(report, "provider").as_deref() != Some("anthropic") {
+        return None;
+    }
+    let limit = report
+        .get("limits")?
+        .as_array()?
+        .iter()
+        .find(|limit| usd_limit(limit) && text(limit, "id").as_deref() == Some("anthropic:extra"))?;
+    let amount = &limit["amount"];
+    let used = amount.get("used").and_then(Value::as_f64).filter(|v| v.is_finite() && *v >= 0.0)?;
+    let cap = match amount.get("limit") {
+        None | Some(Value::Null) => None,
+        Some(value) => Some(value.as_f64().filter(|v| v.is_finite() && *v > 0.0)?),
     };
+    // 상한 항목이 소진 상태로 보고되면 사용한 금액이 아직 상한 아래로 읽혀도 쓸 수 없는 것으로 본다.
+    let reached = limit.get("status").and_then(Value::as_str) == Some("exhausted");
+    Some(ExtraUsageState {
+        enabled: true,
+        used_usd: if reached { cap.map_or(used, |cap| used.max(cap)) } else { used },
+        limit_usd: cap,
+        observed_at: report_observed(report),
+    })
+}
+
+pub(crate) fn omp_buckets(report: &Value, identity: &str) -> Vec<QuotaBucket> {
+    let observed = report_observed(report);
     let provider = text(report, "provider").unwrap_or_else(|| "other".into());
     let mut buckets = Vec::new();
     let Some(limits) = report.get("limits").and_then(Value::as_array) else {
         return buckets;
     };
     for limit in limits {
+        // USD 금액은 추가 사용량이지 구독 한도가 아니다. percent 버킷으로 바꾸면 소진 판정이 섞인다.
+        if usd_limit(limit) {
+            continue;
+        }
         let Some(upstream_id) = text(limit, "id") else {
             continue;
         };
@@ -236,6 +281,50 @@ pub(crate) fn codex_buckets(result: &Value, identity: &str, observed_at: i64) ->
     buckets
 }
 
+/// 공식 `CreditsSnapshot`(`hasCredits`·`unlimited`·`balance`)을 읽는다. 공급자가 명시한 값만 쓴다.
+/// `codex` 한도 묶음의 값을 우선하고, 없으면 단일 `rateLimits`, 그다음 크레딧을 알려 준 다른 묶음 하나를 쓴다.
+/// 잔액은 숫자로 읽히는 값만 보관한다. `hasCredits`인데 잔액이 0 이하이면 모순이므로 쓸 수 없다고 본다.
+/// 크레딧 정보가 응답에 없으면 `None`이다(있다고 가정하지 않는다).
+pub(crate) fn codex_credits(result: &Value, observed_at: i64) -> Option<CreditsState> {
+    let by_id = result.get("rateLimitsByLimitId").and_then(Value::as_object);
+    let credits = by_id
+        .and_then(|map| map.get("codex"))
+        .and_then(|snapshot| snapshot.get("credits"))
+        .filter(|v| v.is_object())
+        .or_else(|| {
+            result
+                .get("rateLimits")
+                .and_then(|snapshot| snapshot.get("credits"))
+                .filter(|v| v.is_object())
+        })
+        .or_else(|| {
+            by_id.and_then(|map| {
+                map.values()
+                    .filter_map(|snapshot| snapshot.get("credits").filter(|v| v.is_object()))
+                    .next()
+            })
+        })?;
+    let has_credits = credits.get("hasCredits").and_then(Value::as_bool)?;
+    let unlimited = credits.get("unlimited").and_then(Value::as_bool).unwrap_or(false);
+    let balance = credits
+        .get("balance")
+        .and_then(Value::as_str)
+        .map(str::trim)
+        .filter(|text| text.parse::<f64>().is_ok_and(f64::is_finite))
+        .map(str::to_owned);
+    let empty = balance
+        .as_deref()
+        .and_then(|text| text.parse::<f64>().ok())
+        .is_some_and(|value| value <= 0.0);
+    Some(CreditsState {
+        available: (has_credits && !empty) || unlimited,
+        unlimited,
+        balance,
+        ordinary_usage_allowed: result.get("ordinaryUsageAllowed").and_then(Value::as_bool),
+        observed_at,
+    })
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -301,6 +390,80 @@ mod tests {
         assert_eq!(buckets.len(), 1);
         assert_eq!(buckets[0].resets_at, Some(1_999_999_999_000));
         assert_eq!(buckets[0].used_percent, Some(73.0));
+    }
+    #[test]
+    fn codex_credits_follow_the_official_snapshot_and_stay_conservative() {
+        let at = 1_900_000_000_000;
+        let shape = |credits: Value| json!({"rateLimits":{"primary":{"usedPercent":100},"credits":credits}});
+        let on = codex_credits(&shape(json!({"hasCredits":true,"unlimited":false,"balance":"12.5"})), at).unwrap();
+        assert!(on.available && !on.unlimited);
+        assert_eq!(on.balance.as_deref(), Some("12.5"));
+        assert_eq!(on.observed_at, at);
+        let off = codex_credits(&shape(json!({"hasCredits":false,"unlimited":false,"balance":null})), at).unwrap();
+        assert!(!off.available && off.balance.is_none());
+        let unlimited = codex_credits(&shape(json!({"hasCredits":false,"unlimited":true,"balance":null})), at).unwrap();
+        assert!(unlimited.available && unlimited.unlimited);
+        // 잔액 0은 쓸 수 없다. 숫자가 아닌 잔액은 보관하지 않지만 공급자의 hasCredits는 그대로 따른다.
+        let zero = codex_credits(&shape(json!({"hasCredits":true,"unlimited":false,"balance":"0"})), at).unwrap();
+        assert!(!zero.available);
+        assert_eq!(zero.balance.as_deref(), Some("0"));
+        let garbage = codex_credits(&shape(json!({"hasCredits":true,"unlimited":false,"balance":"약 열두 개"})), at).unwrap();
+        assert!(garbage.available && garbage.balance.is_none());
+        let nan = codex_credits(&shape(json!({"hasCredits":true,"unlimited":false,"balance":"NaN"})), at).unwrap();
+        assert!(nan.balance.is_none());
+        // 응답에 크레딧이 없거나 필수 필드가 빠지면 있다고 보지 않는다.
+        assert!(codex_credits(&json!({"rateLimits":{"primary":{"usedPercent":1}}}), at).is_none());
+        assert!(codex_credits(&shape(json!({"balance":"5"})), at).is_none());
+        assert!(codex_credits(&shape(json!(null)), at).is_none());
+        // codex 묶음이 단일 묶음보다 우선하고, ordinaryUsageAllowed는 최상위 값을 따른다.
+        let both = json!({"ordinaryUsageAllowed":true,"rateLimits":{"credits":{"hasCredits":false,"unlimited":false}},"rateLimitsByLimitId":{"codex":{"credits":{"hasCredits":true,"unlimited":false,"balance":"3"}}}});
+        let state = codex_credits(&both, at).unwrap();
+        assert!(state.available);
+        assert_eq!(state.ordinary_usage_allowed, Some(true));
+        assert!(!state.usable(at, 900), "기본 포함 사용량이 허용되는 동안은 크레딧 전환으로 보지 않는다");
+    }
+    #[test]
+    fn claude_extra_usage_is_usd_only_and_never_a_percent_bucket() {
+        // omp claude.ts가 내보내는 `anthropic:extra` 항목 형태(소스 기준, 이 Mac에서는 켜진 상태를 관측하지 못했다).
+        let observed = now_ms() - 60_000;
+        let report = |extra: Value| {
+            json!({"provider":"anthropic","fetchedAt":observed,"limits":[
+                {"id":"anthropic:7d","label":"Claude 7 Day","scope":{"provider":"anthropic","windowId":"7d"},"window":{"id":"7d","durationMs":604800000,"resetsAt":observed+900000},"amount":{"used":100,"limit":100,"usedFraction":1.0,"unit":"percent"},"status":"exhausted"},
+                extra
+            ]})
+        };
+        let capped = report(json!({"id":"anthropic:extra","label":"Claude Extra Usage","scope":{"provider":"anthropic","windowId":"extra"},"amount":{"used":12.4,"unit":"usd","limit":50.0,"remaining":37.6,"usedFraction":0.248,"remainingFraction":0.752},"status":"ok"}));
+        let state = omp_extra_usage(&capped).unwrap();
+        assert!(state.enabled);
+        assert_eq!(state.used_usd, 12.4);
+        assert_eq!(state.limit_usd, Some(50.0));
+        assert_eq!(state.observed_at, observed);
+        assert!(state.usable(now_ms(), 900));
+        // USD 항목은 percent 버킷이 되지 않아 소진 판정에 섞이지 않는다.
+        let buckets = omp_buckets(&capped, "subject");
+        assert_eq!(buckets.len(), 1);
+        assert!(buckets.iter().all(|bucket| bucket.label.contains("7 Day")));
+        // 상한이 없으면 금액만 있다.
+        let open = omp_extra_usage(&report(json!({"id":"anthropic:extra","amount":{"used":3.5,"unit":"usd"}}))).unwrap();
+        assert_eq!(open.limit_usd, None);
+        assert!(open.usable(now_ms(), 900));
+        // 상한에 닿으면(소진 상태) 쓸 수 없다.
+        let spent = omp_extra_usage(&report(json!({"id":"anthropic:extra","amount":{"used":50.0,"unit":"usd","limit":50.0,"remaining":0.0,"usedFraction":1.0},"status":"exhausted"}))).unwrap();
+        assert!(!spent.usable(now_ms(), 900));
+        let reached_but_low = omp_extra_usage(&report(json!({"id":"anthropic:extra","amount":{"used":10.0,"unit":"usd","limit":50.0},"status":"exhausted"}))).unwrap();
+        assert!(!reached_but_low.usable(now_ms(), 900));
+        // 꺼져 있거나 통화가 USD가 아니면 omp가 항목을 내보내지 않는다. 항목이 없으면 켜졌다고 보지 않는다.
+        assert!(omp_extra_usage(&json!({"provider":"anthropic","fetchedAt":observed,"limits":[]})).is_none());
+        assert!(omp_extra_usage(&report(json!({"id":"anthropic:extra","amount":{"used":3.0,"unit":"eur"}}))).is_none());
+        // 음수·잘못된 값은 무시한다.
+        assert!(omp_extra_usage(&report(json!({"id":"anthropic:extra","amount":{"used":-1.0,"unit":"usd"}}))).is_none());
+        assert!(omp_extra_usage(&report(json!({"id":"anthropic:extra","amount":{"used":1.0,"unit":"usd","limit":0}}))).is_none());
+        // Claude가 아닌 공급자는 대상이 아니다.
+        let mut other = capped.clone();
+        other["provider"] = json!("openai-codex");
+        assert!(omp_extra_usage(&other).is_none());
+        // 오래된 관측은 쓸 수 없다.
+        assert!(!state.usable(observed + 3_600_000, 900));
     }
     #[test]
     fn email_alone_is_not_a_provider_identity() {
