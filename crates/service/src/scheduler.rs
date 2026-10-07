@@ -83,7 +83,7 @@ pub(crate) fn canonical_directory(directory: &str) -> Result<PathBuf, ApiError> 
     if directory.len() > 4096 || directory.contains('\0') || !path.is_absolute() {
         return Err(ApiError::new(
             "INVALID_PROJECT",
-            "프로젝트는 존재하는 절대 디렉터리 경로여야 합니다.",
+            "프로젝트는 있는 폴더의 절대 경로여야 해요.",
         ));
     }
     std::fs::canonicalize(path)
@@ -92,7 +92,7 @@ pub(crate) fn canonical_directory(directory: &str) -> Result<PathBuf, ApiError> 
         .ok_or_else(|| {
             ApiError::new(
                 "INVALID_PROJECT",
-                "프로젝트 디렉터리를 확인할 수 없습니다. 폴더 접근 권한과 경로를 확인해 주세요.",
+                "프로젝트 폴더를 확인하지 못했어요. 폴더 접근 권한과 경로를 확인해 주세요.",
             )
         })
 }
@@ -167,7 +167,7 @@ pub fn decide_with(
     if resolution.mode == aam_protocol::RouteMode::Unmanaged {
         return Err(ApiError::new(
             "UNMANAGED_ROUTE",
-            "명시적인 비관리 경로에는 관리 lease를 발급하지 않습니다.",
+            "관리하지 않기로 한 경로에는 사용을 열지 않아요.",
         ));
     }
     let effective = crate::routes::effective(intent, &resolution);
@@ -220,13 +220,13 @@ pub fn decide_with(
             .unwrap_or(account.max_concurrency);
         let mut exclusions = Vec::new();
         if !project_allowed(policy, &account.id, &cwd) {
-            exclusions.push(reason("PROJECT_NOT_ALLOWED", "이 계정에 허용되지 않은 프로젝트입니다. 정책의 프로젝트 허용 목록을 확인해 주세요."));
+            exclusions.push(reason("PROJECT_NOT_ALLOWED", "이 계정에 허용되지 않은 프로젝트예요. 설정의 프로젝트 허용 목록을 확인해 주세요."));
         }
         if excluded.is_some_and(|source| same_identity(source, account)) {
-            exclusions.push(reason("CONTINUE_SOURCE", "이어 가기 전 대화를 쓰던 계정입니다."));
+            exclusions.push(reason("CONTINUE_SOURCE", "이어 가기 전에 쓰던 계정이에요."));
         }
         if pinned.is_some_and(|id| id != account.id) {
-            exclusions.push(reason("ACCOUNT_PINNED", "명시한 계정만 검사합니다."));
+            exclusions.push(reason("ACCOUNT_PINNED", "지정한 계정만 확인해요."));
         }
         // 공급자 수동 배정 계정은 사용자가 직접 고른 것이므로 자동 배정을 꺼도 쓴다. 다른 계정으로 넘기지는 않는다.
         if !manual
@@ -236,16 +236,16 @@ pub fn decide_with(
         {
             exclusions.push(reason(
                 "AUTOMATIC_PAUSED",
-                "자동 배정이 일시 중지되었습니다. 계정을 직접 선택하세요.",
+                "자동 고르기가 잠시 멈췄어요. 계정을 직접 선택해 주세요.",
             ));
         }
         if !account.enabled {
-            exclusions.push(reason("ACCOUNT_DISABLED", "새 배정에서 제외된 계정입니다."));
+            exclusions.push(reason("ACCOUNT_DISABLED", "새 배정에서 뺀 계정이에요."));
         }
         if account.auth_status != "authenticated" {
             exclusions.push(reason(
                 "AUTH_REQUIRED",
-                "공식 CLI에서 인증 상태를 확인하세요.",
+                "공식 CLI에서 로그인 상태를 확인해 주세요.",
             ));
         }
         if !account.can_launch
@@ -257,13 +257,13 @@ pub fn decide_with(
         {
             exclusions.push(reason(
                 "ADAPTER_UNVERIFIED",
-                "프로필 격리와 실제 계정 확인이 검증되지 않았습니다.",
+                "프로필 분리와 실제 계정 확인이 아직 검증되지 않았어요.",
             ));
         }
         if active >= group_limit as usize {
             exclusions.push(reason(
                 "CAPACITY_RESERVED",
-                "실행 중이거나 시작 결과가 불확실한 세션이 동시 슬롯을 사용 중입니다.",
+                "실행 중이거나 시작 결과가 불확실한 대화가 동시 사용 자리를 쓰고 있어요.",
             ));
         }
         let mut applicable = Vec::new();
@@ -278,7 +278,7 @@ pub fn decide_with(
         if applicable.is_empty() && !manual {
             exclusions.push(reason(
                 "QUOTA_UNKNOWN",
-                "요청한 모델에 적용되는 사용량 관측이 없습니다.",
+                "요청한 모델의 한도 정보가 없어요.",
             ));
         }
         // 공식 설정에 저장된 기본 모델을 읽어 어떤 모델 전용 한도가 실제로 걸리는지 구분합니다.
@@ -324,7 +324,7 @@ pub fn decide_with(
             {
                 exclusions.push(reason(
                     "QUOTA_EXHAUSTED",
-                    "적용되는 사용량 한도가 소진되었습니다.",
+                    "적용되는 한도를 다 썼어요.",
                 ));
                 continue;
             }
@@ -341,7 +341,7 @@ pub fn decide_with(
                 {
                     exclusions.push(reason(
                         "QUOTA_STALE",
-                        "실제 upstream 관측이 오래되었습니다. 다시 조회하세요.",
+                        "실제 한도 정보가 오래됐어요. 다시 조회해 주세요.",
                     ));
                 } else if bucket.status != "known"
                     || bucket
@@ -350,13 +350,13 @@ pub fn decide_with(
                 {
                     exclusions.push(reason(
                         "QUOTA_UNKNOWN",
-                        "사용량을 확인할 수 없어 자동 배정하지 않습니다.",
+                        "한도를 확인하지 못해 자동으로 고르지 않아요.",
                     ));
                 }
                 if bucket.resets_at.is_none_or(|reset| reset <= now) {
                     exclusions.push(reason(
                         "RESET_UNCONFIRMED",
-                        "리셋 시각이 없거나 지났습니다. 새 관측이 필요합니다.",
+                        "리셋 시각이 없거나 지났어요. 새 한도 정보가 필요해요.",
                     ));
                 }
             }
@@ -407,7 +407,7 @@ pub fn decide_with(
         };
         if eligible {
             if intent.model == NATIVE_DEFAULT_MODEL {
-                exclusions.push("모델은 공식 CLI의 기존 설정을 유지합니다. 공통 한도로 입장을 판정하고 모델 전용 한도는 아래 안내로만 표시합니다.".into());
+                exclusions.push("모델은 공식 CLI의 기존 설정을 유지해요. 공통 한도로 입장만 판단하고, 모델 전용 한도는 안내로만 보여요.".into());
             }
             exclusions.push(if manual {
                 "고정된 계정만 선택하며 배정 모드와 소비 순서를 적용하지 않습니다. 미확인 사용량은 보장하지 않습니다.".into()

@@ -6,7 +6,7 @@ fn named(code: &str, name: &str, why: &str, next: &str) -> ApiError {
     ApiError::new(
         code,
         format!(
-            "관리 실행에서 사용할 수 없습니다: '{name}'. {why} {next} 입력 값은 출력하지 않았습니다."
+            "'{name}'은 여기서 쓸 수 없어요. {why} {next} 입력한 값은 보여 주지 않았어요."
         ),
     )
 }
@@ -15,8 +15,8 @@ fn settings_blocked() -> ApiError {
     named(
         "AUTH_OVERRIDE_CONFLICT",
         "--settings",
-        "인증·엔드포인트·모델·helper 설정을 담을 수 있습니다.",
-        "호스트가 넣는 hook 설정만 허용됩니다.",
+        "로그인, 주소, 모델, 도우미 설정이 들어갈 수 있어요.",
+        "앱이 넣는 hook 설정만 허용해요.",
     )
 }
 
@@ -29,7 +29,7 @@ fn auth_named(name: &str, next: &str) -> ApiError {
     named(
         "AUTH_OVERRIDE_CONFLICT",
         name,
-        "구독 인증·프로필·공급자·엔드포인트를 바꿀 수 있습니다.",
+        "로그인, 프로필, 공급자, 주소를 바꿀 수 있어요.",
         next,
     )
 }
@@ -41,7 +41,7 @@ fn unsupported_named(name: &str, why: &str, next: &str) -> ApiError {
 fn unreadable_arg() -> ApiError {
     ApiError::new(
         "NATIVE_OPTION_UNSUPPORTED",
-        "확인할 수 없는 인수는 관리 실행에서 사용할 수 없습니다. 값은 출력하지 않았습니다.",
+        "확인할 수 없는 인수는 여기서 쓸 수 없어요. 값은 보여 주지 않았어요.",
     )
 }
 
@@ -49,7 +49,7 @@ fn unreadable_arg() -> ApiError {
 fn duplicate_resume() -> ApiError {
     ApiError::new(
         "AUTH_OVERRIDE_CONFLICT",
-        "관리 실행에서 사용할 수 없습니다: '--resume'. 재개 옵션을 겹쳐 지정했습니다. `--resume ID` 또는 `--continue` 중 하나만 사용하세요. 입력 값은 출력하지 않았습니다.",
+        "'--resume'은 여기서 겹쳐 쓸 수 없어요. `--resume ID` 또는 `--continue` 중 하나만 써 주세요. 입력한 값은 보여 주지 않았어요.",
     )
 }
 
@@ -87,16 +87,16 @@ fn model_option(tool: &str, name: &str) -> bool {
 fn blocked_session_flag(name: &str) -> Option<ApiError> {
     let (why, next) = match name {
         "--bg" | "--background" => (
-            "백그라운드 세션은 계정 예약이 끝난 뒤에도 계속 돌아갑니다.",
-            "앞단에서 실행하세요.",
+            "백그라운드로 두면 계정 사용이 끝난 뒤에도 계속 돌아요.",
+            "앞에서 실행해 주세요.",
         ),
         "--desktop" => (
-            "데스크톱 앱으로 넘기면 계정 예약을 유지할 수 없습니다.",
-            "터미널에서 실행하세요.",
+            "데스크톱 앱으로 넘기면 계정 사용을 유지할 수 없어요.",
+            "터미널에서 실행해 주세요.",
         ),
         "--cloud" | "--environment" | "--teleport" | "--from-pr" => (
-            "이 옵션은 Ojak이 계정을 매핑할 수 없는 다른 세션을 엽니다.",
-            "관리 대화는 `aam continue`를 사용하세요.",
+            "이 옵션은 Ojak이 계정을 고를 수 없는 다른 대화를 열어요.",
+            "이어서 하려면 `aam continue`를 써 주세요.",
         ),
         _ => return None,
     };
@@ -237,8 +237,8 @@ pub fn validate_native_args(tool: &str, args: &[OsString]) -> Result<(), ApiErro
             if model_option(tool, name) {
                 return Err(unsupported_named(
                     name,
-                    "모델은 계정 배정에 쓰이므로 이 옵션으로 덮지 않습니다.",
-                    "`claude --model 이름`, `codex --model 이름` 또는 `aam run --model 이름`으로 지정하세요.",
+                    "모델은 계정을 고를 때 쓰므로 이 옵션으로 덮지 않아요.",
+                    "`claude --model 이름`, `codex --model 이름` 또는 `aam run --model 이름`으로 지정해 주세요.",
                 ));
             }
             if auth_option(tool, name) {
@@ -348,7 +348,7 @@ pub fn shim_resume(
                 None => {
                     index += 1;
                     args.get(index).and_then(|value| value.to_str()).ok_or_else(|| {
-                        ApiError::new("SESSION_REQUIRED", "관리 세션 ID가 필요합니다. 대화 선택기는 계정을 추측하므로 지원하지 않습니다.")
+                        ApiError::new("SESSION_REQUIRED", "대화 ID가 필요해요. 대화 선택기는 계정을 추측해서 지원하지 않아요.")
                     })?
                 }
             };

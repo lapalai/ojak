@@ -3,7 +3,7 @@
 fn main() {
     let args: Vec<String> = std::env::args().skip(1).collect();
     if args.iter().any(|arg| arg == "--help" || arg == "-h") {
-        println!("aam-service [--foreground]\n사용자 전용 AI 계정 관리 서비스입니다. 로그인하거나 서비스를 설치하지 않습니다.");
+        println!("aam-service [--foreground]\n이 사용자만 쓰는 AI 계정 관리 서비스예요. 로그인하거나 서비스를 설치하지는 않아요.");
         return;
     }
     if args.iter().any(|arg| arg == "--version" || arg == "-V") {
@@ -11,13 +11,13 @@ fn main() {
         return;
     }
     if args.iter().any(|arg| arg != "--foreground") {
-        eprintln!("지원하지 않는 서비스 옵션입니다. --help를 확인하세요.");
+        eprintln!("지원하지 않는 서비스 옵션이에요. --help를 확인해 주세요.");
         std::process::exit(2);
     }
     let paths = match aam_protocol::Paths::discover() {
         Ok(paths) => paths,
         Err(_) => {
-            eprintln!("서비스 상태 경로를 확인할 수 없습니다.");
+            eprintln!("서비스 상태 폴더를 확인하지 못했어요.");
             std::process::exit(1);
         }
     };

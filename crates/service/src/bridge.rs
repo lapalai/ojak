@@ -513,7 +513,7 @@ impl Bridge {
             return;
         }
         if let Err(error) = ensure_token(&self.paths) {
-            self.state().error = Some(format!("브릿지 토큰을 만들지 못했습니다: {error}"));
+            self.state().error = Some(format!("Ojak 연결 토큰을 만들지 못했어요: {error}"));
             return;
         }
         if !self.listening.load(Ordering::SeqCst) {
@@ -526,7 +526,7 @@ impl Bridge {
                             // 인증 전 자원 소모를 막는다: 동시 연결 상한, 요청 전체 데드라인(읽기·쓰기 타임아웃),
                             // 스레드 생성 실패 시 panic으로 리스너를 잃지 않고 그 연결만 거절.
                             if bridge.connections.load(Ordering::SeqCst) >= MAX_CONNECTIONS {
-                                respond(&mut stream, 503, &json!({ "error": "브릿지 연결이 너무 많습니다." }));
+                                respond(&mut stream, 503, &json!({ "error": "Ojak 연결이 너무 많아요." }));
                                 continue;
                             }
                             let _ = stream.set_read_timeout(Some(REQUEST_TIMEOUT));
@@ -545,7 +545,7 @@ impl Bridge {
                     });
                 }
                 Err(error) => {
-                    self.state().error = Some(format!("브릿지 포트 {PORT}를 열지 못했습니다: {error}"));
+                    self.state().error = Some(format!("Ojak 연결 포트 {PORT}를 열지 못했어요: {error}"));
                     return;
                 }
             }
@@ -591,7 +591,7 @@ impl Bridge {
             }
             let used: Vec<u16> = state.gateways.iter().map(|gateway| gateway.port).collect();
             let Some(port) = (GATEWAY_FIRST_PORT..=GATEWAY_LAST_PORT).find(|port| !used.contains(port) && port_free(*port)) else {
-                state.error = Some("계정 gateway에 쓸 빈 포트가 없습니다.".into());
+                state.error = Some("계정 연결에 쓸 빈 포트가 없어요.".into());
                 break;
             };
             let (email, org) = parse_identity(identity);
@@ -614,7 +614,7 @@ impl Bridge {
             }
             // 다른 프로세스가 이미 포트를 쓰면 계정이 다른 gateway일 수 있으므로 연결하지 않는다.
             if !port_free(gateway.port) {
-                failures.push(format!("gateway 포트 {}가 사용 중입니다.", gateway.port));
+                failures.push(format!("연결 포트 {}가 사용 중이에요.", gateway.port));
                 continue;
             }
             gateway.spawned_at = now;
@@ -713,12 +713,12 @@ impl Bridge {
             return respond(&mut client, 200, &json!({ "ok": true, "enabled": self.enabled.load(Ordering::SeqCst) }));
         }
         if !self.enabled.load(Ordering::SeqCst) {
-            return respond(&mut client, 503, &json!({ "error": "AAM 계정 브릿지가 꺼져 있습니다." }));
+            return respond(&mut client, 503, &json!({ "error": "Ojak 계정 연결이 꺼져 있어요." }));
         }
         let expected = read_secret(self.paths.bridge_token());
         let presented = request.header("authorization").and_then(|value| value.strip_prefix("Bearer ")).map(str::trim);
         if expected.is_none() || !constant_eq(presented.unwrap_or(""), expected.as_deref().unwrap_or("")) {
-            return respond(&mut client, 401, &json!({ "error": "AAM 브릿지 인증에 실패했습니다." }));
+            return respond(&mut client, 401, &json!({ "error": "Ojak 연결 인증에 실패했어요." }));
         }
         let request = match read_body(&mut client, request, rest) {
             Ok(request) => request,
@@ -728,7 +728,7 @@ impl Bridge {
             ("GET", "/v1/models") => self.models(&mut client),
             ("GET", "/v1/providers") => self.providers(&mut client),
             ("POST", "/v1/pi/stream") => self.stream(&mut client, &request),
-            _ => respond(&mut client, 404, &json!({ "error": "AAM 브릿지는 pi-native 요청만 처리합니다." })),
+            _ => respond(&mut client, 404, &json!({ "error": "Ojak은 pi-native 요청만 처리해요." })),
         }
     }
 
@@ -784,11 +784,11 @@ impl Bridge {
     fn stream(&self, client: &mut TcpStream, request: &Request) {
         let body: Value = match serde_json::from_slice(&request.body) {
             Ok(value) => value,
-            Err(_) => return respond(client, 400, &json!({ "error": "요청 본문이 JSON이 아닙니다." })),
+            Err(_) => return respond(client, 400, &json!({ "error": "요청 본문이 JSON이 아니에요." })),
         };
         let Some(Target { provider, model, session, turn }) = request_target(&body) else {
             let named = body.get("modelId").and_then(Value::as_str).unwrap_or_default();
-            return respond(client, 400, &json!({ "error": format!("AAM 브릿지가 처리하지 않는 모델입니다: {named}") }));
+            return respond(client, 400, &json!({ "error": format!("Ojak이 처리하지 않는 모델이에요: {named}") }));
         };
         let tools = body.pointer("/context/tools").and_then(Value::as_array).map_or(0, Vec::len);
         let cwd = body.pointer("/options/cwd").and_then(Value::as_str).map(str::to_owned);
@@ -808,11 +808,11 @@ impl Bridge {
             }
             Err(_) => match self.state().known.clone() {
                 Some(view) => view,
-                None => return respond(client, 503, &json!({ "error": "AAM 브릿지가 계정 사용량을 아직 읽지 못했습니다. 잠시 뒤 다시 시도해 주세요." })),
+                None => return respond(client, 503, &json!({ "error": "Ojak이 계정 한도를 아직 읽지 못했어요. 잠시 뒤 다시 시도해 주세요." })),
             },
         };
         let Some(token) = gateway_token() else {
-            return respond(client, 503, &json!({ "error": "omp auth-gateway 토큰이 없습니다." }));
+            return respond(client, 503, &json!({ "error": "omp 로그인 연결 토큰이 없어요." }));
         };
         let mut tried = Vec::new();
         let mut last_limited: Option<Vec<u8>> = None;
@@ -924,7 +924,7 @@ impl Bridge {
                 let _ = client.write_all(&bytes);
                 let _ = client.shutdown(Shutdown::Both);
             }
-            None => respond(client, 503, &json!({ "error": format!("AAM 브릿지: {model}에 쓸 수 있는 {provider} 계정이 없습니다.") })),
+            None => respond(client, 503, &json!({ "error": format!("Ojak: {model}에 쓸 수 있는 {provider} 계정이 없어요.") })),
         }
     }
 
@@ -1060,8 +1060,8 @@ struct BrokerIdentities {
 
 /// broker snapshot에서 공급자와 identityKey만 꺼낸다. 토큰 등 나머지 값은 보관하지 않는다.
 fn broker_identities() -> Result<BrokerIdentities, String> {
-    let token = broker_token().ok_or("OMP broker 토큰을 읽지 못했습니다. `aam omp-broker connect`를 먼저 실행하세요.")?;
-    let body = http_get(BROKER_PORT, "/v1/snapshot", &token).map_err(|_| "OMP broker에 연결하지 못했습니다.".to_owned())?;
+    let token = broker_token().ok_or("omp 로그인 연결 토큰을 읽지 못했어요. `aam omp-broker connect`를 먼저 실행해 주세요.")?;
+    let body = http_get(BROKER_PORT, "/v1/snapshot", &token).map_err(|_| "omp 로그인 연결에 닿지 못했어요.".to_owned())?;
     let mut oauth = Vec::new();
     let mut providers = BTreeSet::new();
     fn walk(value: &Value, oauth: &mut Vec<(String, String)>, providers: &mut BTreeSet<String>) {
@@ -1095,8 +1095,8 @@ fn broker_identities() -> Result<BrokerIdentities, String> {
 }
 
 fn spawn_gateway(paths: &Paths, gateway: &Gateway, providers: &BTreeSet<String>) -> Result<(Child, GatewayJob), String> {
-    let omp = native_omp().ok_or("원본 OMP 실행 파일 경로를 확인하지 못했습니다.")?;
-    let broker = broker_token().ok_or("OMP broker 토큰을 읽지 못했습니다.")?;
+    let omp = native_omp().ok_or("원래 omp 실행 파일 경로를 확인하지 못했어요.")?;
+    let broker = broker_token().ok_or("omp 로그인 연결 토큰을 읽지 못했어요.")?;
     let root = paths.home.join("bridge");
     let agent = root.join("agent");
     let pools = root.join("pools");

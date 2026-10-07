@@ -261,13 +261,13 @@ npx tauri signer generate -w "$HOME/.tauri/ojak.key"
 
 # Bahasa Indonesia
 
-Ojak adalah aplikasi menu bar macOS dan tray Windows untuk melihat pemakaian beberapa akun langganan AI dalam satu layar, lalu menjalankan CLI resmi (Claude Code, Codex) dengan akun yang tepat. Ojak bukan alat untuk mengakali batas pemakaian.
+Ojak adalah aplikasi menu bar macOS dan tray Windows. Kamu bisa lihat pemakaian beberapa akun langganan AI dalam satu layar, lalu jalankan CLI resmi (Claude Code, Codex) dengan akun yang pas. Ojak bukan alat untuk mengakali batas pemakaian.
 
-Namanya diambil dari *ojak* (오작), kawanan gagak dan murai dalam dongeng Korea. Setahun sekali, mereka membentuk jembatan di atas Bima Sakti agar sepasang kekasih yang terpisah bisa bertemu. Ojak juga begitu: pekerjaan Anda diantarkan ke akun yang paling pas.
+Namanya dari *ojak* (오작), kawanan gagak dan murai dalam dongeng Korea. Setahun sekali mereka membuat jembatan di Bima Sakti supaya dua kekasih yang terpisah bisa bertemu. Ojak juga begitu: kerjaanmu sampai ke akun yang pas.
 
-Gunakan hanya akun milik Anda sendiri, dan jangan dipakai untuk berbagi akun. Fitur jembatan omp bersifat opsional, mati secara bawaan, dan bisa bertentangan dengan ketentuan penyedia layanan. Ojak adalah proyek tidak resmi dan tidak berafiliasi dengan Anthropic, OpenAI, Google, maupun xAI.
+Pakai hanya akun milikmu. Jangan dipakai untuk berbagi akun. Sambungan omp opsional, mati secara bawaan, dan bisa bentrok dengan ketentuan penyedia. Ojak proyek tidak resmi dan tidak berafiliasi dengan Anthropic, OpenAI, Google, maupun xAI.
 
-Aplikasinya sudah tersedia dalam Bahasa Indonesia (Pengaturan → Bahasa). Panduan instalasi dan penggunaan lengkap ada di bagian [English](#english) di bawah.
+Bahasa Indonesia sudah ada di aplikasi (Pengaturan → Bahasa). Panduan pasang dan pakai lengkap ada di bagian [English](#english) di bawah.
 
 Status: pratinjau awal (pre-release). [Kontribusi](CONTRIBUTING.md) · [Keamanan](SECURITY.md) · [Kode etik](CODE_OF_CONDUCT.md).
 

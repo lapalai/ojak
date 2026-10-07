@@ -30,7 +30,7 @@ function bridgeToken() {
     const token = readFileSync(join(aamHome(), 'bridge.token'), 'utf8').trim();
     if (token) return token;
   } catch {}
-  throw new Error("Ojak 계정 브릿지가 꺼져 있습니다. Ojak 앱의 연결 상태에서 'OMP 계정 브릿지'를 연결해 주세요.");
+  throw new Error("Ojak 계정 연결이 꺼져 있어요. Ojak 앱의 연결에서 'omp 계정 연결'을 켜 주세요.");
 }
 
 async function connectedAccounts(token, upstream) {
@@ -38,9 +38,9 @@ async function connectedAccounts(token, upstream) {
   try {
     response = await fetch(`${BRIDGE}/v1/providers`, { headers: { Authorization: `Bearer ${token}` } });
   } catch {
-    throw new Error('Ojak 계정 브릿지에 연결하지 못했습니다. Ojak 서비스가 실행 중인지 확인해 주세요.');
+    throw new Error('Ojak 계정 연결에 닿지 못했어요. Ojak 서비스가 실행 중인지 확인해 주세요.');
   }
-  if (!response.ok) throw new Error(`Ojak 계정 브릿지가 로그인을 거부했습니다 (${response.status}).`);
+  if (!response.ok) throw new Error(`Ojak 계정 연결이 로그인을 거절했어요 (${response.status}).`);
   const body = await response.json();
   const entry = Array.isArray(body?.providers) ? body.providers.find(item => item?.provider === upstream) : undefined;
   return typeof entry?.accounts === 'number' ? entry.accounts : 0;
@@ -103,7 +103,7 @@ export default function aamAccounts(pi) {
         async login() {
           const token = bridgeToken();
           if ((await connectedAccounts(token, upstream)) === 0) {
-            throw new Error(`Ojak에 연결된 ${label.slice('Ojak · '.length)} 계정이 없습니다. omp에서 원래 공급자로 /login하면 최대 1분 뒤에 나타납니다.`);
+            throw new Error(`Ojak에 연결된 ${label.slice('Ojak · '.length)} 계정이 없어요. omp에서 원래 공급자로 /login하면 최대 1분 뒤에 보여요.`);
           }
           return credentials(token);
         },
@@ -123,7 +123,7 @@ export default function aamAccounts(pi) {
       async fetchDynamicModels() {
         const token = bridgeToken();
         const response = await fetch(`${BRIDGE}/v1/models`, { headers: { Authorization: `Bearer ${token}` } });
-        if (!response.ok) throw new Error(`Ojak 브릿지 모델 목록을 읽지 못했습니다 (${response.status}).`);
+        if (!response.ok) throw new Error(`Ojak 모델 목록을 읽지 못했어요 (${response.status}).`);
         const body = await response.json();
         return bridgedModels(body?.data, upstream);
       },

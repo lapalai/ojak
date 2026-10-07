@@ -18,8 +18,8 @@ use std::path::Path;
 #[command(
     name = "aam",
     version,
-    about = "AI 계정 상태와 안전한 native 실행을 관리합니다.",
-    after_help = "native 인수는 -- 뒤에 전달합니다. 인증·모델·프로필 변경 옵션은 차단하며 원본 로그인과 shell 설정을 자동으로 바꾸지 않습니다."
+    about = "AI 계정과 공식 CLI 실행을 관리해요.",
+    after_help = "도구 인수는 -- 뒤에 넣어요. 로그인·모델·프로필을 바꾸는 옵션은 막아요. 원래 로그인과 셸 설정은 건드리지 않아요."
 )]
 struct Cli {
     #[command(subcommand)]
@@ -34,88 +34,88 @@ enum Action {
         #[arg(long)]
         directory: PathBuf,
     },
-    #[command(about = "실제 계정·할당·세션 상태를 조회합니다.")]
+    #[command(about = "계정, 한도, 대화 상태를 보여 줘요.")]
     Status {
         #[arg(long)]
         json: bool,
     },
-    #[command(about = "설치 도구와 검증되지 않은 지원 기능을 확인합니다.")]
+    #[command(about = "설치와 아직 확인되지 않은 기능을 점검해요.")]
     Doctor,
-    #[command(about = "추론 없이 계정과 사용량을 새로 조회합니다.")]
+    #[command(about = "계정과 한도를 다시 불러와요.")]
     Refresh,
-    #[command(about = "예약하지 않고 계정 선택 이유를 확인합니다.")]
+    #[command(about = "계정을 잡지 않고, 왜 그 계정을 골랐는지 봐요.")]
     Explain(Explain),
-    #[command(about = "선택 계정을 최종 확인한 뒤 native CLI를 실행합니다.")]
+    #[command(about = "계정을 확인한 뒤 공식 CLI를 실행해요.")]
     Run(Run),
-    #[command(about = "한도를 다 쓴 Claude Code·Codex 대화를 다른 계정에서 이어 엽니다(대화 기록만 옮기고 로그인은 바꾸지 않음).")]
+    #[command(about = "한도를 다 쓴 대화를 다른 계정에서 이어요. 기록만 옮기고 로그인은 그대로예요.")]
     Continue {
-        #[arg(long, help = "claude 또는 codex. 없으면 현재 폴더에서 더 최근에 쓴 도구")]
+        #[arg(long, help = "claude 또는 codex. 비우면 이 폴더에서 최근에 쓴 도구")]
         tool: Option<String>,
-        #[arg(long, help = "이어 갈 관리 세션 ID. 없으면 현재 폴더에서 이 도구의 마지막 대화")]
+        #[arg(long, help = "이어 갈 대화 ID. 비우면 이 폴더의 마지막 대화")]
         session: Option<String>,
-        #[arg(long, help = "이어 받을 계정 ID. 없으면 원래 계정을 뺀 자동 배정")]
+        #[arg(long, help = "받을 계정 ID. 비우면 원래 계정을 빼고 자동으로 골라요")]
         account: Option<String>,
-        #[arg(last = true, help = "도구에 그대로 넘길 인수(예: -- -p \"질문\", Codex는 -- exec \"질문\")")]
+        #[arg(last = true, help = "도구에 그대로 넘길 인수(예: -- -p \"질문\". Codex는 -- exec \"질문\")")]
         native_args: Vec<std::ffi::OsString>,
     },
-    #[command(about = "기존 프로필을 연결하거나 명시적인 native 로그인을 시작합니다.")]
+    #[command(about = "프로필을 연결하거나 공식 로그인을 시작해요.")]
     Account {
         #[command(subcommand)]
         action: AccountAction,
     },
-    #[command(about = "사용자 단위 LaunchAgent를 명시적으로 설치하거나 제거합니다.")]
+    #[command(about = "로그인할 때 자동 실행을 켜거나 꺼요.")]
     Service {
         #[command(subcommand)]
         action: ServiceAction,
     },
-    #[command(about = "실행 가능한 도구만 원본 CLI를 보존하는 관리형 shim에 연결합니다.")]
+    #[command(about = "쓸 수 있는 도구만 Ojak 명령으로 연결해요. 원래 CLI는 그대로 둬요.")]
     Integration {
         #[command(subcommand)]
         action: IntegrationAction,
     },
-    #[command(about = "원본 OMP를 auth broker에 연결하거나 연결을 해제합니다.")]
+    #[command(about = "omp 로그인을 Ojak에 연결하거나 끊어요.")]
     OmpBroker {
         #[command(subcommand)]
         action: OmpBrokerAction,
     },
-    #[command(about = "omp의 Ojak 공급자를 자동으로 로그인하거나 연결을 해제합니다. 새 세션에서 /model로 ojak-* 모델을 고릅니다.")]
+    #[command(about = "omp에서 Ojak 계정을 연결하거나 끊어요. 새 세션에서 /model로 ojak-* 모델을 고르세요.")]
     OmpBridge {
         #[command(subcommand)]
         action: OmpBridgeAction,
     },
-    #[command(about = "OMP의 읽기 전용 계정 관측 확장을 설치하거나 제거합니다.")]
+    #[command(about = "omp에서 계정 사용량만 읽는 확장을 설치하거나 제거해요.")]
     OmpObserver {
         #[command(subcommand)]
         action: ObserverAction,
     },
-    #[command(about = "외부에서 시작한 대화를 확인된 소유 계정으로 관리에 인계합니다.")]
+    #[command(about = "밖에서 시작한 대화를, 확인된 계정으로 넘겨요.")]
     Takeover {
         #[command(subcommand)]
         action: TakeoverAction,
     },
-    #[command(about = "처음 쓰는 데 필요한 서비스·명령 연결·터미널 PATH 중 빠진 것만 설치하고 준비 상태를 JSON으로 출력합니다.")]
+    #[command(about = "처음 쓰는 데 빠진 것만 설치하고, 준비 상태를 JSON으로 보여 줘요.")]
     Setup {
-        #[arg(long, conflicts_with = "status", help = "설치하지 않고 새 로그인 셸의 명령 연결까지 확인합니다.")]
+        #[arg(long, conflicts_with = "status", help = "설치하지 않고, 새 터미널에서 명령이 연결됐는지 확인해요.")]
         check: bool,
-        #[arg(long, conflicts_with = "with_omp", help = "사용자 셸을 실행하지 않고 설정 상태만 조회합니다.")]
+        #[arg(long, conflicts_with = "with_omp", help = "셸을 실행하지 않고 설정만 확인해요.")]
         status: bool,
-        #[arg(long, conflicts_with = "check", help = "기존 안전 설치 경로로 omp 연결도 함께 준비합니다.")]
+        #[arg(long, conflicts_with = "check", help = "같은 방식으로 omp 연결도 준비해요.")]
         with_omp: bool,
     },
-    #[command(about = "zsh의 앱 전용 PATH 블록을 명시적으로 설치하거나 제거합니다.")]
+    #[command(about = "zsh에 Ojak 명령 경로를 넣거나 빼요.")]
     Shell {
         #[command(subcommand)]
         action: ShellAction,
     },
-    #[command(about = "Ojak 연결을 모두 풀어 설치 전 형태로 되돌립니다. 계정·프로필·로그는 보존합니다.")]
+    #[command(about = "Ojak 연결을 풀어 설치 전으로 돌려요. 계정, 프로필, 로그는 남겨요.")]
     Deactivate {
-        #[arg(long, help = "바꾸지 않고 되돌릴 단계만 보여 줍니다.")]
+        #[arg(long, help = "바꾸지 않고 되돌릴 단계만 보여 줘요.")]
         dry_run: bool,
     },
 }
 #[derive(Args)]
 #[command(
-    after_help = "관리 실행: aam run claude|codex [--account <계정 ID>] [--model <모델>] [--cwd <프로젝트>] [-- <native 인수>]\n계정을 생략하면 관리 정책에 따라 시작할 때 한 번 선택하고 실행 중에는 변경하지 않습니다. omp는 Ojak이 실행하지 않으며, 새 omp 세션에서 /model로 ojak-* 모델을 고르면 Ojak이 계정을 배정합니다."
+    after_help = "실행: aam run claude|codex [--account <계정 ID>] [--model <모델>] [--cwd <프로젝트>] [-- <도구 인수>]\n계정을 비우면 시작할 때 한 번만 골라요. 실행 중에는 바꾸지 않아요. omp는 Ojak이 실행하지 않아요. 새 omp 세션에서 /model로 ojak-* 모델을 고르면 Ojak이 계정을 골라요."
 )]
 struct Run {
     tool: String,
@@ -143,7 +143,7 @@ struct Explain {
 }
 #[derive(Subcommand)]
 enum AccountAction {
-    #[command(about = "기존 공식 CLI 프로필을 복제하지 않고 연결합니다.")]
+    #[command(about = "공식 CLI 프로필을 복사하지 않고 연결해요.")]
     Add {
         #[arg(long)]
         tool: String,
@@ -152,7 +152,7 @@ enum AccountAction {
         #[arg(long)]
         profile: PathBuf,
     },
-    #[command(about = "분리된 프로필에서 공식 로그인을 실행합니다. --account가 있으면 그 프로필에서 다시 로그인합니다.")]
+    #[command(about = "분리된 프로필에서 공식 로그인을 열어요. --account가 있으면 그 프로필에서 다시 로그인해요.")]
     Login {
         #[arg(long)]
         tool: String,
@@ -169,7 +169,7 @@ enum AccountAction {
         )]
         fresh_settings: bool,
     },
-    #[command(about = "새 프로필에 가져올 수 있는 인증 없는 설정과 제외 항목을 미리 봅니다.")]
+    #[command(about = "새 프로필에 가져올 수 있는 설정과 빼는 항목을 미리 봐요. 로그인은 복사하지 않아요.")]
     SettingsPreview {
         #[arg(long)]
         tool: String,
@@ -218,16 +218,16 @@ enum ObserverAction {
 }
 #[derive(Subcommand)]
 enum TakeoverAction {
-    #[command(about = "등록된 인계와 인계 가능한 외부 대화를 확인합니다.")]
+    #[command(about = "넘겨 둔 대화와, 넘길 수 있는 바깥 대화를 봐요.")]
     List,
     #[command(
-        about = "대화의 소유 계정을 확인해 인계합니다. Claude는 대화 UUID, OMP는 대화 파일 경로를 지정합니다."
+        about = "대화의 계정을 확인한 뒤 넘겨요. Claude는 대화 UUID, omp는 대화 파일 경로를 넣어요."
     )]
     Adopt {
         tool: String,
         session: String,
     },
-    #[command(about = "등록한 인계를 해제합니다. 이미 만들어진 관리 세션은 유지됩니다.")]
+    #[command(about = "넘겨 둔 대화를 해제해요. 이미 만든 대화는 그대로 둬요.")]
     Release {
         tool: String,
         session: String,
@@ -243,7 +243,7 @@ enum ShellAction {
 fn path_text(path: PathBuf) -> Result<String, ApiError> {
     path.into_os_string()
         .into_string()
-        .map_err(|_| ApiError::new("INVALID_PATH", "경로는 UTF-8이어야 합니다."))
+        .map_err(|_| ApiError::new("INVALID_PATH", "경로에 읽을 수 없는 문자가 있어요."))
 }
 fn cwd(path: Option<PathBuf>) -> Result<String, ApiError> {
     path.map(path_text).unwrap_or_else(current_cwd)
@@ -253,14 +253,14 @@ fn print_json(value: &impl serde::Serialize) -> Result<(), ApiError> {
         "{}",
         serde_json::to_string_pretty(value).map_err(|_| ApiError::new(
             "SERIALIZATION_FAILED",
-            "출력 데이터를 생성하지 못했습니다."
+            "결과를 만들지 못했어요."
         ))?
     );
     Ok(())
 }
 fn print_snapshot(snapshot: &Snapshot) {
     println!(
-        "Ojak · 계정 {}개 · 자동 배정 {}",
+        "Ojak · 계정 {}개 · 자동으로 고르기 {}",
         snapshot.accounts.len(),
         if snapshot.policy.automatic {
             "켜짐"
@@ -281,24 +281,24 @@ fn print_snapshot(snapshot: &Snapshot) {
             }
         );
         println!(
-            "  인증: {} · 확인: {}",
+            "  로그인: {} · 확인: {}",
             account.auth_status, account.verification
         );
         if let Some(reason) = &account.reason {
-            println!("  사유: {reason}");
+            println!("  이유: {reason}");
         }
         for bucket in &account.buckets {
             let usage = bucket
                 .used_percent
                 .map(|v| format!("{v:.1}%"))
-                .unwrap_or_else(|| "알 수 없음".into());
+                .unwrap_or_else(|| "알 수 없어요".into());
             println!(
                 "  {}: {} · {} · {}",
                 bucket.label, usage, bucket.status, bucket.source
             );
         }
     }
-    println!("관리 세션 {}개 (종료 기록 포함)", snapshot.sessions.len());
+    println!("대화 {}개 (끝난 기록 포함)", snapshot.sessions.len());
     for session in &snapshot.sessions {
         println!(
             "{}  {}  {}  {}",
@@ -313,13 +313,13 @@ fn setup_omp(paths: &Paths, install: bool) -> Value {
         // 연결돼 있어도 감독 작업이 최신이 아니면(예: Windows에서 창을 띄우던 이전 broker 작업) 다시 연결해 옮긴다.
         if !omp_broker::status(paths).is_ok_and(|status| status.connected && status.supervised) { omp_broker::connect(paths)?; }
         omp_bridge::connect(paths)?;
-        let observer: Value = serde_json::from_str(&omp_observer::run("status").map_err(|_| ApiError::new("OBSERVER_STATUS_FAILED", "관측 확장을 확인하지 못했습니다."))?)
-            .map_err(|_| ApiError::new("PROTOCOL_MISMATCH", "관측 확장 응답을 해석하지 못했습니다."))?;
+        let observer: Value = serde_json::from_str(&omp_observer::run("status").map_err(|_| ApiError::new("OBSERVER_STATUS_FAILED", "사용량 확인 확장을 확인하지 못했어요."))?)
+            .map_err(|_| ApiError::new("PROTOCOL_MISMATCH", "사용량 확인 응답을 읽지 못했어요."))?;
         if observer["current"] != true {
             if observer["installed"] == true {
-                omp_observer::run("uninstall").map_err(|_| ApiError::new("OBSERVER_CONFLICT", "관측 확장 소유권을 확인할 수 없어 교체하지 않았습니다."))?;
+                omp_observer::run("uninstall").map_err(|_| ApiError::new("OBSERVER_CONFLICT", "확장 소유를 확인하지 못해 바꾸지 않았어요."))?;
             }
-            omp_observer::run("install").map_err(|_| ApiError::new("OBSERVER_CONFLICT", "관측 확장을 설치하지 못했습니다. 기존 파일과 소유권을 확인하세요."))?;
+            omp_observer::run("install").map_err(|_| ApiError::new("OBSERVER_CONFLICT", "확장을 설치하지 못했어요. 기존 파일과 소유를 확인해 주세요."))?;
         }
         Ok(())
     })();
@@ -331,7 +331,7 @@ fn setup_omp(paths: &Paths, install: bool) -> Value {
     let error = installed.err().map(|error| describe(&error))
         .or_else(|| broker.as_ref().err().map(describe))
         .or_else(|| bridge.as_ref().err().map(describe))
-        .or_else(|| observer.is_none().then(|| "관측 확장을 확인하지 못했습니다. (OBSERVER_STATUS_FAILED)".into()));
+        .or_else(|| observer.is_none().then(|| "사용량 확인 확장을 확인하지 못했어요. (OBSERVER_STATUS_FAILED)".into()));
     json!({
         "broker": broker.is_ok_and(|status| status.connected),
         "bridge": bridge.is_ok_and(|status| status.connected && status.bridge["listening"] == true),
@@ -378,13 +378,13 @@ fn execute(paths: &Paths, action: Action) -> Result<(), ApiError> {
                     tool.isolation
                 );
                 if let Some(path) = tool.binary_path {
-                    println!("  바이너리: {path}");
+                    println!("  실행 파일: {path}");
                 }
                 if let Some(reason) = tool.reason {
                     println!("  {reason}");
                 }
             }
-            println!("관리형 shim을 거치지 않는 절대 경로·외부 GUI·다른 기기의 실행은 통제하지 못합니다.");
+            println!("Ojak 명령을 거치지 않는 절대 경로, 다른 앱, 다른 기기의 실행은 관리하지 않아요.");
         }
         Action::Refresh => {
             print_json(&call(paths, "quota.refresh", json!({}))?)?;
@@ -431,7 +431,7 @@ fn execute(paths: &Paths, action: Action) -> Result<(), ApiError> {
                 },
         } => {
             let profile = std::fs::canonicalize(profile).map_err(|_| {
-                ApiError::new("INVALID_PROFILE", "프로필 폴더를 확인할 수 없습니다.")
+                ApiError::new("INVALID_PROFILE", "프로필 폴더를 확인하지 못했어요.")
             })?;
             let value: Value = call(
                 paths,
@@ -485,7 +485,7 @@ fn execute(paths: &Paths, action: Action) -> Result<(), ApiError> {
                     IntegrationAction::Uninstall => install::integration_uninstall(paths)?,
                     IntegrationAction::Extend { tool } => {
                         if aam_launcher::extend_integration(paths, &tool)? {
-                            format!("새 터미널의 `{tool}` 명령을 Ojak 관리 실행에 연결했습니다.")
+                            format!("새 터미널의 `{tool}` 명령이 Ojak으로 연결됐어요.")
                         } else {
                             String::new()
                         }
@@ -500,7 +500,7 @@ fn execute(paths: &Paths, action: Action) -> Result<(), ApiError> {
                     if json {
                         print_json(&value)?;
                     } else {
-                        println!("OMP 계정 연결: {} · 계정 {}개 · 자동 복구 {} · 설정: {}", if value.connected { "사용 가능" } else { "연결 안 됨" }, value.account_count.unwrap_or(0), if value.supervised { "등록됨" } else { "미등록" }, value.config_path);
+                        println!("omp 로그인 연결: {} · 계정 {}개 · 자동 복구 {} · 설정: {}", if value.connected { "쓸 수 있어요" } else { "연결 안 됨" }, value.account_count.unwrap_or(0), if value.supervised { "켜짐" } else { "꺼짐" }, value.config_path);
                     }
                 }
                 OmpBrokerAction::Connect => print_json(&omp_broker::connect(paths)?)?,
@@ -516,8 +516,8 @@ fn execute(paths: &Paths, action: Action) -> Result<(), ApiError> {
                     let gateways = value.bridge.get("gateways").and_then(|v| v.as_array()).map_or(0, Vec::len);
                     let sessions = value.bridge.get("sessions").and_then(|v| v.as_array()).map_or(0, Vec::len);
                     println!(
-                        "OMP 계정 브릿지: {} · 계정 gateway {gateways}개 · 고정 세션 {sessions}개 · omp 확장: {}",
-                        if value.connected { "연결됨 (새 omp 세션에서 /model로 ojak-* 모델 선택)" } else { "연결 안 됨" },
+                        "omp 계정 연결: {} · 계정 통로 {gateways}개 · 고정 대화 {sessions}개 · omp 확장: {}",
+                        if value.connected { "연결됨. 새 omp 세션에서 /model로 ojak-* 모델을 고르세요" } else { "연결 안 됨" },
                         if value.extension_installed { value.extension_path.as_str() } else { "미설치" }
                     );
                     if let Some(error) = value.bridge.get("error").and_then(|v| v.as_str()) {
@@ -531,7 +531,7 @@ fn execute(paths: &Paths, action: Action) -> Result<(), ApiError> {
         Action::OmpObserver { action } => {
             #[cfg(windows)]
             if matches!(action, ObserverAction::Write) {
-                return omp_observer_writer::serve(paths).map_err(|_| ApiError::new("OBSERVER_WRITE_FAILED", "관측 파일을 안전하게 기록하지 못했습니다."));
+                return omp_observer_writer::serve(paths).map_err(|_| ApiError::new("OBSERVER_WRITE_FAILED", "사용량 기록을 안전하게 쓰지 못했어요."));
             }
             let action = match action {
                 ObserverAction::Status => "status",
@@ -637,18 +637,18 @@ fn parse_management(args: &[OsString]) -> Result<ManagementParse, ApiError> {
 fn format_usage_error(error: &clap::Error) -> ApiError {
     use clap::error::ErrorKind;
     let problem = match error.kind() {
-        ErrorKind::MissingRequiredArgument => "필수 인수가 빠졌습니다.",
-        ErrorKind::MissingSubcommand => "하위 명령이 빠졌습니다.",
-        ErrorKind::InvalidSubcommand => "알 수 없는 하위 명령입니다.",
-        ErrorKind::UnknownArgument => "알 수 없는 옵션 또는 인수입니다.",
-        ErrorKind::InvalidValue | ErrorKind::ValueValidation => "인수 값이 올바르지 않습니다.",
-        ErrorKind::TooManyValues => "인수 값이 너무 많습니다.",
-        ErrorKind::TooFewValues => "인수 값이 부족합니다.",
-        ErrorKind::WrongNumberOfValues => "인수 개수가 맞지 않습니다.",
-        ErrorKind::ArgumentConflict => "함께 쓸 수 없는 옵션입니다.",
-        ErrorKind::NoEquals => "이 옵션은 등호(=)로 값을 적어야 합니다.",
-        ErrorKind::InvalidUtf8 => "인수에 올바른 문자가 아닌 값이 있습니다.",
-        _ => "명령 형식이 올바르지 않습니다.",
+        ErrorKind::MissingRequiredArgument => "필수 항목이 빠졌어요.",
+        ErrorKind::MissingSubcommand => "하위 명령이 빠졌어요.",
+        ErrorKind::InvalidSubcommand => "알 수 없는 명령이에요.",
+        ErrorKind::UnknownArgument => "알 수 없는 옵션이나 인수예요.",
+        ErrorKind::InvalidValue | ErrorKind::ValueValidation => "인수 값이 맞지 않아요.",
+        ErrorKind::TooManyValues => "인수 값이 너무 많아요.",
+        ErrorKind::TooFewValues => "인수 값이 부족해요.",
+        ErrorKind::WrongNumberOfValues => "인수 개수가 맞지 않아요.",
+        ErrorKind::ArgumentConflict => "함께 쓸 수 없는 옵션이에요.",
+        ErrorKind::NoEquals => "이 옵션은 등호(=)로 값을 적어야 해요.",
+        ErrorKind::InvalidUtf8 => "인수에 읽을 수 없는 문자가 있어요.",
+        _ => "명령 형식이 맞지 않아요.",
     };
     let mut message = problem.to_string();
     if matches!(
@@ -664,7 +664,7 @@ fn format_usage_error(error: &clap::Error) -> ApiError {
         message.push_str(&usage);
         message.push('.');
     }
-    message.push_str(" 자세한 형식은 aam --help 또는 해당 명령의 --help를 확인하세요. 입력 값은 출력하지 않았습니다.");
+    message.push_str(" 자세한 형식은 aam --help 또는 해당 명령의 --help를 봐 주세요. 입력한 값은 보여 주지 않았어요.");
     ApiError::new("INVALID_ARGUMENT", message)
 }
 
@@ -734,7 +734,7 @@ fn main() {
     }
     let result = (|| {
         let paths = Paths::discover().map_err(|_| {
-            ApiError::new("PATHS_UNAVAILABLE", "앱 관리 경로를 확인하지 못했습니다.")
+            ApiError::new("PATHS_UNAVAILABLE", "앱 폴더를 확인하지 못했어요.")
         })?;
         let args: Vec<OsString> = std::env::args_os().collect();
         if args
@@ -749,7 +749,7 @@ fn main() {
         // Windows shim(`claude.cmd`)은 `aam.exe --shim claude ...`로 부른다. Unix shim은 symlink라 argv0 이름으로 고른다.
         let shim = if args.get(1).is_some_and(|arg| arg == "--shim") {
             let tool = args.get(2).and_then(|arg| arg.to_str()).and_then(|name| ["claude", "codex"].into_iter().find(|tool| *tool == name))
-                .ok_or_else(|| ApiError::new("INVALID_ARGUMENT", "알 수 없는 shim 도구입니다."))?;
+                .ok_or_else(|| ApiError::new("INVALID_ARGUMENT", "알 수 없는 명령이에요."))?;
             Some((tool, 3))
         } else {
             args.first().and_then(|arg| arguments::tool_from_argv0(arg)).map(|tool| (tool, 1))
@@ -781,7 +781,7 @@ fn main() {
         eprintln!("aam: {} ({})", error.message, error.code);
         // 앱이 새 콘솔 창으로 연 실행은 끝나자마자 창이 닫혀 오류를 읽을 수 없다. 그 경우에만 Enter를 기다린다.
         if std::env::var_os("AAM_HOLD_ON_ERROR").is_some() {
-            eprintln!("Enter를 누르면 창을 닫습니다.");
+            eprintln!("Enter를 누르면 창을 닫아요.");
             let mut line = String::new();
             let _ = std::io::stdin().read_line(&mut line);
         }

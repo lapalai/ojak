@@ -44,17 +44,17 @@ fn error(code: &str, message: &str) -> ApiError {
 fn home() -> Result<PathBuf, ApiError> {
     aam_protocol::user_home()
         .filter(|path| path.is_absolute())
-        .ok_or_else(|| error("HOME_UNAVAILABLE", "사용자 홈 경로를 확인하지 못했습니다."))
+        .ok_or_else(|| error("HOME_UNAVAILABLE", "사용자 홈 경로를 확인하지 못했어요."))
 }
 
 fn write_settings(paths: &Paths, enabled: bool) -> Result<(), ApiError> {
-    fs::create_dir_all(&paths.home).map_err(|_| error("BRIDGE_STATE_FAILED", "브릿지 상태 폴더를 만들지 못했습니다."))?;
+    fs::create_dir_all(&paths.home).map_err(|_| error("BRIDGE_STATE_FAILED", "Ojak 연결 상태 폴더를 만들지 못했어요."))?;
     let path = paths.bridge_settings();
     let tmp = path.with_extension("json.tmp");
     fs::write(&tmp, json!({ "enabled": enabled }).to_string())
         .and_then(|_| aam_protocol::secure::restrict_file(&tmp))
         .and_then(|_| fs::rename(&tmp, &path))
-        .map_err(|_| error("BRIDGE_STATE_FAILED", "브릿지 설정을 쓰지 못했습니다."))
+        .map_err(|_| error("BRIDGE_STATE_FAILED", "Ojak 연결 설정을 쓰지 못했어요."))
 }
 
 fn bridge_status(paths: &Paths) -> Value {
@@ -85,7 +85,7 @@ const RENAMED: [(&str, &str); 5] = [
     ("aam-zai", "ojak-zai"),
 ];
 /// omp에 원래 공급자 계정이 하나도 없을 때. gateway가 생기지 않으므로 기다리지 않는다.
-const NO_OMP_ACCOUNT: &str = "omp에 로그인된 계정이 없습니다. omp에서 /login으로 Claude·Codex 등 계정을 먼저 추가하세요.";
+const NO_OMP_ACCOUNT: &str = "omp에 로그인된 계정이 없어요. omp에서 /login으로 Claude·Codex 등 계정을 먼저 추가해 주세요.";
 /// Ojak 공급자와 원래 공급자. 연결을 해제하면 역할 모델을 원래 공급자로 되돌린다. `service/src/bridge.rs` ALIASES와 같은 표다.
 const UPSTREAM: [(&str, &str); 5] = [
     ("ojak-claude", "anthropic"),
@@ -101,7 +101,7 @@ fn omp() -> Result<PathBuf, ApiError> {
     #[cfg(windows)]
     let fallback = std::env::var_os("LOCALAPPDATA").map(PathBuf::from)
         .map(|path| path.join("omp/omp.exe"))
-        .ok_or_else(|| error("HOME_UNAVAILABLE", "OMP 설치 경로를 확인하지 못했습니다."))?;
+        .ok_or_else(|| error("HOME_UNAVAILABLE", "omp 설치 경로를 확인하지 못했어요."))?;
     #[cfg(unix)]
     let fallback = home()?.join(".local/bin/omp");
     Ok(std::env::var_os("OMP_NATIVE_BIN").map(PathBuf::from).unwrap_or(fallback))
@@ -112,7 +112,7 @@ fn config_get(key: &str) -> Result<Value, ApiError> {
     let output = std::process::Command::new(omp()?)
         .args(["config", "get", key, "--json"])
         .output()
-        .map_err(|_| error("OMP_CONFIG_FAILED", "omp 설정을 읽지 못했습니다."))?;
+        .map_err(|_| error("OMP_CONFIG_FAILED", "omp 설정을 읽지 못했어요."))?;
     Ok(serde_json::from_slice::<Value>(&output.stdout).ok().and_then(|value| value.get("value").cloned()).unwrap_or(Value::Null))
 }
 
@@ -120,9 +120,9 @@ fn config_set(key: &str, value: &Value) -> Result<(), ApiError> {
     let status = std::process::Command::new(omp()?)
         .args(["config", "set", key, &value.to_string()])
         .output()
-        .map_err(|_| error("OMP_CONFIG_FAILED", "omp 설정을 바꾸지 못했습니다."))?;
+        .map_err(|_| error("OMP_CONFIG_FAILED", "omp 설정을 바꾸지 못했어요."))?;
     if !status.status.success() {
-        return Err(error("OMP_CONFIG_FAILED", "omp 설정을 바꾸지 못했습니다."));
+        return Err(error("OMP_CONFIG_FAILED", "omp 설정을 바꾸지 못했어요."));
     }
     Ok(())
 }
@@ -178,7 +178,7 @@ fn detach_model_roles(paths: &Paths) -> Result<(), ApiError> {
     backup.extend(changed);
     fs::write(&path, Value::Object(backup).to_string())
         .and_then(|_| aam_protocol::secure::restrict_file(&path))
-        .map_err(|_| error("OMP_CONFIG_FAILED", "omp 역할 모델 기록을 저장하지 못해 설정을 바꾸지 않았습니다."))?;
+        .map_err(|_| error("OMP_CONFIG_FAILED", "역할 모델 기록을 저장하지 못해 설정을 바꾸지 않았어요."))?;
     config_set("modelRoles", &Value::Object(roles))
 }
 
@@ -277,7 +277,7 @@ pub fn status(paths: &Paths) -> Result<Status, ApiError> {
 pub fn connect(paths: &Paths) -> Result<Status, ApiError> {
     call(paths, "status.read", json!({}))?;
     if !omp_broker::status(paths)?.connected {
-        return Err(error("BROKER_REQUIRED", "브릿지는 OMP broker의 계정을 사용합니다. 먼저 `aam omp-broker connect`를 실행하세요."));
+        return Err(error("BROKER_REQUIRED", "이 연결은 omp 로그인 연결의 계정을 써요. 먼저 `aam omp-broker connect`를 실행해 주세요."));
     }
     write_settings(paths, true)?;
     // 계정이 없으면 gateway가 생기지 않는다. 30초를 기다리지 않고 다음 행동을 알려 준다.

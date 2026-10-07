@@ -59,7 +59,7 @@ fn user_home() -> Result<PathBuf, ApiError> {
         .ok_or_else(|| {
             ApiError::new(
                 "HOME_MISSING",
-                "현재 사용자의 HOME 경로를 확인하지 못했습니다.",
+                "지금 사용자의 홈 경로를 확인하지 못했어요.",
             )
         })
 }
@@ -131,12 +131,12 @@ fn refresh_bound(old: &Account, binary: Option<&Path>) -> Account {
         fresh.binary_path = bound.binary_path.clone();
         if let Some(expected) = old.identity_key.as_ref() {
             if fresh.identity_key.as_ref() != Some(expected) {
-                return Err(ApiError::new("IDENTITY_DRIFT", "이 프로필의 native 계정이 등록된 계정과 다르거나 로그아웃되었습니다. 기존 binding을 변경하지 않았습니다. 공식 로그인 후 다시 등록해 주세요."));
+                return Err(ApiError::new("IDENTITY_DRIFT", "이 프로필의 계정이 등록된 계정과 다르거나 로그아웃됐어요. 기존 연결은 바꾸지 않았어요. 공식 로그인 후 다시 등록해 주세요."));
             }
         }
         // 미로그인 프로필은 account.register에서만 새 identity binding으로 전환합니다.
         if old.identity_key.is_none() && fresh.identity_key.is_some() {
-            return Err(ApiError::new("REGISTRATION_REQUIRED", "native 로그인 완료가 감지되었습니다. 프로필 등록으로 새 계정 binding을 확정해 주세요."));
+            return Err(ApiError::new("REGISTRATION_REQUIRED", "공식 로그인이 끝났어요. 프로필을 등록해 새 계정 연결을 확정해 주세요."));
         }
         fresh.id = old.id.clone();
         fresh.omp_credential_pins = old.omp_credential_pins.clone();
@@ -166,7 +166,7 @@ fn notice(code: &str, message: impl Into<String>) -> Notice {
     Notice {
         id: code.into(),
         level: "warning".into(),
-        title: "연결 확인이 필요합니다".into(),
+        title: "연결 확인이 필요해요".into(),
         message: message.into(),
     }
 }
@@ -212,7 +212,7 @@ fn add_omp_reports(
     let Some(reports) = value.get("reports").and_then(Value::as_array) else {
         result.notices.push(notice(
             "OMP_SCHEMA",
-            "OMP usage 응답 형식을 확인하지 못했습니다. 기존 관측 시각은 갱신하지 않았습니다.",
+            "omp 사용량 응답 형식을 확인하지 못했어요. 기존 조회 시각은 바꾸지 않았어요.",
         ));
         return observed;
     };
@@ -235,7 +235,7 @@ fn add_omp_reports(
         .collect();
     for report in reports {
         let Some(identity) = report_identity(report) else {
-            result.notices.push(notice("OMP_IDENTITY_INCOMPLETE", "일부 OMP 사용량은 안정적인 subject/workspace 정보가 없어 native 계정에 연결하지 않았습니다."));
+            result.notices.push(notice("OMP_IDENTITY_INCOMPLETE", "일부 omp 사용량은 계정 정보가 부족해 연결하지 않았어요."));
             continue;
         };
         let id = stable_id(&["omp", &identity, "observation"]);
@@ -335,7 +335,7 @@ fn add_omp_reports(
             let account = Account {
                 id, provider: provider_id(&provider).into(), tool: "omp".into(), label: account_label(&format!("OMP · {provider}"), email.as_deref()), email,
                 binary_path: Some(binary.to_string_lossy().into_owned()), auth_status: "unverified".into(), verification: "observed".into(),
-                reason: Some("OMP에 인증 항목은 있으나 identity 및 quota 관측이 제공되지 않았습니다. 사용량을 0으로 추정하거나 native CLI 인증으로 복사하지 않습니다.".into()),
+                reason: Some("omp에 로그인 항목은 있지만 계정·한도 정보가 없어요. 사용량을 0으로 추정하거나 공식 CLI 로그인으로 복사하지 않아요.".into()),
                 enabled: true, max_concurrency: 1, ..Account::default()
             };
             result.accounts.push(account);
@@ -388,16 +388,16 @@ fn utility_command(tool: &str, args: &[std::ffi::OsString]) -> Option<bool> {
 fn profile_notice_line(tool: &str) -> Option<&'static str> {
     match (tool, cfg!(unix)) {
         ("claude", true) => Some(
-            "aam: 이 명령은 Ojak 계정을 고르지 않고 공식 CLI 기본 설정 폴더(~/.claude)에서 실행합니다. 플러그인 폴더는 계정 세션과 연결됩니다. 사용자 MCP는 복사되지 않습니다.",
+            "aam: 이 명령은 Ojak 계정을 고르지 않고 공식 CLI 기본 설정 폴더(~/.claude)에서 실행해요. 플러그인 폴더는 계정 대화와 연결돼요. 사용자 MCP는 복사되지 않아요.",
         ),
         ("claude", false) => Some(
-            "aam: 이 명령은 Ojak 계정을 고르지 않고 공식 CLI 기본 설정 폴더에서 실행합니다. 사용자 MCP와 플러그인 폴더는 계정 세션으로 복사되지 않습니다.",
+            "aam: 이 명령은 Ojak 계정을 고르지 않고 공식 CLI 기본 설정 폴더에서 실행해요. 사용자 MCP와 플러그인 폴더는 계정 대화로 복사되지 않아요.",
         ),
         ("codex", true) => Some(
-            "aam: 이 명령은 Ojak 계정을 고르지 않고 공식 CLI 기본 설정 폴더(~/.codex)에서 실행합니다. MCP·플러그인·기능 설정은 계정 세션을 시작할 때 그 폴더에서 가져옵니다.",
+            "aam: 이 명령은 Ojak 계정을 고르지 않고 공식 CLI 기본 설정 폴더(~/.codex)에서 실행해요. MCP, 플러그인, 기능 설정은 계정 대화를 시작할 때 그 폴더에서 가져와요.",
         ),
         ("codex", false) => Some(
-            "aam: 이 명령은 Ojak 계정을 고르지 않고 공식 CLI 기본 설정 폴더에서 실행합니다. MCP·플러그인·기능 설정은 계정 세션을 시작할 때 그 폴더에서 가져옵니다.",
+            "aam: 이 명령은 Ojak 계정을 고르지 않고 공식 CLI 기본 설정 폴더에서 실행해요. MCP, 플러그인, 기능 설정은 계정 대화를 시작할 때 그 폴더에서 가져와요.",
         ),
         _ => None,
     }
@@ -431,7 +431,7 @@ pub fn inspect_cli(
         let binary = process::discover(paths, tool).ok_or_else(|| {
             ApiError::new(
                 "CLI_NOT_FOUND",
-                "관리형 shim이 아닌 공식 CLI 원본을 찾지 못했습니다.",
+                "Ojak 명령이 아닌 공식 CLI 원본을 찾지 못했어요.",
             )
         })?;
         if let DirectCli::Utility { writes_profile: true } = kind {
@@ -451,7 +451,7 @@ pub fn inspect_cli(
         command.status().map_err(|_| {
             ApiError::new(
                 "CLI_INSPECTION_FAILED",
-                "공식 CLI의 조회 명령을 실행하지 못했습니다.",
+                "공식 CLI 조회 명령을 실행하지 못했어요.",
             )
         })
     })())
@@ -536,7 +536,7 @@ pub fn scan(paths: &Paths, existing: &[Account]) -> Result<ScanResult, ApiError>
         stale.can_launch = false;
         stale.verification = "observed".into();
         stale.auth_status = "unverified".into();
-        stale.reason = Some("현재 OMP 응답에서 이 계정을 다시 관측하지 못했습니다. 이전 관측이며 native 실행에 사용할 수 없습니다.".into());
+        stale.reason = Some("지금 omp 응답에서 이 계정을 다시 보지 못했어요. 이전 조회이며 공식 CLI 실행에 쓸 수 없어요.".into());
         for bucket in &mut stale.buckets {
             bucket.status = if bucket.used_percent.is_some() {
                 "stale"
@@ -551,15 +551,15 @@ pub fn scan(paths: &Paths, existing: &[Account]) -> Result<ScanResult, ApiError>
 }
 
 fn binding_paths(account: &Account) -> Result<(PathBuf, PathBuf), ApiError> {
-    let profile = account.profile_path.as_deref().ok_or_else(|| ApiError::new("PROFILE_UNBOUND", "관측 계정에 native 프로필이 연결되지 않았습니다. 공식 CLI 로그인 후 프로필을 등록해 주세요."))?;
+    let profile = account.profile_path.as_deref().ok_or_else(|| ApiError::new("PROFILE_UNBOUND", "이 계정에 공식 프로필이 연결돼 있지 않아요. 공식 CLI에 로그인한 뒤 프로필을 등록해 주세요."))?;
     let canonical = safety::canonical_profile(Path::new(profile))?;
     if canonical != Path::new(profile) {
-        return Err(ApiError::new("PROFILE_BINDING_CHANGED", "등록 이후 프로필 경로가 변경되었습니다. symlink로 계정을 전환하지 않으며 재등록이 필요합니다."));
+        return Err(ApiError::new("PROFILE_BINDING_CHANGED", "등록 이후 프로필 경로가 바뀌었어요. 바로가기로 계정을 바꾸지 않아요. 다시 등록해 주세요."));
     }
     let binary = account
         .binary_path
         .as_deref()
-        .ok_or_else(|| ApiError::new("BINARY_MISSING", "등록된 공식 CLI가 없습니다."))?;
+        .ok_or_else(|| ApiError::new("BINARY_MISSING", "등록된 공식 CLI가 없어요."))?;
     // 진입 경로(symlink)는 공식 업데이트로 대상이 바뀔 수 있으므로 매번 해석한 실행 파일을 씁니다.
     let executable = process::executable(Path::new(binary))?;
     Ok((canonical, executable))
@@ -582,7 +582,7 @@ fn verify_at(account: &Account, cwd: Option<&Path>) -> Result<IdentityEvidence, 
     if fresh.auth_status != "authenticated" {
         return Err(ApiError::new(
             "AUTH_REQUIRED",
-            "선택한 native 프로필에서 공식 로그인이 필요합니다.",
+            "선택한 프로필에서 공식 로그인이 필요해요.",
         ));
     }
     let expected = account.identity_key.as_ref().ok_or_else(|| {
@@ -592,7 +592,7 @@ fn verify_at(account: &Account, cwd: Option<&Path>) -> Result<IdentityEvidence, 
         )
     })?;
     if fresh.identity_key.as_ref() != Some(expected) || !fresh.can_launch {
-        return Err(ApiError::new("IDENTITY_DRIFT", "실제 native 계정이 등록된 계정과 일치하지 않아 실행을 차단했습니다. 프로필을 확인하고 다시 등록해 주세요."));
+        return Err(ApiError::new("IDENTITY_DRIFT", "실제 계정이 등록된 계정과 같지 않아 실행을 막았어요. 프로필을 확인하고 다시 등록해 주세요."));
     }
     Ok(IdentityEvidence {
         identity_key: expected.clone(),
@@ -651,7 +651,7 @@ pub fn build_launch_plan(account: &Account, intent: &LaunchIntent) -> Result<Lau
             c.is_ascii_alphanumeric() || matches!(c, '-' | '_' | '.' | ':' | '/' | '[' | ']')
         })
     {
-        return Err(ApiError::new("MODEL_REQUIRED", "공식 CLI의 정확한 모델 ID를 명시해 주세요. 모델이나 과금 경로를 자동으로 대체하지 않습니다."));
+        return Err(ApiError::new("MODEL_REQUIRED", "공식 CLI의 정확한 모델 ID를 적어 주세요. 모델이나 결제 경로를 자동으로 바꾸지 않아요."));
     }
     let cwd = safety::canonical_profile(Path::new(&intent.cwd)).map_err(|_| {
         ApiError::new(

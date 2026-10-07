@@ -29,10 +29,10 @@ fn service_runtime(paths: &Paths) -> Option<PathBuf> {
 pub(super) fn supervised(paths: &Paths) -> bool { service_runtime(paths).is_some() }
 
 fn scheduler(args: &[&str]) -> Result<std::process::Output, ApiError> {
-    let root = std::env::var_os("SystemRoot").ok_or_else(|| failure_message("BROKER_AGENT_FAILED", "Windows 시스템 경로가 없습니다."))?;
+    let root = std::env::var_os("SystemRoot").ok_or_else(|| failure_message("BROKER_AGENT_FAILED", "Windows 시스템 경로가 없어요."))?;
     Command::new(PathBuf::from(root).join(r"System32\schtasks.exe"))
         .args(args).creation_flags(0x0800_0000).output()
-        .map_err(|_| failure_message("BROKER_AGENT_FAILED", "broker 작업 스케줄러를 실행하지 못했습니다."))
+        .map_err(|_| failure_message("BROKER_AGENT_FAILED", "이전 로그인 연결 작업을 실행하지 못했어요."))
 }
 
 /// 앱이 만들고 그 뒤 바뀌지 않은 이전 작업만 한 번 지운다. 소유 기록이 없으면 손대지 않는다.
@@ -42,14 +42,14 @@ fn retire_legacy_task(paths: &Paths) -> Result<(), ApiError> {
     let file = match aam_protocol::secure::open_read_no_follow(&path) {
         Ok(file) => file,
         Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(()),
-        Err(_) => return Err(failure_message("BROKER_AGENT_CONFLICT", "이전 broker 작업 소유 기록을 안전하게 읽지 못했습니다.")),
+        Err(_) => return Err(failure_message("BROKER_AGENT_CONFLICT", "이전 로그인 연결 작업 기록을 안전하게 읽지 못했어요.")),
     };
     if !aam_protocol::winutil::handle_access_is_safe(&file, true).unwrap_or(false) || file.metadata().map_or(true, |m| m.len() > 16384) {
-        return Err(failure_message("BROKER_AGENT_CONFLICT", "이전 broker 작업 소유 기록의 권한이 안전하지 않습니다."));
+        return Err(failure_message("BROKER_AGENT_CONFLICT", "이전 로그인 연결 작업 기록의 권한이 안전하지 않아요."));
     }
-    let record: LegacyReceipt = serde_json::from_reader(file).map_err(|_| failure_message("BROKER_AGENT_CONFLICT", "이전 broker 작업 소유 기록이 손상되었습니다."))?;
+    let record: LegacyReceipt = serde_json::from_reader(file).map_err(|_| failure_message("BROKER_AGENT_CONFLICT", "이전 로그인 연결 작업 기록이 손상됐어요."))?;
     if record.owner != OWNER || record.task_name != legacy_task_name(paths) {
-        return Err(failure_message("BROKER_AGENT_CONFLICT", "앱 소유 broker 작업이 아닙니다."));
+        return Err(failure_message("BROKER_AGENT_CONFLICT", "이 앱이 만든 로그인 연결 작업이 아니에요."));
     }
     let query = scheduler(&["/Query", "/TN", &record.task_name, "/XML"])?;
     if !query.status.success() {
@@ -58,10 +58,10 @@ fn retire_legacy_task(paths: &Paths) -> Result<(), ApiError> {
         return Ok(());
     }
     if digest(&query.stdout) != record.definition_digest {
-        return Err(failure_message("BROKER_AGENT_CONFLICT", "이전 broker 작업이 등록 후 변경되어 지우지 않았습니다. 작업 스케줄러에서 Ojak-OMP-Broker 작업을 직접 정리한 뒤 다시 시도해 주세요."));
+        return Err(failure_message("BROKER_AGENT_CONFLICT", "이전 로그인 연결 작업이 등록 후 바뀌어 지우지 않았어요. 작업 스케줄러에서 Ojak-OMP-Broker 작업을 직접 정리한 뒤 다시 시도해 주세요."));
     }
     if !scheduler(&["/Delete", "/TN", &record.task_name, "/F"])?.status.success() {
-        return Err(failure_message("BROKER_AGENT_CONFLICT", "관리자 권한으로 만든 이전 broker 작업이라 지울 수 없습니다. 작업 스케줄러에서 Ojak-OMP-Broker 작업을 지운 뒤 다시 시도해 주세요. 작업은 그대로 두었습니다."));
+        return Err(failure_message("BROKER_AGENT_CONFLICT", "관리자 권한으로 만든 이전 작업이라 지울 수 없어요. 작업 스케줄러에서 Ojak-OMP-Broker 작업을 지운 뒤 다시 시도해 주세요. 작업은 그대로 뒀어요."));
     }
     let _ = fs::remove_file(&path);
     Ok(())
@@ -72,8 +72,8 @@ pub(super) fn ensure(paths: &Paths) -> Result<(), ApiError> {
     retire_legacy_task(paths)?;
     if service_runtime(paths).as_ref() != Some(&runtime) {
         let bytes = serde_json::to_vec(&ServiceMarker { owner: OWNER.into(), runtime, reason: "service".into() })
-            .map_err(|_| failure_message("BROKER_STATE_FAILED", "broker 감독 기록을 만들지 못했습니다."))?;
-        aam_protocol::secure::restrict_dir(&paths.home).map_err(|_| failure_message("BROKER_STATE_FAILED", "broker 상태 폴더를 보호하지 못했습니다."))?;
+            .map_err(|_| failure_message("BROKER_STATE_FAILED", "로그인 연결 감독 기록을 만들지 못했어요."))?;
+        aam_protocol::secure::restrict_dir(&paths.home).map_err(|_| failure_message("BROKER_STATE_FAILED", "로그인 연결 상태 폴더를 보호하지 못했어요."))?;
         super::atomic_write(&service_marker(paths), &bytes)?;
     }
     // 서비스는 2초마다 기록을 확인한다. omp broker는 첫 기동에 30초 안팎, 길면 1분 넘게 걸린다(실측).
@@ -94,5 +94,5 @@ pub(super) fn ensure(paths: &Paths) -> Result<(), ApiError> {
         }
         std::thread::sleep(Duration::from_millis(200));
     }
-    Err(failure_message("BROKER_NOT_READY", "Ojak 서비스가 omp broker를 띄우도록 했지만 아직 응답이 없습니다. 잠시 뒤 다시 시도해 주세요."))
+    Err(failure_message("BROKER_NOT_READY", "Ojak 서비스가 omp 로그인 연결을 켜도록 했지만 아직 응답이 없어요. 잠시 뒤 다시 시도해 주세요."))
 }
