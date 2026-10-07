@@ -2,15 +2,23 @@
 Var OjakUpdatePrepared
 
 ; $2 = 사용자에게 보여줄 문장. 같은 문장을 $TEMP\Ojak-installer.log 에도 남긴다.
-Function OjakFail
+; NSIS는 제거 섹션에서 "un."으로 시작하는 함수만 부를 수 있어 같은 본문을 두 이름으로 만든다.
+!macro OJAK_FAIL_BODY
   ClearErrors
   FileOpen $1 "$TEMP\Ojak-installer.log" a
-  IfErrors ojak_fail_box
+  IfErrors +4
   FileSeek $1 0 END
   FileWrite $1 "$2$\r$\n"
   FileClose $1
-  ojak_fail_box:
   MessageBox MB_OK|MB_ICONSTOP "$2$\r$\n$\r$\n기록 / Log: $TEMP\Ojak-installer.log$\r$\n설치 창의 [자세히]를 여세요. / Open Details in this window." /SD IDOK
+!macroend
+
+Function OjakFail
+  !insertmacro OJAK_FAIL_BODY
+FunctionEnd
+
+Function un.OjakFail
+  !insertmacro OJAK_FAIL_BODY
 FunctionEnd
 
 Function OjakRecoverUpdate
@@ -71,13 +79,13 @@ FunctionEnd
     ${If} $0 != 0
       SetErrorLevel 1
       StrCpy $2 "제거를 멈췄습니다. 실행 중인 작업을 끝내거나 PC를 다시 시작한 뒤 제거를 다시 시도하세요. 앱 파일은 지우지 않았습니다. omp 연결은 이미 원래대로 돌아갔을 수 있습니다. / Uninstall stopped. Finish running work or restart the PC, then try again. Application files were not removed. omp may already be back to its original login."
-      Call OjakFail
+      Call un.OjakFail
       Abort
     ${EndIf}
   ${ElseIf} ${FileExists} "$INSTDIR\aam-service.exe"
     SetErrorLevel 1
     StrCpy $2 "Ojak 실행 파일이 없어 서비스를 안전하게 끌 수 없습니다. 설치 파일을 다시 실행해 고친 뒤 제거하세요. / The Ojak program is missing, so the service cannot be stopped safely. Run the installer again to repair, then uninstall."
-    Call OjakFail
+    Call un.OjakFail
     Abort
   ${EndIf}
 !macroend
