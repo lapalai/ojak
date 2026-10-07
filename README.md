@@ -196,10 +196,10 @@ Ojak은 비공식 프로젝트입니다. Anthropic, OpenAI, Google, xAI와 관�
 
 omp 브릿지는 구독 자격 증명을 로컬 프록시로 통과시킵니다. 이 사용은 공급자 약관과 충돌할 수 있습니다.
 
-**크레딧·추가 사용량(선택, 기본 꺼짐):** 설정에서 켜면 구독 한도를 다 쓴 뒤 Codex 크레딧이나 Claude 추가 사용량(API 요금)이 켜진 계정으로 새 작업을 보낼 수 있어요. 이 경우 공급자가 과금할 수 있고, Ojak은 쓴 금액을 볼 수 없어요. 한도가 리셋되면 다시 구독 한도가 남은 계정부터 써요. Ojak은 자신이 보내는 새 작업만 정해요. 이미 실행 중인 원본 CLI가 공급자 쪽에서 크레딧으로 넘어가는 건 막을 수 없어요. 크레딧 잔액은 Codex가 알려 줄 때만 보이고, 실제 계정에서 아직 확인하지 못한 기능이에요.
-
 - https://code.claude.com/docs/en/legal-and-compliance
 - https://openai.com/policies/row-terms-of-use/
+
+**크레딧·추가 사용량(선택, 기본 꺼짐):** 설정에서 켜면 구독 한도를 다 쓴 뒤 Codex 크레딧이나 Claude 추가 사용량(API 요금)이 켜진 계정으로 새 작업을 보낼 수 있어요. 이 경우 공급자가 과금할 수 있고, Ojak은 쓴 금액을 볼 수 없어요. 한도가 리셋되면 다시 구독 한도가 남은 계정부터 써요. Ojak은 자신이 보내는 새 작업만 정해요. 이미 실행 중인 원본 CLI가 공급자 쪽에서 크레딧으로 넘어가는 건 막을 수 없어요. 크레딧 잔액은 Codex가 알려 줄 때만 보이고, 실제 계정에서 아직 확인하지 못한 기능이에요.
 
 사용에 대한 책임은 사용자에게 있습니다. 계정 정지가 있을 수 있습니다. 이 문서는 적법성이나 안전성을 주장하지 않습니다.
 
@@ -467,10 +467,10 @@ Use only your own accounts. Do not share accounts.
 
 The omp bridge routes subscription credentials through a local proxy and may conflict with provider terms:
 
-**Credits and extra usage (optional, off by default):** If you turn it on in settings, Ojak can send new work to an account that has Codex credits or Claude extra usage (API pricing) after its subscription limit runs out. The provider may charge you, and Ojak cannot see the amount spent. When a limit resets, Ojak goes back to accounts with subscription limit left. Ojak only decides where its own new work goes; it cannot stop an already-running official CLI from switching to credits on the provider's side. This feature is built from the documented fields and has not yet been confirmed on a real account.
-
 - https://code.claude.com/docs/en/legal-and-compliance
 - https://openai.com/policies/row-terms-of-use/
+
+**Credits and extra usage (optional, off by default):** If you turn it on in settings, Ojak can send new work to an account that has Codex credits or Claude extra usage (API pricing) after its subscription limit runs out. The provider may charge you, and Ojak cannot see the amount spent. When a limit resets, Ojak goes back to accounts with subscription limit left. Ojak only decides where its own new work goes; it cannot stop an already-running official CLI from switching to credits on the provider's side. This feature is built from the documented fields and has not yet been confirmed on a real account.
 
 You are responsible for how you use it. Account suspension is possible. This document does not claim that use is legal or safe.
 
