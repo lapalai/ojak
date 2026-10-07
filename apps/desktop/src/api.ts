@@ -99,6 +99,8 @@ export interface SetupStatus {
   service: boolean; shell: boolean; configured: boolean; ready: boolean; ompDetected: boolean; ompSupported: boolean;
   tools: { tool: string; account: boolean; connected: boolean; verified: boolean | null; verificationError: string | null }[];
   notices?: SetupNotice[];
+  /// 실행 중인 서비스가 앱과 버전이 다르거나 알 수 없다. 이 기능 이전 서비스는 필드가 없을 수 있다.
+  serviceVersionMismatch?: boolean;
   omp?: { broker: boolean; bridge: boolean; observer: boolean; error: string | null; futureLaunchesOnly: boolean };
 }
 export const setupStatus = () => native<SetupStatus>("setup_status");
@@ -113,6 +115,11 @@ export interface UpdateStatus { enabled: boolean; available: UpdateOffer | null;
 export const updatesStatus = (force = false) => native<UpdateStatus>("updates_status", { force });
 export const installUpdate = () => native<void>("install_update");
 export const restartAfterUpdate = () => native<void>("restart_after_update");
+export interface ServiceVersionReport { appVersion: string; serviceVersion: string | null; state: "current" | "older" | "newer" | "unknown"; mismatch: boolean }
+/// 앱과 실행 중인 서비스의 버전 비교(읽기 전용). 서비스가 응답하지 않으면 오류.
+export const serviceVersionStatus = () => native<ServiceVersionReport>("service_version_status");
+/// 사용자가 눌렀을 때만 부른다. 쓰는 중인 세션이 있으면 서비스가 `SESSION_BUSY`로 거절하고 아무것도 바꾸지 않는다.
+export const serviceRestart = () => native<string>("service_restart");
 
 export function assertOpened(result: { opened: boolean }): void {
   if (!result.opened) throw { code: "TERMINAL_NOT_OPENED", message: t("api.terminalNotOpened"), retryable: true } satisfies ApiError;

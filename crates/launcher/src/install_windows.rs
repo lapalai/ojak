@@ -688,24 +688,52 @@ pub fn remove_app_autostart(install_dir: &Path) -> Result<(), ApiError> {
     Ok(())
 }
 
+/// Run 값이 이 설치 폴더 바로 아래 앱 실행 파일을 가리킬 때만 앱 소유로 본다.
+/// 값은 문자열 경계만 쓰는 안전한 파싱으로 읽는다(바이트 인덱스 슬라이싱 없음, 어떤 입력에도 패닉 없음).
 fn app_owns_autostart(value: &str, install_dir: &Path) -> bool {
+    let dir = path_segments(&install_dir.to_string_lossy());
+    if dir.is_empty() {
+        return false;
+    }
     let value = value.trim();
-    let exe = if let Some(rest) = value.strip_prefix('"') {
-        rest.split('"').next().map(PathBuf::from)
+    if let Some(rest) = value.strip_prefix('"') {
+        return rest.find('"').and_then(|end| rest.get(..end)).is_some_and(|program| is_app_in_dir(program, &dir));
+    }
+    // 따옴표 없는 값은 공백이 경로일 수도 인자 시작일 수도 있어, 공백 위치마다 앞부분을 프로그램 경로 후보로 본다.
+    value
+        .char_indices()
+        .filter(|(_, ch)| ch.is_whitespace())
+        .filter_map(|(index, _)| value.get(..index))
+        .chain(std::iter::once(value))
+        .any(|program| is_app_in_dir(program, &dir))
+}
+
+/// `program`이 `dir`(정규화된 구성 요소) 바로 아래의 앱 실행 파일이면 true.
+fn is_app_in_dir(program: &str, dir: &[String]) -> bool {
+    let segments = path_segments(program);
+    match segments.split_last() {
+        Some((name, parent)) => parent == dir && is_app_exe(name),
+        None => false,
+    }
+}
+
+/// 경로를 대소문자 무시·구분자 무시(`\`와 `/`, 연속·끝 구분자)로 구성 요소로 나눈다.
+/// `\\?\` 확장 접두사는 벗기고, `\\?\UNC\`는 일반 UNC 경로와 같게 본다.
+fn path_segments(path: &str) -> Vec<String> {
+    let path = path.trim();
+    let (unc, rest) = if let Some(rest) = path.strip_prefix(r"\\?\UNC\").or_else(|| path.strip_prefix(r"\\?\unc\")) {
+        (true, rest)
+    } else if let Some(rest) = path.strip_prefix(r"\\?\").or_else(|| path.strip_prefix(r"\??\")) {
+        (false, rest)
     } else {
-        let dir = install_dir.to_string_lossy();
-        let dir = dir.trim_end_matches(['\\', '/']);
-        if value.len() < dir.len() || !value[..dir.len()].eq_ignore_ascii_case(dir) {
-            return false;
-        }
-        let rest = value[dir.len()..].trim_start_matches(['\\', '/']);
-        let name = rest.split([' ', '\t', '"']).next().unwrap_or("");
-        return is_app_exe(name);
+        (path.starts_with(r"\\") || path.starts_with("//"), path)
     };
-    exe.is_some_and(|exe| {
-        exe.parent().is_some_and(|parent| same_dir(&parent.to_string_lossy(), install_dir))
-            && exe.file_name().and_then(|name| name.to_str()).is_some_and(is_app_exe)
-    })
+    let mut segments = Vec::new();
+    if unc {
+        segments.push(r"\\".to_owned());
+    }
+    segments.extend(rest.split(['\\', '/']).filter(|part| !part.is_empty()).map(str::to_lowercase));
+    segments
 }
 
 /// 설치본 앱 실행 파일 이름. 번들은 Cargo 이름 `ai-account-manager.exe`로 설치되고(실기기 Run 값으로 확인),
@@ -754,5 +782,89 @@ mod tests {
         assert!(app_owns_autostart(r"C:\Users\me\AppData\Local\Ojak\ai-account-manager.exe --autostart", &installed));
         assert!(app_owns_autostart(r#""C:\Users\me\AppData\Local\Ojak\ai-account-manager.exe" --autostart"#, &installed));
         assert!(!app_owns_autostart(r"C:\Elsewhere\ai-account-manager.exe --autostart", &installed));
+    }
+}
+
+#[cfg(test)]
+mod autostart_ownership_tests {
+    use super::*;
+
+    #[test]
+    fn foreign_prefix_directory_is_not_owned() {
+        let dir = PathBuf::from(r"C:\Ojak");
+        assert!(!app_owns_autostart(r"C:\Ojakai-account-manager.exe --autostart", &dir));
+        assert!(!app_owns_autostart(r"C:\OjakOjak.exe", &dir));
+        assert!(!app_owns_autostart(r#""C:\Ojakai-account-manager.exe" --autostart"#, &dir));
+        assert!(app_owns_autostart(r"C:\Ojak\ai-account-manager.exe --autostart", &dir));
+    }
+
+    #[test]
+    fn non_ascii_foreign_path_does_not_panic_and_is_not_owned() {
+        let dir = PathBuf::from(r"C:\Ojak");
+        assert!(!app_owns_autostart(r"C:\오작폴더\Other.exe", &dir));
+        assert!(!app_owns_autostart(r#""C:\오작폴더\Other.exe" --autostart"#, &dir));
+        // 설치 폴더보다 짧은 값, 따옴표만 있는 값, 빈 값도 패닉하지 않는다.
+        let long = PathBuf::from(r"C:\오작\아주\긴\설치\폴더");
+        assert!(!app_owns_autostart("오", &long));
+        assert!(!app_owns_autostart("\"", &long));
+        assert!(!app_owns_autostart("", &long));
+        assert!(!app_owns_autostart("   ", &dir));
+    }
+
+    #[test]
+    fn non_ascii_install_dir_with_real_exe_is_owned() {
+        let dir = PathBuf::from(r"C:\Users\오작\Ojak");
+        assert!(app_owns_autostart(r"C:\Users\오작\Ojak\ai-account-manager.exe --autostart", &dir));
+        assert!(app_owns_autostart(r#""C:\Users\오작\Ojak\ai-account-manager.exe" --autostart"#, &dir));
+        assert!(app_owns_autostart(r"C:\Users\오작\Ojak\Ojak.exe", &dir));
+        assert!(!app_owns_autostart(r"C:\Users\오작\Ojak2\Ojak.exe", &dir));
+    }
+
+    #[test]
+    fn service_exe_is_not_owned() {
+        let dir = PathBuf::from(r"C:\Users\me\AppData\Local\Ojak");
+        assert!(!app_owns_autostart(r"C:\Users\me\AppData\Local\Ojak\aam-service.exe", &dir));
+        assert!(!app_owns_autostart(r#""C:\Users\me\AppData\Local\Ojak\aam-service.exe" --autostart"#, &dir));
+        assert!(!app_owns_autostart(r"C:\Users\me\AppData\Local\Ojak\aam.exe", &dir));
+    }
+
+    #[test]
+    fn exe_must_be_directly_inside_install_dir() {
+        let dir = PathBuf::from(r"C:\Ojak");
+        assert!(!app_owns_autostart(r"C:\Ojak\sub\Ojak.exe", &dir));
+        assert!(!app_owns_autostart(r"C:\Ojak.exe", &dir));
+        assert!(!app_owns_autostart(r"C:\Ojak", &dir));
+    }
+
+    #[test]
+    fn separator_case_and_prefix_variants_are_owned() {
+        let dir = PathBuf::from(r"C:\Users\me\Ojak\");
+        assert!(app_owns_autostart(r"C:\Users\me\Ojak\Ojak.exe", &dir));
+        assert!(app_owns_autostart(r"C:/Users/me/Ojak/Ojak.exe --autostart", &dir));
+        assert!(app_owns_autostart(r"c:\USERS\ME\ojak\OJAK.EXE --autostart", &dir));
+        assert!(app_owns_autostart(r#""c:\users\me\OJAK\ai-account-manager.EXE" --autostart"#, &dir));
+        assert!(app_owns_autostart(r"C:\Users\me\Ojak\\Ojak.exe", &dir));
+        let canonical = PathBuf::from(r"\\?\C:\Users\me\Ojak");
+        assert!(app_owns_autostart(r"C:\Users\me\Ojak\Ojak.exe --autostart", &canonical));
+        assert!(app_owns_autostart(r#""\\?\C:\Users\me\Ojak\Ojak.exe""#, &dir));
+        assert!(!app_owns_autostart(r"C:\Users\me\Other\Ojak.exe", &canonical));
+    }
+
+    #[test]
+    fn paths_with_spaces_and_arguments_are_parsed() {
+        let dir = PathBuf::from(r"C:\Program Files\Ojak");
+        assert!(app_owns_autostart(r"C:\Program Files\Ojak\Ojak.exe --autostart", &dir));
+        assert!(app_owns_autostart(r#""C:\Program Files\Ojak\Ojak.exe" --autostart --flag "x y""#, &dir));
+        assert!(!app_owns_autostart(r#""C:\Program Files\Other\Ojak.exe" --autostart"#, &dir));
+        // 인자에 앱 경로가 들어 있어도 프로그램 자체가 다르면 소유가 아니다.
+        assert!(!app_owns_autostart(r#""C:\Other\run.exe" "C:\Program Files\Ojak\Ojak.exe""#, &dir));
+        assert!(!app_owns_autostart(r"C:\Other\run.exe C:\Program Files\Ojak\Ojak.exe", &dir));
+    }
+
+    #[test]
+    fn unc_paths_compare_like_extended_unc() {
+        let dir = PathBuf::from(r"\\?\UNC\server\share\Ojak");
+        assert!(app_owns_autostart(r"\\server\share\Ojak\Ojak.exe --autostart", &dir));
+        assert!(!app_owns_autostart(r"C:\server\share\Ojak\Ojak.exe", &dir));
     }
 }

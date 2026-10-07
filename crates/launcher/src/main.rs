@@ -180,6 +180,9 @@ enum ServiceAction {
     Install,
     Uninstall,
     Stop,
+    /// 앱과 버전이 다른 서비스를, 쓰는 중인 세션이 없을 때만 다시 시작한다.
+    #[command(about = "앱과 버전이 다른 서비스를 안전하게 다시 시작해요. 쓰는 중인 세션이 있으면 멈춰요.")]
+    Restart,
     Status,
 }
 #[derive(Subcommand)]
@@ -473,7 +476,15 @@ fn execute(paths: &Paths, action: Action) -> Result<(), ApiError> {
                     ServiceAction::Install => install::service_install(paths)?,
                     ServiceAction::Uninstall => install::service_uninstall(paths)?,
                     ServiceAction::Stop => install::service_stop(paths)?,
-                    ServiceAction::Status => install::service_status(paths)?,
+                    ServiceAction::Restart => aam_launcher::service_version::restart(paths)?,
+                    ServiceAction::Status => {
+                        let mut text = install::service_status(paths)?;
+                        if let Some(version) = aam_launcher::service_version::status_text(paths) {
+                            text.push('\n');
+                            text.push_str(&version);
+                        }
+                        text
+                    }
                 }
             );
         }

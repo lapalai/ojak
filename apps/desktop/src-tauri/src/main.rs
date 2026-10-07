@@ -396,6 +396,26 @@ async fn restart_after_update(app: tauri::AppHandle) -> Result<(), ApiError> {
     relaunch(app);
 }
 
+/// 앱과 실행 중인 서비스의 버전 비교. 앱만 DMG로 덮어쓴 뒤 예전 서비스가 남았는지 화면이 알리는 데 쓴다.
+/// 비교만 하고 아무것도 바꾸지 않는다. 서비스가 응답하지 않으면 오류를 돌려준다.
+#[tauri::command]
+async fn service_version_status() -> Result<aam_launcher::service_version::VersionReport, ApiError> {
+    let paths = paths()?;
+    tauri::async_runtime::spawn_blocking(move || aam_launcher::service_version::read_report(&paths))
+        .await
+        .map_err(|_| ApiError::new("INTERNAL_ERROR", "서비스 버전 확인 중 오류가 발생했습니다"))?
+}
+
+/// 사용자가 [서비스 다시 시작]을 눌렀을 때만 부른다. 새 배정을 닫고 쓰는 중인 세션이 없을 때만 다시 시작하며,
+/// 끝나면 서비스 버전이 앱과 같은지 확인한다. 실패하면 오류 코드를 그대로 돌려주고 기존 서비스는 그대로 둔다.
+#[tauri::command]
+async fn service_restart() -> Result<String, ApiError> {
+    let paths = paths()?;
+    tauri::async_runtime::spawn_blocking(move || aam_launcher::service_version::restart(&paths))
+        .await
+        .map_err(|_| ApiError::new("INTERNAL_ERROR", "서비스 재시작 처리 중 오류가 발생했습니다"))?
+}
+
 
 /// 종료 방식: `keep`은 앱만 닫고 관리 서비스를 유지, `deactivate`는 Ojak 연결을 모두 되돌린 뒤 닫는다.
 #[tauri::command]
@@ -701,6 +721,24 @@ async fn choose_directory() -> Option<String> {
         .await
         .map(|f| f.path().to_string_lossy().to_string())
 }
+/// `aam`은 실패를 `aam: <문장> (<CODE>)`로 stderr에 낸다. 코드를 되살려야 화면이 표시 언어 안내를 고른다.
+/// 이 모양이 아니면 예전처럼 INSTALLATION_ERROR이고, 원문은 그대로 보존한다.
+fn management_error(stderr: &str) -> ApiError {
+    let text = stderr.trim();
+    let body = text.strip_prefix("aam: ").unwrap_or(text);
+    if let Some((message, tail)) = body.rsplit_once(" (") {
+        if let Some(code) = tail.strip_suffix(')') {
+            let valid = (3..=64).contains(&code.len())
+                && code.starts_with(|c: char| c.is_ascii_uppercase())
+                && code.bytes().all(|b| b.is_ascii_uppercase() || b.is_ascii_digit() || b == b'_');
+            let message = message.trim_end();
+            if valid && !message.is_empty() {
+                return ApiError::new(code, message);
+            }
+        }
+    }
+    ApiError::new("INSTALLATION_ERROR", text)
+}
 async fn run_management(args: Vec<&'static str>) -> Result<String, ApiError> {
     let exe = launcher()?;
     let p = paths()?;
@@ -720,7 +758,7 @@ async fn run_management(args: Vec<&'static str>) -> Result<String, ApiError> {
         if result.status.success() {
             Ok(text)
         } else {
-            Err(ApiError::new("INSTALLATION_ERROR", text))
+            Err(management_error(&text))
         }
     })
     .await
@@ -998,6 +1036,7 @@ const USAGE_READ_LIMIT: u64 = 4 * 1024 * 1024;
 /// bridge.log 한 줄(`<ms> <provider>/<model> session=<id> turn=<bool> tools=<n> -> <accountKey>`).
 /// 계정 칸은 identity sha256의 앞 12 hex다. 예전에 남은 `provider|email:…|org:…` 줄도 읽는다.
 /// (시각, 공급자, 모델, 계정 토큰, 세션, 대화 요청 여부). 형식이 다른 줄은 건너뛴다.
+/// 서비스가 거절·차단을 기록하는 `outcome=rejected|blocked` 줄은 요청이 아니므로 세지 않고 건너뛴다(`->` 줄만 사용량이다).
 fn parse_usage_line(line: &str) -> Option<(i64, &str, &str, &str, &str, bool)> {
     let mut parts = line.split(' ').filter(|part| !part.is_empty());
     let at = parts.next()?.parse::<i64>().ok()?;
@@ -1010,6 +1049,9 @@ fn parse_usage_line(line: &str) -> Option<(i64, &str, &str, &str, &str, bool)> {
         if after_arrow {
             key = Some(part);
             break;
+        }
+        if part.starts_with("outcome=") {
+            return None;
         }
         if let Some(value) = part.strip_prefix("session=") {
             session = value;
@@ -1242,6 +1284,29 @@ mod tests {
         assert!(value["buckets"].as_array().unwrap().is_empty());
     }
 
+    #[test]
+    fn rejection_and_block_lines_are_not_counted_as_requests() {
+        let now = 1_000_000_000;
+        let key = "0123456789ab";
+        // 서비스가 한도로 거절·차단했을 때 남기는 줄. 요청으로 세지 않고, 옆의 정상 줄 집계는 그대로다.
+        let log = format!(
+            "{now} anthropic/claude-opus-5-5 session=aaaaaaaa outcome=rejected reset={}:estimate causes={key}:cooldown:{}\n\
+             {now} anthropic/claude-opus-5-5 session=aaaaaaaa outcome=blocked account={key} kind=quota scope=- until={}:provider\n\
+             {now} anthropic/claude-opus-5-5 session=aaaaaaaa turn=true tools=1 -> {key}\n",
+            now + 1_618_000,
+            now + 1_618_000,
+            now + 60_000
+        );
+        assert!(parse_usage_line(log.lines().next().unwrap()).is_none());
+        assert!(parse_usage_line(log.lines().nth(1).unwrap()).is_none());
+        assert!(parse_usage_line(log.lines().nth(2).unwrap()).is_some());
+        let value = usage_from_text(&log, now, 15, &std::collections::HashMap::new());
+        let buckets = value["buckets"].as_array().unwrap();
+        assert_eq!(buckets.len(), 1);
+        assert_eq!(buckets[0]["total"], 1);
+        assert_eq!(buckets[0]["auxiliary"], 0);
+    }
+
 
     #[test]
     fn first_apple_language_reads_plist_array_output() {
@@ -1264,6 +1329,26 @@ mod tests {
         assert_eq!(lang_from_tag("fr-FR"), Lang::En);
         assert_eq!(language_name(3), "id");
         assert_eq!(language_name(0), "system");
+    }
+
+    #[test]
+    fn management_error_recovers_the_cli_code() {
+        let error = management_error("aam: 연결을 먼저 설치해 주세요. (INTEGRATION_REQUIRED)\n");
+        assert_eq!(error.code, "INTEGRATION_REQUIRED");
+        assert_eq!(error.message, "연결을 먼저 설치해 주세요.");
+        // 문장 안의 괄호와 여러 줄 본문은 그대로 두고 마지막 (CODE)만 뗀다.
+        let error = management_error("aam: 실패했어요 (2단계까지 완료).\n- shell (ok)\n (SHELL_CONFLICT)");
+        assert_eq!(error.code, "SHELL_CONFLICT");
+        assert!(error.message.contains("2단계까지 완료") && error.message.contains("- shell (ok)"));
+    }
+
+    #[test]
+    fn management_error_keeps_unknown_shapes_as_installation_error() {
+        for text in ["", "panic", "aam: 끝 (소문자)", "aam: 끝 (AB)", "aam:  (SHELL_CONFLICT)", "Windows 오류 (os error 5)"] {
+            let error = management_error(text);
+            assert_eq!(error.code, "INSTALLATION_ERROR", "{text}");
+            assert_eq!(error.message, text.trim());
+        }
     }
 
     #[test]
@@ -2015,7 +2100,9 @@ fn main() {
             set_autostart,
             updates_status,
             install_update,
-            restart_after_update
+            restart_after_update,
+            service_version_status,
+            service_restart
         ])
         .setup(|app| {
             // 대시보드 창은 설정(`create: false`)을 따라 여기서 만든다. 로그인 자동 실행이면 숨긴 채 만들어

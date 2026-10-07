@@ -9,7 +9,7 @@ import { PROVIDER_ORDER } from "./types";
 import type { Account, AccountQuotaSummary as Verdict, Policy, QuotaBucket, Snapshot } from "./types";
 import { limitLabel, t } from "./i18n";
 import { observedRouteModels } from "./usage-routes";
-import { allResting, remainingTone } from "./limits";
+import { allResting, creditCount, remainingTone, usdLimit, usdUsed } from "./limits";
 import tigerStrip from "./assets/tiger-strip.webp";
 import tigerNap from "./assets/tiger-nap.webp";
 
@@ -21,7 +21,7 @@ interface ModelCell { key: string; name: string; series: number[]; total: number
 interface Quota { label: string; value: number | null; state: string; bucket: QuotaBucket }
 interface UsageRow { key: string; provider: string; account: string | null; group: AccountGroup | null; cells: ModelCell[]; quotas: Quota[]; verdict: Verdict | null; detail: string[]; notes: string[]; off: boolean; unknown: boolean }
 
-const verdictTone: Record<Verdict["kind"], string> = { available: "good", partial: "warning", reserve: "warning", resting: "danger", excluded: "neutral", login: "danger", unknown: "neutral" };
+const verdictTone: Record<Verdict["kind"], string> = { available: "good", partial: "warning", reserve: "warning", resting: "danger", excluded: "neutral", login: "danger", unknown: "neutral", credits: "warning", extra: "warning" };
 
 /// 카드 맨 위 배지 문구: 결론과, 풀리는 때가 있으면 그 시각.
 function verdictText(verdict: Verdict): string {
@@ -29,9 +29,33 @@ function verdictText(verdict: Verdict): string {
   return verdict.until ? `${head} · ${t("usage.verdict.back", { time: relativeTime(verdict.until, true) })}` : head;
 }
 
+/// 크레딧(Codex)·추가 사용량(Claude, USD) 한 줄. 두 표기는 단위가 달라 섞지 않는다. 쓰는 중이 아니면 옵션이 있다는 중립 안내만 한다.
+function paidLine(verdict: Verdict): string | null {
+  const { credits, extraUsage: extra } = verdict;
+  if (extra) {
+    if (extra.active) return extra.limitUsd !== null ? t("usage.extra.amount", { used: usdUsed(extra.usedUsd), limit: usdLimit(extra.limitUsd) }) : t("usage.extra.amountOpen", { used: usdUsed(extra.usedUsd) });
+    return extra.limitReached ? t("usage.extra.capped") : t("usage.extra.hint");
+  }
+  if (credits) {
+    if (credits.active) {
+      const count = creditCount(credits.balance);
+      return credits.unlimited ? t("usage.credits.unlimited") : count !== null ? t("usage.credits.balance", { count }) : null;
+    }
+    return t("usage.credits.hint");
+  }
+  return null;
+}
+function paidTitle(verdict: Verdict): string | null {
+  if (verdict.extraUsage && !verdict.extraUsage.active && !verdict.extraUsage.limitReached) return t("usage.extra.hintTitle");
+  if (!verdict.extraUsage && verdict.credits && !verdict.credits.active) return t("usage.credits.hintTitle");
+  return null;
+}
+
 /// 배지 아래 한 줄 이유. 사용 가능이면 없다.
 function verdictReason(verdict: Verdict, reserve: number): string | null {
   const label = verdict.label ? limitLabel(verdict.label.split(" · ").pop() ?? verdict.label) : "";
+  if (verdict.kind === "credits") return t("usage.reason.credits");
+  if (verdict.kind === "extra") return t("usage.reason.extra");
   if (verdict.kind === "resting") return verdict.rate ? t("usage.reason.rate") : t("usage.reason.resting", { label });
   if (verdict.kind === "reserve") return t("usage.reason.reserve", { label, reserve });
   if (verdict.kind === "partial") return t("usage.reason.partial", { models: verdict.models.join(", ") });
@@ -255,6 +279,7 @@ export function UsageView({ snapshot, masked, online, onReload, onConnect, onSes
               {!manual && row.group && pinMember(row.group, provider) && <button type="button" className="text-button pin-button" disabled={!online || pinAction.pending} onClick={() => { const member = row.group && pinMember(row.group, provider); if (member) setPin(provider, member.id); }}>{t("usage.pin.fix")}</button>}
             </div>
             {row.verdict && <div className={`verdict ${verdictTone[row.verdict.kind]}`} title={row.detail.join("\n") || undefined}><span className="dot" />{verdictText(row.verdict)}</div>}
+            {row.verdict && paidLine(row.verdict) && <div className="paid-hint" title={paidTitle(row.verdict) ?? undefined}>{paidLine(row.verdict)}</div>}
             {row.verdict?.expiring && <div className="expiring-hint" title={t("usage.expiring.title", { label: limitLabel(row.verdict.expiring.label), reset: absoluteTime(row.verdict.expiring.resetsAt) })}>
               <span className="dot" />{t("usage.expiring.line", { reset: relativeTime(row.verdict.expiring.resetsAt, true), percent: formatPercent(row.verdict.expiring.usablePercent) })}
               {snapshot.policy.expiringBoost && (snapshot.policy.allocationMode ?? "smart") === "smart" && <small>{t("usage.expiring.boosted")}</small>}

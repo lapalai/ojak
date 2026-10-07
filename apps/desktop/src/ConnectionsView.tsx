@@ -4,7 +4,7 @@ import { assertOpened, exportDiagnostics, hostConnections, loginAccount, ompBrid
 import type { OmpBridgeStatus, OmpBrokerStatus } from "./api";
 import { ActionFeedback, Badge, Busy, Dot, ErrorMessage, Modal } from "./components";
 import { absoluteTime, bucketState, canonicalProvider, nextReset, occupiedStates, privacyText, providerNames, relativeTime, toolNames, useAction } from "./state";
-import type { Account, ApiError, HostConnections, Snapshot } from "./types";
+import type { Account, AccountQuotaSummary, ApiError, HostConnections, Snapshot } from "./types";
 import { hostNote, t } from "./i18n";
 
 const bridgeProviderOrder = ["anthropic", "openai-codex", "google-antigravity", "xai-oauth", "zai"];
@@ -77,13 +77,16 @@ function OmpPanel({ masked }: { masked: boolean }) {
   </div>;
 }
 
-function accountState(account: Account, staleAfter: number): { label: string; tone: string } {
+function accountState(account: Account, staleAfter: number, summary?: AccountQuotaSummary): { label: string; tone: string } {
   if (!account.canLaunch) return account.authStatus === "auth-required" ? { label: t("account.loginRequired"), tone: "warning" } : account.authStatus === "error" ? { label: t("account.authError"), tone: "warning" } : { label: t("account.launchRestricted"), tone: "neutral" };
   if (!account.enabled) return { label: t("allocation.excluded"), tone: "neutral" };
+  // 서비스가 매 스냅샷마다 다시 계산한 값이라 한도가 리셋되면 이 배지는 바로 사라진다.
+  if (summary?.kind === "credits" || summary?.kind === "extra") return { label: t(summary.kind === "credits" ? "usage.verdict.credits" : "usage.verdict.extra"), tone: "warning" };
   const exhausted = account.buckets.filter(bucket => bucketState(bucket, staleAfter) === "exhausted");
   if (exhausted.length) {
     const reset = nextReset(exhausted, staleAfter);
-    return { label: `${t("account.exhausted")}${reset ? ` · ${relativeTime(reset, true)}` : ""}`, tone: "bad" };
+    const hint = summary?.extraUsage ? (summary.extraUsage.limitReached ? "" : ` · ${t("usage.extra.hint")}`) : summary?.credits ? ` · ${t("usage.credits.hint")}` : "";
+    return { label: `${t("account.exhausted")}${reset ? ` · ${relativeTime(reset, true)}` : ""}${hint}`, tone: "bad" };
   }
   return { label: t("account.ready"), tone: "good" };
 }
@@ -101,7 +104,7 @@ function ToolPanel({ tool, snapshot, masked, online, shimInstalled, onAdd }: { t
   return <div className="panel">
     <header><Dot provider={tool === "claude" ? "anthropic" : "openai"} /><h2>{toolNames[tool]}</h2><Badge tone={launchable ? "good" : status?.installed ? "warning" : "neutral"}>{!status?.installed ? t("tool.notInstalled") : launchable ? t("status.connected") : accounts.length ? t("tool.noLaunchable") : t("tool.noAccounts")}</Badge></header>
     {accounts.length ? <table><tbody>{accounts.map(account => {
-      const state = accountState(account, snapshot.policy.staleAfterSeconds);
+      const state = accountState(account, snapshot.policy.staleAfterSeconds, snapshot.quotaSummaries?.find(summary => summary.accountIds.includes(account.id)));
       const needsLogin = !account.canLaunch && account.authStatus === "auth-required";
       const name = privacyText(account.label, masked);
       return <tr key={account.id}><td>{account.email ? masked ? t("privacy.emailHidden") : account.email : t("account.noEmail")}</td><td className="muted" title={privacyText(account.reason, masked)}>{name}</td><td className="num"><Badge tone={state.tone}>{state.label}</Badge>{needsLogin && <button type="button" className="button" disabled={!online || action.pending || !status?.installed} aria-label={t("account.reloginAria", { name })} onClick={() => relogin(account)}>{t("account.relogin")}</button>}</td></tr>;
@@ -176,6 +179,7 @@ export function ConnectionsView({ snapshot, masked, online, refreshing, onRefres
         <tr><td>{t("service.startedAt")}</td><td className="muted">{absoluteTime(snapshot.serviceStartedAt)}</td></tr>
         <tr><td>{t("service.usageRefresh")}</td><td className="muted">{snapshot.lastRefreshAt ? `${relativeTime(snapshot.lastRefreshAt)} · ${absoluteTime(snapshot.lastRefreshAt)}` : t("service.notYet")}</td></tr>
         <tr><td>{t("service.protocol")}</td><td className="muted">{t("service.protocolValue", { version: snapshot.version })}</td></tr>
+        <tr><td>{t("service.version")}</td><td className="muted">{snapshot.serviceVersion ?? t("service.versionUnknown")}</td></tr>
       </tbody></table>
       <div className="row-actions"><span className="hint">{t("service.hint")}</span><button type="button" className="button" onClick={onService} disabled={stop.pending}><Download size={13} />{t("service.installStart")}</button><button type="button" className="button" onClick={onRefresh} disabled={refreshing || stop.pending}>{refreshing ? <Busy /> : <><RefreshCw size={13} />{t("service.refreshUsage")}</>}</button><button type="button" className="button" onClick={() => { stop.clear(); setConfirmStop(true); }} disabled={!online || stop.pending}>{t("service.stop")}</button></div>
       <div className="row-actions"><span className="hint">{t("diagnostics.hint")}</span><button type="button" className="button" onClick={saveDiagnostics} disabled={!online || diagnostics.pending || stop.pending}>{diagnostics.pending ? <Busy label={t("diagnostics.preparing")} /> : t("diagnostics.export")}</button></div>

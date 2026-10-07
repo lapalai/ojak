@@ -3,6 +3,7 @@ import type { CSSProperties, ReactNode } from "react";
 import { AlertCircle, CheckCircle2, LoaderCircle, X } from "lucide-react";
 import type { ApiError } from "./types";
 import { privacyText, providerColor } from "./state";
+import { describeError } from "./errors";
 import { t } from "./i18n";
 
 export const PrivacyContext = createContext(false);
@@ -33,10 +34,13 @@ export function Sparkline({ series, peak, provider, width = 120, height = 24 }: 
   </svg>;
 }
 
+/// 코드에 표시 언어 안내가 있으면 그것을 주 문장으로 보이고 서비스·CLI 원문은 접힌 '자세히'에 둔다(지원 문의용).
+/// 모르는 코드는 원문이 주 문장이다. 이메일 가림은 두 곳 모두 같은 규칙(`privacyText`)을 따른다.
 export function ErrorMessage({ error }: { error: ApiError | null }) {
   const masked = useContext(PrivacyContext);
   if (!error) return null;
-  return <div className="feedback feedback-error" role="alert"><AlertCircle size={16} /><div><strong>{privacyText(error.message, masked)}</strong><span className="error-code">{error.code}</span>{error.code === "POLICY_CONFLICT" && <span>{t("error.policyConflict")}</span>}</div></div>;
+  const { text, details } = describeError(error);
+  return <div className="feedback feedback-error" role="alert"><AlertCircle size={16} /><div><strong>{privacyText(text, masked)}</strong>{details && <details className="error-details"><summary>{t("error.details")}</summary><p>{privacyText(details, masked)}</p></details>}<span className="error-code">{error.code}</span></div></div>;
 }
 
 export function ActionFeedback({ error, message }: { error: ApiError | null; message: string | null }) {

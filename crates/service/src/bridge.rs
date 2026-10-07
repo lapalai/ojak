@@ -165,6 +165,30 @@ pub(crate) struct Candidate {
     pub enabled: bool,
     /// 공급자 수동 배정 계정. 새 대화는 이 계정이 받을 수 있으면 먼저 준다.
     pub pinned: bool,
+    /// 정책이 추가 과금 경로(Codex 크레딧·Claude 추가 사용량)를 켰고, 이 계정에 신선한 관측이 그 경로를 명시하면
+    /// 관측 신선도 기준(ms). 구독 한도가 남은 계정이 하나도 없을 때만 `choose`가 쓴다. 선택 상태는 저장하지 않는다.
+    pub paid_fallback: Option<i64>,
+}
+
+/// 정책의 추가 과금 경로 옵트인. 모두 꺼져 있으면(기본) 브릿지 선택은 바뀌지 않는다.
+#[derive(Debug, Clone, Copy, Default)]
+pub(crate) struct PaidPolicy {
+    pub credits: bool,
+    pub extra: bool,
+    /// 두 옵트인 중 하나라도 켜졌을 때만 관측 신선도 기준(ms).
+    pub fresh_ms: Option<i64>,
+    pub stale_seconds: u64,
+}
+impl PaidPolicy {
+    pub(crate) fn of(policy: &aam_protocol::Policy) -> Self {
+        let fresh = policy.stale_after_seconds.saturating_mul(1000).min(i64::MAX as u64) as i64;
+        Self {
+            credits: policy.use_credits_after_limit,
+            extra: policy.use_extra_usage_after_limit,
+            fresh_ms: (policy.use_credits_after_limit || policy.use_extra_usage_after_limit).then_some(fresh),
+            stale_seconds: policy.stale_after_seconds,
+        }
+    }
 }
 
 #[derive(Debug, Clone)]
@@ -184,6 +208,10 @@ pub(crate) struct Block {
     pub scope: Option<String>,
     pub until: i64,
     pub reason: String,
+    /// 사용량 한도 응답이면 참, 요청 속도 제한이면 거짓.
+    pub quota: bool,
+    /// `until`이 Ojak의 추정(응답이 리셋 시각을 알려 주지 않아 쓴 기본 대기)이면 참. 공급자가 알려 준 시각이면 거짓.
+    pub estimate: bool,
 }
 
 /// 모델 전용 한도 범위. Fable·Mythos·Codex Spark처럼 따로 계산되는 한도만 범위를 갖는다.
@@ -240,6 +268,20 @@ fn in_reserve(buckets: &[QuotaBucket], model: &str, reserve: f64) -> bool {
     reserve > 0.0 && buckets.iter().any(|bucket| scheduler::applies(bucket, model) && bucket.used_percent.is_some_and(|used| used >= 100.0 - reserve))
 }
 
+/// 요청에 걸리는 한도가 전부 "신선한 소진 관측"이고 공용 한도(모델 전용 아님)일 때만 추가 과금 경로가 받는다.
+fn paid_cover(buckets: &[QuotaBucket], model: &str, now: i64, fresh_ms: i64) -> bool {
+    let mut spent = false;
+    for bucket in buckets.iter().filter(|bucket| scheduler::applies(bucket, model)) {
+        if exhausted(bucket, now) {
+            if bucket.model.is_some() || !scheduler::exhausted_observation_fresh(bucket, now, fresh_ms) {
+                return false;
+            }
+            spent = true;
+        }
+    }
+    spent
+}
+
 /// 요청에 쓸 계정을 고른다. 고를 수 없으면 `None`.
 /// 순서: 세션 고정 → 안전 여유량이 남은 계정 우선 → (5시간 과열 여부, 동시 사용 세션 수, 주간 소진 급한 정도, 5시간 사용률).
 /// 여유량 안쪽 계정은 여유 있는 계정이 하나도 없을 때만 새 세션을 받는다. 이미 고정된 세션은 소진 전까지 유지한다.
@@ -270,6 +312,30 @@ pub(crate) fn choose(
         })
         .map(|(index, _)| index)
         .collect();
+    // 크레딧 fallback: 구독 한도가 남아 쓸 수 있는 계정이 하나도 없을 때만, 한도가 막은 계정 중 신선한 소진 관측과
+    // 명시된 추가 과금 경로(Codex 크레딧·Claude 추가 사용량)가 있는 계정을 후보로 삼는다. 매 요청마다 새로 계산하므로
+    // 리셋·회복 관측이 들어오면 다음 요청부터 구독 계정이 이기고, 그 계정에 붙은 세션 고정도 그때 풀린다
+    // (고정은 eligible 안에서만 유지된다). 한도가 남았지만 일시 차단·장애로 못 쓰는 구독 계정이 있으면 기다린다.
+    let eligible = if eligible.is_empty()
+        && candidates.iter().all(|candidate| {
+            !candidate.enabled
+                || candidate.buckets.iter().any(|bucket| scheduler::applies(bucket, model) && exhausted(bucket, now))
+        })
+    {
+        candidates
+            .iter()
+            .enumerate()
+            .filter(|(_, candidate)| {
+                candidate.healthy
+                    && !tried.contains(&candidate.key)
+                    && !blocked(blocks, &candidate.key, scope.as_deref(), now)
+                    && candidate.paid_fallback.is_some_and(|fresh_ms| paid_cover(&candidate.buckets, model, now, fresh_ms))
+            })
+            .map(|(index, _)| index)
+            .collect()
+    } else {
+        eligible
+    };
     let roomy: Vec<usize> = eligible.iter().copied().filter(|index| !in_reserve(&candidates[*index].buckets, model, reserve)).collect();
     if let Some(sticky) = session.and_then(|id| stickies.get(id)) {
         if now - sticky.last_used < STICKY_MS {
@@ -304,14 +370,25 @@ pub(crate) fn choose(
     })
 }
 
-/// 한도 응답을 받았을 때 막을 기간. 관측 사용량에 소진된 한도가 있으면 그 리셋까지, 없으면 기본값.
-fn block_until(buckets: &[QuotaBucket], model: &str, quota: bool, now: i64) -> i64 {
-    buckets
+/// 한도 응답을 받았을 때 막을 시각과, 그 시각이 Ojak의 추정인지. 관측 사용량에 소진된 한도가 있으면 그 리셋까지,
+/// 없으면 기본 대기(`QUOTA_BLOCK_MS`/`RATE_BLOCK_MS`)를 쓴다. 응답이 알려 준 대기(`hinted`)가 더 늦으면 그 시각까지 막는다.
+/// 기본 대기가 이겼을 때만 추정이다(공급자가 리셋 시각을 알려 주지 않았다는 뜻).
+fn block_until(buckets: &[QuotaBucket], model: &str, quota: bool, hinted: Option<i64>, now: i64) -> (i64, bool) {
+    let observed = buckets
         .iter()
         .filter(|bucket| scheduler::applies(bucket, model) && exhausted(bucket, now))
         .filter_map(|bucket| bucket.resets_at)
-        .max()
-        .unwrap_or(now + if quota { QUOTA_BLOCK_MS } else { RATE_BLOCK_MS })
+        .max();
+    match observed {
+        Some(reset) => (reset.max(hinted.unwrap_or(0)), false),
+        None => {
+            let default = now + if quota { QUOTA_BLOCK_MS } else { RATE_BLOCK_MS };
+            match hinted {
+                Some(hint) if hint >= default => (hint, false),
+                _ => (default, true),
+            }
+        }
+    }
 }
 
 // ───────────────────────────── gateway 감독 ─────────────────────────────
@@ -370,7 +447,7 @@ struct State {
     broker: Option<Child>,
     error: Option<String>,
     /// 마지막으로 읽은 계정 사용량·안전 여유량·공급자 수동 배정. 저장소를 읽지 못하면 빈 값 대신 이것을 쓴다.
-    known: Option<(Vec<Account>, f64, BTreeMap<String, String>)>,
+    known: Option<(Vec<Account>, f64, BTreeMap<String, String>, PaidPolicy)>,
 }
 
 #[derive(Debug, Serialize)]
@@ -764,7 +841,7 @@ impl Bridge {
         respond(client, 200, &json!({ "providers": providers }));
     }
 
-    fn candidates(&self, provider: &str, accounts: &[Account], pins: &BTreeMap<String, String>, now: i64) -> Vec<(Candidate, u16)> {
+    fn candidates(&self, provider: &str, accounts: &[Account], pins: &BTreeMap<String, String>, paid: PaidPolicy, now: i64) -> Vec<(Candidate, u16)> {
         let pin = pins
             .get(aam_protocol::pin_provider(provider))
             .and_then(|id| accounts.iter().find(|account| &account.id == id));
@@ -775,8 +852,8 @@ impl Bridge {
             .filter(|gateway| gateway.provider == provider)
             .map(|gateway| {
                 let healthy = gateway.running() && gateway.unhealthy_until <= now;
-                let (buckets, enabled, pinned) = account_view(gateway, accounts, pin);
-                (Candidate { key: gateway.key(), buckets, healthy, enabled, pinned }, gateway.port)
+                let (buckets, enabled, pinned, paid_fallback) = account_view(gateway, accounts, pin, paid, now);
+                (Candidate { key: gateway.key(), buckets, healthy, enabled, pinned, paid_fallback }, gateway.port)
             })
             .collect()
     }
@@ -799,9 +876,9 @@ impl Bridge {
             .lock()
             .and_then(|store| {
                 let policy = policy(&store.connection)?;
-                Ok((accounts(&store.connection)?, policy.safety_reserve_percent, policy.provider_pins))
+                Ok((accounts(&store.connection)?, policy.safety_reserve_percent, policy.provider_pins.clone(), PaidPolicy::of(&policy)))
             });
-        let (accounts, reserve, pins) = match fresh {
+        let (accounts, reserve, pins, paid) = match fresh {
             Ok(view) => {
                 self.state().known = Some(view.clone());
                 view
@@ -818,12 +895,12 @@ impl Bridge {
         let mut last_limited: Option<Vec<u8>> = None;
         loop {
             let now = now_ms();
-            let mut candidates = self.candidates(&provider, &accounts, &pins, now);
+            let mut candidates = self.candidates(&provider, &accounts, &pins, paid, now);
             // 서비스 재시작 직후에는 계정 gateway가 아직 뜨는 중일 수 있다. 전부 준비될 때까지 최대 10초 기다린다.
             for _ in 0..20 {
                 if tried.is_empty() && candidates.iter().any(|(c, _)| !c.healthy) && self.starting_up(now) {
                     std::thread::sleep(Duration::from_millis(500));
-                    candidates = self.candidates(&provider, &accounts, &pins, now_ms());
+                    candidates = self.candidates(&provider, &accounts, &pins, paid, now_ms());
                 } else {
                     break;
                 }
@@ -855,11 +932,17 @@ impl Bridge {
                 chosen
             };
             let Some(index) = chosen else {
-                if last_limited.is_none() {
+                // 왜 아무도 못 받는지 이 시점의 상태로 분류해 한 줄 남긴다. 사고 뒤에 원인을 다시 맞출 수 있어야 한다.
+                let causes = {
                     let state = self.state();
-                    if let Some(reset) = quota_reset(&pool, &provider, &model, &state.blocks, now) {
-                        drop(state);
-                        return respond_quota(client, &provider, &model, reset, now);
+                    classify_all(&pool, &provider, &model, &state.blocks, now)
+                };
+                let reset = summarize(&causes);
+                self.write_log_line(&format_reject_line(now, &provider, &model, session.as_deref().map_or("-", tail), &causes, reset.as_ref()));
+                if last_limited.is_none() {
+                    if let Some(reset) = reset {
+                        let alternatives = self.running_alternatives(&provider);
+                        return respond_quota(client, &provider, &model, &reset, &alternatives, now);
                     }
                 }
                 break;
@@ -883,13 +966,27 @@ impl Bridge {
             if let Some(Limit { quota, retry_ms }) = limit_signal(&head, &peek) {
                 // 응답이 알려 준 대기가 관측 리셋보다 길면 그 시각까지 막는다(최대 8일).
                 let hinted = retry_ms.map(|ms| now + ms.min(8 * 24 * 60 * 60_000));
-                let until = block_until(&candidate.buckets, &model, quota, now).max(hinted.unwrap_or(0));
+                let (until, estimate) = block_until(&candidate.buckets, &model, quota, hinted, now);
+                let scope = if quota { block_scope(&provider, &model) } else { None };
                 self.state().blocks.push(Block {
                     key: candidate.key.clone(),
-                    scope: if quota { block_scope(&provider, &model) } else { None },
+                    scope: scope.clone(),
                     until,
                     reason: if quota { "사용량 한도 소진".into() } else { "요청 속도 제한".into() },
+                    quota,
+                    estimate,
                 });
+                self.write_log_line(&format_block_line(
+                    now,
+                    &provider,
+                    &model,
+                    session.as_deref().map_or("-", tail),
+                    &account_key(identity_from_key(&candidate.key)),
+                    quota,
+                    scope.as_deref(),
+                    until,
+                    estimate,
+                ));
                 let mut bytes = head;
                 bytes.extend_from_slice(&peek);
                 let _ = upstream.take(PEEK_LIMIT as u64).read_to_end(&mut bytes);
@@ -942,6 +1039,16 @@ impl Bridge {
     /// 최근 10초 안에 띄운 gateway가 있으면 참.
     fn starting_up(&self, now: i64) -> bool {
         self.state().gateways.iter().any(|gateway| now - gateway.spawned_at < 10_000)
+    }
+
+    /// 지금 gateway가 떠 있는 다른 공급자의 Ojak 공급자 ID. 429 안내에서 "이쪽을 써 보세요"로 이름을 댈 수 있는 곳만 담는다.
+    fn running_alternatives(&self, provider: &str) -> Vec<&'static str> {
+        let mut state = self.state();
+        ALIASES
+            .iter()
+            .filter(|(_, original)| *original != provider && state.gateways.iter_mut().any(|gateway| gateway.provider == *original && gateway.running()))
+            .map(|(alias, _)| *alias)
+            .collect()
     }
 
     fn mark_unhealthy(&self, key: &str, now: i64) {
@@ -1017,7 +1124,7 @@ fn parse_identity(identity: &str) -> (String, String) {
 /// AAM이 관측한 같은 계정의 사용량 버킷과 배정 포함 여부.
 /// 도구별 연결이 여러 개여도 같은 버킷은 최신 관측 하나만 쓰고, 연결 중 하나라도 배정에서 빼면 omp에서도 뺀다.
 /// 세 번째 값은 이 gateway 계정이 공급자 수동 배정 계정(`pin`)과 같은 실제 계정인지다.
-fn account_view(gateway: &Gateway, accounts: &[Account], pin: Option<&Account>) -> (Vec<QuotaBucket>, bool, bool) {
+fn account_view(gateway: &Gateway, accounts: &[Account], pin: Option<&Account>, paid: PaidPolicy, now: i64) -> (Vec<QuotaBucket>, bool, bool, Option<i64>) {
     let provider = match gateway.provider.as_str() {
         "openai-codex" => "openai",
         "google-antigravity" => "google",
@@ -1028,6 +1135,7 @@ fn account_view(gateway: &Gateway, accounts: &[Account], pin: Option<&Account>) 
     let mut merged: HashMap<String, QuotaBucket> = HashMap::new();
     let mut enabled = true;
     let mut pinned = false;
+    let mut paid_ok = false;
     for account in accounts {
         if account.provider != provider || account.email.as_deref().map(str::to_ascii_lowercase).as_deref() != Some(gateway.email.as_str()) {
             continue;
@@ -1043,6 +1151,9 @@ fn account_view(gateway: &Gateway, accounts: &[Account], pin: Option<&Account>) 
         }
         enabled &= account.enabled;
         pinned |= pin.is_some_and(|pin| scheduler::same_identity(pin, account));
+        // Codex 크레딧(openai)과 Claude 추가 사용량(anthropic)은 단위가 달라 각 공급자에서만 본다.
+        paid_ok |= (paid.credits && provider == "openai" && account.credits.as_ref().is_some_and(|credits| credits.usable(now, paid.stale_seconds)))
+            || (paid.extra && provider == "anthropic" && account.extra_usage.as_ref().is_some_and(|extra| extra.usable(now, paid.stale_seconds)));
         for bucket in &account.buckets {
             let newer = merged.get(&bucket.id).is_none_or(|current| bucket.observed_at > current.observed_at);
             if newer {
@@ -1050,7 +1161,9 @@ fn account_view(gateway: &Gateway, accounts: &[Account], pin: Option<&Account>) 
             }
         }
     }
-    (merged.into_values().collect(), enabled, pinned)
+    // 추가 과금 경로는 이 gateway와 같은 계정으로 확인된 연결 중 하나라도 신선한 관측으로 명시할 때만 쓴다.
+    let paid_fallback = paid.fresh_ms.filter(|_| paid_ok);
+    (merged.into_values().collect(), enabled, pinned, paid_fallback)
 }
 
 struct BrokerIdentities {
@@ -1355,39 +1468,250 @@ fn respond(stream: &mut TcpStream, status: u16, body: &Value) {
     let _ = stream.shutdown(Shutdown::Both);
 }
 
-/// 모든 후보가 한도 때문에 막혔으면 가장 먼저 풀리는 시각. 한도가 아닌 이유(장애 등)로 막힌 후보가 있으면 `None`.
-pub(crate) fn quota_reset(candidates: &[Candidate], provider: &str, model: &str, blocks: &[Block], now: i64) -> Option<i64> {
+/// 후보 한 개가 지금 요청을 못 받는 이유. 선택(`choose`)이 후보를 거르는 조건과 같은 순서로 판정한다.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum Cause {
+    /// 배정에서 뺀 계정. 쓸 수 없으므로 "한도를 다 썼다"는 판단에 넣지 않는다.
+    Disabled,
+    /// gateway가 꺼졌거나 최근 연결에 실패했다. 한도가 아니므로 재시도 시각을 단정하지 않는다.
+    Down,
+    /// `until`까지 기다려야 한다. `quota`: 사용량 한도(참) / 요청 속도 제한(거짓).
+    /// `known`: 공급자가 알려 준 시각(참) / Ojak의 추정(거짓. 리셋 시각 없이 한도 응답을 받아 건 기본 대기 포함).
+    Wait { until: i64, quota: bool, known: bool },
+    /// 못 받을 이유가 없다(이 요청에서 이미 시도한 계정 등).
+    Ready,
+}
+
+impl Cause {
+    /// 로그의 원인 코드. 데스크톱은 읽지 않고 사람이 사고를 맞춰 볼 때 쓴다.
+    fn code(self) -> &'static str {
+        match self {
+            Cause::Disabled => "disabled",
+            Cause::Down => "down",
+            Cause::Wait { quota: true, known: true, .. } => "quota",
+            Cause::Wait { quota: true, known: false, .. } => "cooldown",
+            Cause::Wait { quota: false, .. } => "rate",
+            Cause::Ready => "ready",
+        }
+    }
+}
+
+/// 모든 후보가 기다려야 할 때 가장 먼저 풀리는 시각과 그 시각의 성격.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) struct Recovery {
+    pub at: i64,
+    /// `at`이 공급자가 알려 준 리셋 시각이면 참, Ojak의 추정이면 거짓.
+    pub known: bool,
+    /// 기다리는 후보가 전부 사용량 한도 때문이면 참. 요청 속도 제한이 섞였으면 거짓.
+    pub all_quota: bool,
+}
+
+/// 후보 한 개의 지금 상태. 관측한 한도 소진과 브릿지가 받은 한도 응답(`blocks`)을 함께 본다.
+fn classify(candidate: &Candidate, scope: Option<&str>, model: &str, blocks: &[Block], now: i64) -> Cause {
+    if !candidate.enabled {
+        return Cause::Disabled;
+    }
+    if !candidate.healthy {
+        return Cause::Down;
+    }
+    let observed = candidate
+        .buckets
+        .iter()
+        .filter(|bucket| scheduler::applies(bucket, model) && exhausted(bucket, now))
+        .map(|bucket| match bucket.resets_at {
+            Some(reset) => (reset, true),
+            None => (now + QUOTA_BLOCK_MS, false),
+        })
+        .map(|(until, known)| Cause::Wait { until, quota: true, known });
+    let responded = blocks
+        .iter()
+        .filter(|block| block.key == candidate.key && block.until > now && (block.scope.is_none() || block.scope.as_deref() == scope))
+        .map(|block| Cause::Wait { until: block.until, quota: block.quota, known: !block.estimate });
+    // 후보는 모든 대기가 끝나야 쓸 수 있으므로 가장 늦은 것이 결정한다. 같은 시각이면 공급자가 알려 준 쪽을 쓴다.
+    observed
+        .chain(responded)
+        .max_by_key(|cause| match cause {
+            Cause::Wait { until, known, .. } => (*until, *known),
+            _ => (i64::MIN, false),
+        })
+        .unwrap_or(Cause::Ready)
+}
+
+/// 후보마다 (로그용 계정 별칭, 원인). 별칭은 identity sha256 앞 12 hex라 이메일이 나오지 않는다.
+pub(crate) fn classify_all(candidates: &[Candidate], provider: &str, model: &str, blocks: &[Block], now: i64) -> Vec<(String, Cause)> {
     let scope = block_scope(provider, model);
     candidates
         .iter()
-        .map(|candidate| {
-            let bucket = candidate
-                .buckets
-                .iter()
-                .filter(|bucket| scheduler::applies(bucket, model) && exhausted(bucket, now))
-                .map(|bucket| bucket.resets_at.unwrap_or(now + QUOTA_BLOCK_MS))
-                .max();
-            let block = blocks
-                .iter()
-                .filter(|block| {
-                    block.key == candidate.key && block.until > now && (block.scope.is_none() || block.scope == scope)
-                })
-                .map(|block| block.until)
-                .max();
-            bucket.max(block)
+        .map(|candidate| (account_key(identity_from_key(&candidate.key)), classify(candidate, scope.as_deref(), model, blocks, now)))
+        .collect()
+}
+
+/// 쓸 수 있는 후보가 전부 기다리는 중이면 가장 먼저 풀리는 시각. 장애·시도 안 한 후보 등 한도가 아닌 이유로 막힌 후보가
+/// 있으면 `None`이라 호출자가 "한도를 다 썼다"고 말하지 않는다. 배정에서 뺀 계정은 어차피 못 쓰므로 세지 않는다.
+pub(crate) fn summarize(causes: &[(String, Cause)]) -> Option<Recovery> {
+    let mut earliest: Option<(i64, bool)> = None;
+    let mut all_quota = true;
+    for (_, cause) in causes {
+        match cause {
+            Cause::Disabled => {}
+            Cause::Down | Cause::Ready => return None,
+            Cause::Wait { until, quota, known } => {
+                all_quota &= quota;
+                // 같은 시각이면 공급자가 알려 준 쪽을 앞세운다.
+                if earliest.is_none_or(|(at, was_known)| (*until, !*known) < (at, !was_known)) {
+                    earliest = Some((*until, *known));
+                }
+            }
+        }
+    }
+    earliest.map(|(at, known)| Recovery { at, known, all_quota })
+}
+
+/// 모든 후보가 한도 때문에 막혔으면 가장 먼저 풀리는 시각과 그 성격. 요청 경로는 로그에 원인도 남기려고
+/// `classify_all`과 `summarize`를 직접 부르고, 이 함수는 둘을 합친 형태로 테스트가 쓴다.
+#[cfg(test)]
+pub(crate) fn quota_reset(candidates: &[Candidate], provider: &str, model: &str, blocks: &[Block], now: i64) -> Option<Recovery> {
+    summarize(&classify_all(candidates, provider, model, blocks, now))
+}
+
+/// 시각을 로그에 남길 때 쓰는 꼬리표. 공급자가 알려 준 시각인지 Ojak의 추정인지.
+fn reset_kind(known: bool) -> &'static str {
+    if known { "provider" } else { "estimate" }
+}
+
+/// 모든 후보가 못 받아 요청을 거절한 한 줄. 데스크톱 사용량 파서는 `->`가 없는 이 줄을 건너뛴다.
+/// `<ms> <provider>/<model> session=<tail> outcome=rejected reset=<ms>:<provider|estimate>|- causes=<alias>:<code>[:<until>],…`
+pub(crate) fn format_reject_line(at: i64, provider: &str, model: &str, session: &str, causes: &[(String, Cause)], reset: Option<&Recovery>) -> String {
+    let reset = reset.map_or_else(|| "-".to_owned(), |recovery| format!("{}:{}", recovery.at, reset_kind(recovery.known)));
+    let causes = causes
+        .iter()
+        .map(|(alias, cause)| match cause {
+            Cause::Wait { until, .. } => format!("{alias}:{}:{until}", cause.code()),
+            _ => format!("{alias}:{}", cause.code()),
         })
-        .collect::<Option<Vec<i64>>>()?
-        .into_iter()
-        .min()
+        .collect::<Vec<_>>()
+        .join(",");
+    format!(
+        "{at} {provider}/{} session={} outcome=rejected reset={reset} causes={}",
+        sanitize_log_model(model),
+        sanitize_log_token(session),
+        if causes.is_empty() { "-" } else { causes.as_str() }
+    )
+}
+
+/// 한도 응답을 받아 계정을 막은 한 줄. 사용량 파서는 건너뛴다.
+/// `<ms> <provider>/<model> session=<tail> outcome=blocked account=<alias> kind=<quota|rate> scope=<scope|-> until=<ms>:<provider|estimate>`
+pub(crate) fn format_block_line(
+    at: i64,
+    provider: &str,
+    model: &str,
+    session: &str,
+    alias: &str,
+    quota: bool,
+    scope: Option<&str>,
+    until: i64,
+    estimate: bool,
+) -> String {
+    format!(
+        "{at} {provider}/{} session={} outcome=blocked account={alias} kind={} scope={} until={until}:{}",
+        sanitize_log_model(model),
+        sanitize_log_token(session),
+        if quota { "quota" } else { "rate" },
+        scope.map_or_else(|| "-".to_owned(), sanitize_log_token),
+        reset_kind(!estimate)
+    )
+}
+
+/// 지역 시각의 월·일·시·분. 메시지에 "몇 시부터"를 적을 때만 쓴다.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) struct Clock {
+    pub month: u32,
+    pub day: u32,
+    pub hour: u32,
+    pub minute: u32,
+}
+
+fn local_clock(ms: i64) -> Option<Clock> {
+    let secs = ms.div_euclid(1000) as libc::time_t;
+    // SAFETY: `tm`은 0으로 채운 순수 정수 구조체이고, 두 함수 모두 스레드 안전한 변환 함수(`localtime_r`/`localtime_s`)다.
+    let mut tm: libc::tm = unsafe { std::mem::zeroed() };
+    #[cfg(unix)]
+    let ok = !unsafe { libc::localtime_r(&secs, &mut tm) }.is_null();
+    #[cfg(windows)]
+    let ok = unsafe { libc::localtime_s(&mut tm, &secs) } == 0;
+    ok.then(|| Clock { month: (tm.tm_mon + 1) as u32, day: tm.tm_mday as u32, hour: tm.tm_hour as u32, minute: tm.tm_min as u32 })
+}
+
+/// 남은 시간을 사람이 읽는 말로. 정확히 아는 값이 아니므로 "약"을 붙인다.
+fn wait_phrase(ms: i64) -> String {
+    let ms = ms.max(0);
+    if ms < 60_000 {
+        format!("약 {}초", (ms + 999) / 1000)
+    } else if ms < 120 * 60_000 {
+        format!("약 {}분", (ms + 59_999) / 60_000)
+    } else {
+        format!("약 {}시간", (ms + 3_599_999) / 3_600_000)
+    }
+}
+
+fn provider_label(provider: &str) -> &str {
+    match provider {
+        "anthropic" => "Claude",
+        "openai-codex" => "Codex",
+        "google-antigravity" => "Antigravity",
+        "xai-oauth" => "Grok",
+        "zai" => "Z.AI",
+        other => other,
+    }
+}
+
+/// omp가 429를 사용량 한도로 분류하려면 본문에 한도 문구가 있어야 한다(omp의 `usage.?limit` 판별).
+/// 사용자가 읽는 한국어 문장 끝에 이 영어 꼬리표를 붙인다.
+const OMP_LIMIT_TAG: &str = "(usage limit reached)";
+
+/// 429 본문 메시지. 아는 것만 말한다: 공급자가 알려 준 시각이면 그 시각, Ojak의 추정이면 추정이라고 밝힌다.
+/// `alternatives`는 지금 gateway가 떠 있는 다른 공급자의 Ojak 공급자 ID다(없는 공급자는 넣지 않는다).
+pub(crate) fn quota_message(
+    provider: &str,
+    model: &str,
+    recovery: &Recovery,
+    now: i64,
+    alternatives: &[&str],
+    clock: impl Fn(i64) -> Option<Clock>,
+) -> String {
+    let label = provider_label(provider);
+    let model = sanitize_log_model(model);
+    let wait = wait_phrase(recovery.at - now);
+    let hint = if alternatives.is_empty() {
+        "지금은 /model로 다른 모델을 골라 보세요.".to_owned()
+    } else {
+        format!("지금은 /model로 다른 모델을 고르거나 {} 같은 다른 공급자를 써 보세요.", alternatives.join(", "))
+    };
+    if !recovery.all_quota {
+        // 요청 속도 제한이 섞였으면 사용량 한도로 분류되지 않게 태그를 붙이지 않는다. omp가 짧은 Retry-After만큼 기다린다.
+        return format!("Ojak: 쓸 수 있는 {label} 계정이 모두 한도나 요청 제한 때문에 잠시 쉬고 있어요. {wait} 뒤 다시 확인해 볼게요. {hint}");
+    }
+    if !recovery.known {
+        return format!(
+            "Ojak: 쓸 수 있는 {label} 계정이 모두 {model} 한도를 다 쓴 것 같아요. 리셋 시각을 몰라서 {wait} 뒤 다시 확인해 볼게요. {hint} {OMP_LIMIT_TAG}"
+        );
+    }
+    let when = match (clock(recovery.at), clock(now)) {
+        (Some(at), Some(today)) if (at.month, at.day) == (today.month, today.day) => format!("{:02}:{:02}부터", at.hour, at.minute),
+        (Some(at), Some(_)) => format!("{}월 {}일 {:02}:{:02}부터", at.month, at.day, at.hour, at.minute),
+        _ => format!("{wait} 뒤부터"),
+    };
+    format!("Ojak: 쓸 수 있는 {label} 계정이 모두 {model} 한도를 다 썼어요. {when} 다시 쓸 수 있어요. {hint} {OMP_LIMIT_TAG}")
 }
 
 /// omp가 사용량 한도로 분류하도록 429와 재시도 시각을 돌려준다. 503을 주면 일시 장애로 보고 재시도를 반복한다.
-fn respond_quota(stream: &mut TcpStream, provider: &str, model: &str, reset: i64, now: i64) {
-    let seconds = ((reset - now).max(0) + 999) / 1000;
+/// `Retry-After`는 아는 시각까지의 초다. 추정이어도 그 이상으로 늘리지 않는다.
+fn respond_quota(stream: &mut TcpStream, provider: &str, model: &str, recovery: &Recovery, alternatives: &[&str], now: i64) {
+    let seconds = ((recovery.at - now).max(0) + 999) / 1000;
     let body = json!({
         "error": {
             "type": "rate_limit_error",
-            "message": format!("AAM 브릿지: usage limit reached for {model} on every {provider} account; resets in {seconds}s"),
+            "message": quota_message(provider, model, recovery, now, alternatives, local_clock),
         }
     })
     .to_string();
@@ -1602,7 +1926,7 @@ mod tests {
         }
     }
     fn candidate(key: &str, buckets: Vec<QuotaBucket>) -> Candidate {
-        Candidate { key: key.into(), buckets, healthy: true, enabled: true, pinned: false }
+        Candidate { key: key.into(), buckets, healthy: true, enabled: true, pinned: false, paid_fallback: None }
     }
     const DAY: i64 = 86_400_000;
 
@@ -1622,6 +1946,41 @@ mod tests {
     }
 
     #[test]
+    fn paid_fallback_is_last_resort_and_never_sticks_after_recovery() {
+        let now = 1_000_000_000_000;
+        let fresh = 900_000;
+        let spent = |key: &str, paid: Option<i64>| Candidate { paid_fallback: paid, ..candidate(key, vec![bucket("7d", None, 100.0, DAY, now)]) };
+        let roomy = candidate("roomy", vec![bucket("7d", None, 40.0, 5 * DAY, now)]);
+        let none = HashMap::new();
+        // 옵트인이 없으면(paid_fallback 없음) 소진 계정은 그대로 제외된다.
+        assert_eq!(choose(&[spent("paid", None)], "openai-codex", "gpt-6-astra", None, &none, &[], &[], 0.0, now), None);
+        // 구독 한도가 남은 계정이 있으면 크레딧·추가 사용량 계정은 고르지 않는다.
+        let pool = [spent("paid", Some(fresh)), roomy.clone()];
+        assert_eq!(choose(&pool, "openai-codex", "gpt-6-astra", None, &none, &[], &[], 0.0, now), Some(1));
+        // 구독 계정이 하나도 없으면 마지막 수단으로 고른다.
+        assert_eq!(choose(&[spent("paid", Some(fresh))], "openai-codex", "gpt-6-astra", None, &none, &[], &[], 0.0, now), Some(0));
+        // 그 계정에 세션이 붙은 뒤 구독 한도가 회복되면 다음 요청부터 구독 계정으로 옮긴다.
+        let mut stickies = HashMap::new();
+        stickies.insert("s".to_owned(), Sticky { key: "paid".into(), model: "gpt-6-astra".into(), cwd: None, last_used: now, requests: 3 });
+        assert_eq!(choose(&[spent("paid", Some(fresh))], "openai-codex", "gpt-6-astra", Some("s"), &stickies, &[], &[], 0.0, now), Some(0));
+        assert_eq!(choose(&pool, "openai-codex", "gpt-6-astra", Some("s"), &stickies, &[], &[], 0.0, now), Some(1));
+        // 같은 계정의 한도가 리셋되면(새 관측) 크레딧 계정이어도 구독 계정으로 돌아온다.
+        let recovered = Candidate { paid_fallback: Some(fresh), ..candidate("paid", vec![bucket("7d", None, 20.0, 5 * DAY, now)]) };
+        assert_eq!(choose(&[recovered], "openai-codex", "gpt-6-astra", Some("s"), &stickies, &[], &[], 0.0, now), Some(0));
+        // 소진 관측이 낡았거나(관측 시각이 오래됨) 리셋 시각이 지났으면 크레딧 fallback을 고르지 않는다.
+        let mut old = bucket("7d", None, 100.0, DAY, now - 2 * fresh);
+        old.observed_at = now - 2 * fresh;
+        let stale = Candidate { paid_fallback: Some(fresh), ..candidate("paid", vec![old]) };
+        assert_eq!(choose(&[stale], "openai-codex", "gpt-6-astra", None, &none, &[], &[], 0.0, now), None);
+        // 한도가 남았지만 일시 차단된 구독 계정이 있으면 기다리지 크레딧으로 넘어가지 않는다.
+        let blocks = [Block { key: "roomy".into(), scope: None, until: now + 60_000, reason: "test".into(), quota: false, estimate: false }];
+        assert_eq!(choose(&pool, "openai-codex", "gpt-6-astra", None, &none, &blocks, &[], 0.0, now), None);
+        // 모델 전용 한도 소진은 공용 크레딧이 대신 받지 않는다.
+        let model_only = Candidate { paid_fallback: Some(fresh), ..candidate("paid", vec![bucket("7d", None, 20.0, 5 * DAY, now), bucket("spark", Some("fable"), 100.0, DAY, now)]) };
+        assert_eq!(choose(&[model_only], "anthropic", "claude-fable-5-1", None, &none, &[], &[], 0.0, now), None);
+    }
+
+    #[test]
     fn session_stays_on_its_account_until_that_account_is_unusable() {
         let now = 1_000_000_000_000;
         let pool = [
@@ -1631,7 +1990,7 @@ mod tests {
         let mut stickies = HashMap::new();
         stickies.insert("s1".into(), Sticky { key: "a".into(), model: "claude-opus-5-5".into(), cwd: None, last_used: now - 60_000, requests: 3 });
         assert_eq!(choose(&pool, "anthropic", "claude-opus-5-5", Some("s1"), &stickies, &[], &[], 0.0, now), Some(0));
-        let blocks = [Block { key: "a".into(), scope: None, until: now + 60_000, reason: "test".into() }];
+        let blocks = [Block { key: "a".into(), scope: None, until: now + 60_000, reason: "test".into(), quota: false, estimate: false }];
         assert_eq!(choose(&pool, "anthropic", "claude-opus-5-5", Some("s1"), &stickies, &blocks, &[], 0.0, now), Some(1));
         // 고정이 오래되면 다시 순위를 매긴다.
         stickies.get_mut("s1").unwrap().last_used = now - STICKY_MS - 1;
@@ -1642,18 +2001,18 @@ mod tests {
     fn scoped_block_does_not_leak_to_other_models_but_account_block_does() {
         let now = 1_000_000_000_000;
         let pool = [candidate("a", vec![]), candidate("b", vec![])];
-        let fable_block = [Block { key: "a".into(), scope: Some("fable".into()), until: now + 60_000, reason: "q".into() }];
+        let fable_block = [Block { key: "a".into(), scope: Some("fable".into()), until: now + 60_000, reason: "q".into(), quota: true, estimate: false }];
         let none = HashMap::new();
         assert_eq!(choose(&pool, "anthropic", "claude-fable-5-1", None, &none, &fable_block, &[], 0.0, now), Some(1));
         assert_eq!(choose(&pool, "anthropic", "claude-opus-5-5", None, &none, &fable_block, &[], 0.0, now), Some(0));
         // Codex는 chat 한도와 spark 한도가 따로다.
-        let chat_block = [Block { key: "a".into(), scope: block_scope("openai-codex", "gpt-6-astra"), until: now + 60_000, reason: "q".into() }];
+        let chat_block = [Block { key: "a".into(), scope: block_scope("openai-codex", "gpt-6-astra"), until: now + 60_000, reason: "q".into(), quota: true, estimate: false }];
         assert_eq!(choose(&pool, "openai-codex", "gpt-6-astra", None, &none, &chat_block, &[], 0.0, now), Some(1));
         // 공급자 수동 배정: 새 대화는 고정 계정이 받을 수 있으면 그 계정. 소진·차단이면 다른 계정으로 넘어간다.
         let mut pinned_pool = vec![candidate("a", vec![]), candidate("b", vec![])];
         pinned_pool[1].pinned = true;
         assert_eq!(choose(&pinned_pool, "anthropic", "claude-opus-5-5", None, &none, &[], &[], 0.0, now), Some(1));
-        let pinned_block = [Block { key: "b".into(), scope: None, until: now + 60_000, reason: "q".into() }];
+        let pinned_block = [Block { key: "b".into(), scope: None, until: now + 60_000, reason: "q".into(), quota: false, estimate: false }];
         assert_eq!(choose(&pinned_pool, "anthropic", "claude-opus-5-5", None, &none, &pinned_block, &[], 0.0, now), Some(0));
         // 진행 중인 대화(sticky)는 고정을 바꿔도 원래 계정을 유지한다.
         let mut kept = HashMap::new();
@@ -1680,18 +2039,208 @@ mod tests {
         assert_eq!(choose(&hot, "anthropic", "claude-opus-5-5", None, &HashMap::new(), &[], &[], 0.0, now), Some(1));
     }
 
+    fn block(key: &str, scope: Option<String>, until: i64, quota: bool, estimate: bool) -> Block {
+        Block { key: key.into(), scope, until, reason: "test".into(), quota, estimate }
+    }
+
     #[test]
     fn quota_reset_reports_earliest_recovery_only_when_every_account_is_quota_blocked() {
         let now = 1_000_000_000_000;
         let spent = |key: &str, reset_in: i64| candidate(key, vec![bucket("7d", None, 100.0, reset_in, now)]);
         let pool = [spent("a", 3 * DAY), spent("b", DAY)];
-        assert_eq!(quota_reset(&pool, "openai-codex", "gpt-6-astra", &[], now), Some(now + DAY));
+        // 둘 다 관측한 공급자 리셋이 있으면 가장 빠른 시각이고, 공급자가 알려 준 시각이다.
+        assert_eq!(
+            quota_reset(&pool, "openai-codex", "gpt-6-astra", &[], now),
+            Some(Recovery { at: now + DAY, known: true, all_quota: true })
+        );
         // 한 계정은 한도가 아니라 장애로 빠졌다면 재시도 시각을 단정하지 않는다.
         let mixed = [spent("a", 3 * DAY), candidate("b", vec![bucket("7d", None, 10.0, DAY, now)])];
         assert_eq!(quota_reset(&mixed, "openai-codex", "gpt-6-astra", &[], now), None);
         // 브릿지가 직접 본 한도 응답도 막힘 근거가 된다.
-        let blocks = [Block { key: "b".into(), scope: block_scope("openai-codex", "gpt-6-astra"), until: now + 60_000, reason: "q".into() }];
-        assert_eq!(quota_reset(&mixed, "openai-codex", "gpt-6-astra", &blocks, now), Some(now + 60_000));
+        let scope = block_scope("openai-codex", "gpt-6-astra");
+        let blocks = [block("b", scope, now + 60_000, true, false)];
+        assert_eq!(
+            quota_reset(&mixed, "openai-codex", "gpt-6-astra", &blocks, now),
+            Some(Recovery { at: now + 60_000, known: true, all_quota: true })
+        );
+    }
+
+    #[test]
+    fn unavailable_causes_are_classified_with_known_or_estimated_times() {
+        let now = 1_000_000_000_000;
+        let model = "claude-opus-5-5";
+        let scope = block_scope("anthropic", model);
+        let classify_one = |candidate: &Candidate, blocks: &[Block]| classify(candidate, scope.as_deref(), model, blocks, now);
+        // 관측한 소진 + 공급자 리셋 시각.
+        let spent = candidate("a", vec![bucket("7d", None, 100.0, DAY, now)]);
+        assert_eq!(classify_one(&spent, &[]), Cause::Wait { until: now + DAY, quota: true, known: true });
+        // 소진됐다고만 알고 리셋 시각이 없으면 Ojak의 30분 대기를 쓰는 추정이다.
+        let mut unknown_reset = bucket("7d", None, 100.0, DAY, now);
+        unknown_reset.resets_at = None;
+        assert_eq!(
+            classify_one(&candidate("a", vec![unknown_reset]), &[]),
+            Cause::Wait { until: now + QUOTA_BLOCK_MS, quota: true, known: false }
+        );
+        // 한도 응답을 받았지만 리셋 시각을 모른 채 건 대기(2026-10-07 사고의 1618초)도 추정이다.
+        let cooldown = block("a", scope.clone(), now + 1_618_000, true, true);
+        let cause = classify_one(&candidate("a", vec![]), std::slice::from_ref(&cooldown));
+        assert_eq!(cause, Cause::Wait { until: now + 1_618_000, quota: true, known: false });
+        assert_eq!(cause.code(), "cooldown");
+        // 속도 제한 차단은 한도가 아니다. 계정 전체를 막고 모델 범위 밖에도 적용된다.
+        let rate = block("a", None, now + 20_000, false, false);
+        let cause = classify_one(&candidate("a", vec![]), std::slice::from_ref(&rate));
+        assert_eq!(cause, Cause::Wait { until: now + 20_000, quota: false, known: true });
+        assert_eq!(cause.code(), "rate");
+        // 다른 계정·다른 모델 범위·이미 끝난 차단은 영향이 없다.
+        let other = [block("b", None, now + 60_000, false, false), block("a", Some("fable".into()), now + 60_000, true, false), block("a", None, now - 1, true, true)];
+        assert_eq!(classify_one(&candidate("a", vec![]), &other), Cause::Ready);
+        // 관측 소진과 차단이 겹치면 더 늦게 풀리는 쪽이 결정한다.
+        let long_block = block("a", scope.clone(), now + 2 * DAY, true, false);
+        assert_eq!(classify_one(&spent, std::slice::from_ref(&long_block)), Cause::Wait { until: now + 2 * DAY, quota: true, known: true });
+        // 한도가 아닌 이유.
+        assert_eq!(classify_one(&Candidate { healthy: false, ..candidate("a", vec![]) }, &[]), Cause::Down);
+        assert_eq!(classify_one(&Candidate { enabled: false, ..spent.clone() }, &[]), Cause::Disabled);
+        assert_eq!(Cause::Down.code(), "down");
+        assert_eq!(Cause::Disabled.code(), "disabled");
+    }
+
+    #[test]
+    fn summary_claims_quota_exhaustion_only_when_every_usable_account_is_waiting() {
+        let now = 1_000_000_000_000;
+        let wait = |until: i64, quota: bool, known: bool| Cause::Wait { until, quota, known };
+        let causes = |items: &[Cause]| items.iter().enumerate().map(|(index, cause)| (format!("k{index}"), *cause)).collect::<Vec<_>>();
+        // 가장 빠른 시각과 그 성격. 같은 시각이면 공급자가 알려 준 쪽을 앞세운다.
+        let two = causes(&[wait(now + 3 * DAY, true, true), wait(now + 1_618_000, true, false)]);
+        assert_eq!(summarize(&two), Some(Recovery { at: now + 1_618_000, known: false, all_quota: true }));
+        let tie = causes(&[wait(now + 1000, true, false), wait(now + 1000, true, true)]);
+        assert_eq!(summarize(&tie).map(|recovery| recovery.known), Some(true));
+        // 속도 제한이 섞이면 사용량 한도라고 단정하지 않는다.
+        let mixed_rate = causes(&[wait(now + 60_000, false, false), wait(now + DAY, true, true)]);
+        assert_eq!(summarize(&mixed_rate), Some(Recovery { at: now + 60_000, known: false, all_quota: false }));
+        // 장애·미시도 후보가 있으면 시각을 말하지 않는다.
+        assert_eq!(summarize(&causes(&[wait(now + DAY, true, true), Cause::Down])), None);
+        assert_eq!(summarize(&causes(&[wait(now + DAY, true, true), Cause::Ready])), None);
+        // 배정에서 뺀 계정은 판단에서 빠진다. 전부 뺐으면 말할 시각이 없다.
+        assert_eq!(summarize(&causes(&[Cause::Disabled, wait(now + DAY, true, true)])).map(|recovery| recovery.at), Some(now + DAY));
+        assert_eq!(summarize(&causes(&[Cause::Disabled])), None);
+        assert_eq!(summarize(&[]), None);
+        // 장애 하나가 섞인 실제 풀: 한도 소진 + gateway 중단.
+        let pool = [
+            candidate("a", vec![bucket("7d", None, 100.0, DAY, now)]),
+            Candidate { healthy: false, ..candidate("b", vec![]) },
+        ];
+        assert_eq!(quota_reset(&pool, "anthropic", "claude-opus-5-5", &[], now), None);
+    }
+
+    #[test]
+    fn block_until_marks_only_the_default_cooldown_as_an_estimate() {
+        let now = 1_000_000_000_000;
+        let model = "claude-opus-5-5";
+        let none: Vec<QuotaBucket> = Vec::new();
+        // 리셋도 대기 힌트도 없으면 Ojak의 기본 30분/60초이고 추정이다.
+        assert_eq!(block_until(&none, model, true, None, now), (now + QUOTA_BLOCK_MS, true));
+        assert_eq!(block_until(&none, model, false, None, now), (now + RATE_BLOCK_MS, true));
+        // 기본값보다 짧은 힌트는 기본값을 못 줄인다. 그래도 공급자가 정한 시각이 아니다.
+        assert_eq!(block_until(&none, model, true, Some(now + 5 * 60_000), now), (now + QUOTA_BLOCK_MS, true));
+        assert_eq!(block_until(&none, model, false, Some(now + 20_000), now), (now + RATE_BLOCK_MS, true));
+        // 기본값보다 긴 힌트는 공급자가 알려 준 시각이다.
+        assert_eq!(block_until(&none, model, true, Some(now + DAY), now), (now + DAY, false));
+        // 관측한 리셋 시각이 있으면 그것이 기준이고, 더 늦은 힌트가 이긴다.
+        let spent = [bucket("7d", None, 100.0, 3 * DAY, now)];
+        assert_eq!(block_until(&spent, model, true, None, now), (now + 3 * DAY, false));
+        assert_eq!(block_until(&spent, model, true, Some(now + 5 * DAY), now), (now + 5 * DAY, false));
+        assert_eq!(block_until(&spent, model, true, Some(now + DAY), now), (now + 3 * DAY, false));
+    }
+
+    fn clock_for(now: i64, reset: Clock, today: Clock) -> impl Fn(i64) -> Option<Clock> {
+        move |ms| Some(if ms == now { today } else { reset })
+    }
+
+    #[test]
+    fn quota_message_is_honest_actionable_and_never_names_aam() {
+        let now = 1_000_000_000_000;
+        let today = Clock { month: 10, day: 7, hour: 3, minute: 53 };
+        let same_day = Clock { month: 10, day: 7, hour: 14, minute: 5 };
+        let later = Clock { month: 10, day: 9, hour: 9, minute: 0 };
+        let recovery = |at: i64, known: bool, all_quota: bool| Recovery { at, known, all_quota };
+        let all = ["ojak-codex", "ojak-antigravity"];
+        // 공급자가 알려 준 리셋: 시각과 다음 행동.
+        let message = quota_message("anthropic", "claude-opus-5-5", &recovery(now + 3_600_000, true, true), now, &all, clock_for(now, same_day, today));
+        assert!(message.starts_with("Ojak:"), "{message}");
+        assert!(message.contains("Claude 계정이 모두 claude-opus-5-5 한도를 다 썼어요"), "{message}");
+        assert!(message.contains("14:05부터 다시 쓸 수 있어요"), "{message}");
+        assert!(message.contains("/model") && message.contains("ojak-codex, ojak-antigravity"), "{message}");
+        assert!(!message.contains("AAM") && !message.contains("브릿지"), "{message}");
+        // omp가 사용량 한도로 분류하는 문구(`usage.?limit`)를 남긴다.
+        assert!(message.contains("usage limit"), "{message}");
+        assert!(!message.contains("약 "), "{message}");
+        // 날짜가 다르면 월·일을 붙인다.
+        let message = quota_message("anthropic", "claude-opus-5-5", &recovery(now + 2 * DAY, true, true), now, &[], clock_for(now, later, today));
+        assert!(message.contains("10월 9일 09:00부터"), "{message}");
+        // 로컬 시각을 못 구하면 남은 시간으로 말한다.
+        let message = quota_message("openai-codex", "gpt-6-astra", &recovery(now + 2 * 3_600_000, true, true), now, &[], |_| None);
+        assert!(message.contains("Codex 계정이") && message.contains("약 2시간 뒤부터 다시 쓸 수 있어요"), "{message}");
+        // Ojak의 추정: 공급자 리셋이라고 말하지 않고 다시 확인한다고 밝힌다(2026-10-07 사고의 1618초).
+        let message = quota_message("anthropic", "claude-opus-5-5", &recovery(now + 1_618_000, false, true), now, &all, clock_for(now, same_day, today));
+        assert!(message.contains("약 27분 뒤 다시 확인해 볼게요"), "{message}");
+        assert!(message.contains("리셋 시각을 몰라서"), "{message}");
+        assert!(!message.contains("부터 다시 쓸 수 있어요") && !message.contains("AAM"), "{message}");
+        assert!(message.contains("/model"), "{message}");
+        assert!(message.contains("usage limit"), "{message}");
+        // 속도 제한이 섞이면 한도를 다 썼다고 말하지 않고 사용량 한도 문구도 붙이지 않는다.
+        let message = quota_message("anthropic", "claude-opus-5-5", &recovery(now + 20_000, true, false), now, &all, clock_for(now, same_day, today));
+        assert!(message.contains("약 20초 뒤 다시 확인해 볼게요"), "{message}");
+        assert!(!message.contains("한도를 다 썼") && !message.contains("usage limit"), "{message}");
+        // 대안 공급자가 없으면 이름을 대지 않는다.
+        let message = quota_message("anthropic", "claude-opus-5-5", &recovery(now + 60_000, false, true), now, &[], clock_for(now, same_day, today));
+        assert!(message.contains("/model로 다른 모델을 골라 보세요") && !message.contains("ojak-"), "{message}");
+    }
+
+    #[test]
+    fn reject_and_block_log_lines_are_single_lines_without_email() {
+        let now = 1_700_000_000_000;
+        let model = "claude-opus-5-5";
+        let email_key = "anthropic|email:person@example.com|org:org-1";
+        let other_key = "anthropic|email:second@example.com|org:org-2";
+        let pool = [
+            candidate(email_key, vec![bucket("7d", None, 100.0, DAY, now)]),
+            candidate(other_key, vec![]),
+        ];
+        let blocks = [block(other_key, None, now + 1_618_000, true, true)];
+        let causes = classify_all(&pool, "anthropic", model, &blocks, now);
+        let reset = summarize(&causes);
+        let line = format_reject_line(now, "anthropic", model, "abcd\n1234", &causes, reset.as_ref());
+        let first = account_key(identity_from_key(email_key));
+        let second = account_key(identity_from_key(other_key));
+        assert!(line.starts_with(&format!("{now} anthropic/{model} session=abcd1234 outcome=rejected ")), "{line}");
+        assert!(line.contains(&format!("reset={}:estimate", now + 1_618_000)), "{line}");
+        assert!(line.contains(&format!("{first}:quota:{}", now + DAY)) && line.contains(&format!("{second}:cooldown:{}", now + 1_618_000)), "{line}");
+        for secret in ["@", "email:", "org:", "person", "example.com", "\n"] {
+            assert!(!line.contains(secret), "{secret}: {line}");
+        }
+        // 한도가 아닌 이유가 섞이면 시각 칸은 비고 원인만 남는다.
+        let down = [candidate(email_key, vec![bucket("7d", None, 100.0, DAY, now)]), Candidate { healthy: false, ..candidate(other_key, vec![]) }];
+        let causes = classify_all(&down, "anthropic", model, &[], now);
+        let line = format_reject_line(now, "anthropic", model, "-", &causes, summarize(&causes).as_ref());
+        assert!(line.contains(" reset=- ") && line.contains(&format!("{second}:down")) && !line.contains('@'), "{line}");
+        // 차단 한 줄.
+        let line = format_block_line(now, "anthropic", "claude-fable-5-1", "abcd1234", &first, true, Some("fable"), now + 1_618_000, true);
+        assert_eq!(
+            line,
+            format!("{now} anthropic/claude-fable-5-1 session=abcd1234 outcome=blocked account={first} kind=quota scope=fable until={}:estimate", now + 1_618_000)
+        );
+        let line = format_block_line(now, "openai-codex", "gpt-6-astra", "-", &first, false, None, now + 60_000, false);
+        assert!(line.contains("kind=rate scope=- until=") && line.ends_with(":provider"), "{line}");
+        // 사용량 파서는 이 줄들을 요청으로 세지 않는다.
+        assert!(parse_usage_line(&line).is_none());
+        let rejected = format_reject_line(now, "anthropic", model, "-", &classify_all(&pool, "anthropic", model, &blocks, now), reset.as_ref());
+        assert!(parse_usage_line(&rejected).is_none());
+    }
+
+    #[test]
+    fn local_clock_returns_a_valid_wall_time() {
+        let clock = local_clock(1_700_000_000_000).unwrap();
+        assert!((1..=12).contains(&clock.month) && (1..=31).contains(&clock.day) && clock.hour < 24 && clock.minute < 60);
     }
 
     #[test]

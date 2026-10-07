@@ -41,3 +41,9 @@ export function updateInterruptCounts(
   const bridge = bridgeSessions.filter(session => now - session.lastUsedAt < ACTIVE_BRIDGE_MS).length;
   return { managed, bridge, warn: managed + bridge > 0 };
 }
+
+/// 서비스 다시 시작 전에 먼저 경고할지. 쓰는 중인 관리 세션은 서비스가 직접 거절하므로 여기서는 서비스가 모르는
+/// omp 브릿지 사용(최근 15분)이나 확인 실패만 경고한다.
+export function restartNeedsWarning(counts: InterruptCounts, unknown: boolean): boolean {
+  return unknown || counts.bridge > 0;
+}

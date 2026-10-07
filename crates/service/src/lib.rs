@@ -94,6 +94,8 @@ struct PolicyUpdate {
     expiring_boost: Option<bool>,
     expiring_window_hours: Option<u32>,
     expiring_min_percent: Option<f64>,
+    use_credits_after_limit: Option<bool>,
+    use_extra_usage_after_limit: Option<bool>,
 }
 #[derive(Deserialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
@@ -358,6 +360,7 @@ impl Service {
             last_refresh_at: metadata(&store.connection, "lastRefreshAt")?,
             takeovers: adopted,
             quota_summaries,
+            service_version: Some(env!("CARGO_PKG_VERSION").to_owned()),
         })
     }
     pub fn dispatch(self: &Arc<Self>, method: &str, params: Value) -> Result<Value, ApiError> {
@@ -554,6 +557,12 @@ impl Service {
                 ));
             }
             current.safety_reserve_percent = reserve;
+        }
+        if let Some(use_credits) = request.use_credits_after_limit {
+            current.use_credits_after_limit = use_credits;
+        }
+        if let Some(use_extra) = request.use_extra_usage_after_limit {
+            current.use_extra_usage_after_limit = use_extra;
         }
         if let Some(boost) = request.expiring_boost {
             current.expiring_boost = boost;
@@ -897,6 +906,8 @@ impl Service {
                 capability: record.capability,
                 account: record.account,
                 pin_unavailable: false,
+                credits_fallback: false,
+                extra_usage_fallback: false,
             });
         }
         admission_allowed(&tx)?;
@@ -952,6 +963,8 @@ impl Service {
         let effective = routes::effective(&request.intent, &resolution);
         let decision = scheduler::decide_with(&accounts, &sessions, &policy, &request.intent, now, &configured)?;
         let pin_unavailable = decision.pin_unavailable.is_some();
+        let credits_fallback = scheduler::chose_credits(&decision);
+        let extra_usage_fallback = scheduler::chose_extra_usage(&decision);
         let selected = decision
             .selected_account_id
             .as_ref()
@@ -1054,6 +1067,8 @@ impl Service {
             capability: record.capability,
             account: record.account,
             pin_unavailable,
+            credits_fallback,
+            extra_usage_fallback,
         })
     }
     /// 계정별 기본 모델 설정을 서비스 잠금 밖에서 읽는다. 계정 목록만 짧게 잠가 가져온다.

@@ -1,6 +1,6 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { updateBadgeVisible, updateControlsVisible, updateInterruptCounts, updatesEnabled } from "./updates.ts";
+import { restartNeedsWarning, updateBadgeVisible, updateControlsVisible, updateInterruptCounts, updatesEnabled } from "./updates.ts";
 
 
 test("a configured pubkey shows controls, and the badge only when a version is waiting", () => {
@@ -27,4 +27,11 @@ test("install warns only for live managed sessions and bridge sessions used in t
     now,
   );
   assert.deepEqual(busy, { managed: 2, bridge: 1, warn: true });
+});
+
+test("service restart warns for omp bridge use or unknown state, while busy managed sessions are left to the service gate", () => {
+  assert.equal(restartNeedsWarning({ managed: 0, bridge: 0, warn: false }, false), false);
+  assert.equal(restartNeedsWarning({ managed: 0, bridge: 1, warn: true }, false), true);
+  assert.equal(restartNeedsWarning({ managed: 2, bridge: 0, warn: true }, false), false);
+  assert.equal(restartNeedsWarning({ managed: 0, bridge: 0, warn: false }, true), true);
 });

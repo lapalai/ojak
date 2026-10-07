@@ -10,6 +10,7 @@
 - `Service::start_background` (`lib.rs:1557`) — reconcile 2초 주기, quota refresh 225–375초(지터), 브릿지 시작
 
 ## RPC 메서드 (`lib.rs:346-452`)
+`status.read`의 Snapshot은 `serviceVersion`(서비스 실행 파일의 `CARGO_PKG_VERSION`)을 담는다. 앱·`aam`이 자기 버전과 비교해 덮어쓴 앱 뒤에 남은 예전 서비스를 찾는 데 쓴다. 이 필드가 없던 서비스는 응답에 빠져 있고, 받는 쪽은 '알 수 없음'(재시작 필요)으로 본다. `service.prepareUninstall`은 `aam service restart`도 쓰는 lease 검사 창구다.
 `status.read`, `quota.refresh`, `service.prepareUninstall`, `service.cancelUninstall`, `service.resumeAdmission`, `route.resolve`, `route.explain`, `takeover.adopt`, `takeover.release`, `lease.validate-child`, `policy.update`, `bridge.status`, `diagnostics.export`, `account.register`, `account.update`, `lease.acquire`, `lease.starting`, `lease.started`, `lease.heartbeat`, `lease.release`, `lease.abort`. 나머지는 `METHOD_NOT_FOUND`.
 
 ## 저장소 (`store.rs:62-104`)
@@ -32,6 +33,9 @@ SQLite `state.sqlite3`, WAL, `synchronous=FULL`, busy_timeout 5초. 테이블 `a
 - `quota_summary.rs`가 계정 그룹별 `available/reserve/partial/resting/excluded/login/unknown`을 `Snapshot.quotaSummaries`로 제공한다. 최신 bucket과 실제 bridge 차단을 합치되, 이메일 근거가 여러 workspace에 걸치면 차단을 억지로 붙이지 않는다. 모델별 한도만 있는 공급자도 지원한다. 모델·프로젝트·슬롯이 없는 요약이므로 배정 허용은 별도 scheduler 판단이다.
 - 곧 리셋(`quota_summary::expiring`): 모델 전용·5시간 같은 짧은 한도를 뺀 신선한 공용 한도가 `expiring_window_hours`(기본 48) 안에 리셋되고, 안전 여유량을 뺀 남은 양이 `expiring_min_percent`(기본 30) 이상이면 `quotaSummaries[].expiring`(라벨·리셋 시각·쓸 수 있는 %·시간당 %)을 채운다. 여러 개면 시간당 써야 할 양이 가장 큰 것 하나. `resting`/`unknown` 요약에는 붙이지 않는다.
 - `expiring_boost`(기본 꺼짐)를 켜면 스마트 배정에서만 입장 조건을 통과한 곧 리셋 계정끼리 먼저 비교한다(`EXPIRING_PREFERRED`). 명시 계정·공급자 수동 배정·소비 순서 모드가 먼저이고, 안전 여유량 안쪽 후보는 여전히 뒤로 간다. 세 값은 `policy.update`로 바꾸며 범위는 1~168시간, 1~100%.
+- 크레딧·추가 사용량 fallback(둘 다 정책 옵트인, 기본 꺼짐, 단위가 달라 섞지 않는다): `use_credits_after_limit`는 Codex 전용(`Account.credits` = 공식 app-server `account/rateLimits/read`의 `credits{hasCredits,unlimited,balance}`+`ordinaryUsageAllowed`, ChatGPT 크레딧 단위·금액 아님), `use_extra_usage_after_limit`는 Claude 전용(`Account.extra_usage` = omp 사용량 보고의 `anthropic:extra` USD 항목, `used/limit`). 둘 다 `policy.update`로 바꾼다. 꺼져 있으면 배정은 바뀌지 않는다. 켜져 있어도 구독 한도가 남아 입장 가능한 계정이 하나라도 있으면 그 계정이 항상 이긴다. 그런 계정이 하나도 없고(동시 사용 자리만 없는 계정이 있어도 기다린다), 후보가 `QUOTA_EXHAUSTED` 하나만으로 제외됐으며 소진 관측이 신선하고 리셋 시각이 남아 있고(모델 전용 한도가 아닌 공용 한도), 해당 과금 경로가 신선한 관측에서 명시된 계정(크레딧: `has_credits||unlimited`이고 잔액이 0 이하가 아님, `ordinaryUsageAllowed!=true`, `observed_at`이 `stale_after_seconds` 안 / 추가 사용량: `enabled`이고 `limit`이 없거나 `used<limit`)만 마지막 수단으로 뽑는다. 이유 코드 `CREDITS_FALLBACK`/`EXTRA_USAGE_FALLBACK`, `LeaseGrant.credits_fallback`/`extra_usage_fallback`. 선택 상태는 저장하지 않고 매 판정에서 새로 계산하므로 리셋·회복 관측이 들어오면 다음 판정부터 구독 계정이 이긴다. 크레딧 응답에 없거나 오래된 값은 "없음"으로 본다.
+- `quotaSummaries`는 매 스냅샷마다 다시 계산한다. 옵트인이 켜져 있고 같은 도구의 구독 한도가 남은 묶음이 없을 때 `resting` 묶음이 `kind: "credits"`/`"extra"`가 되고(`credits.active`/`extraUsage.active`), 옵트인이 꺼져 있으면 `resting`/`available` 그대로 두고 `credits`/`extraUsage` 사실(`active:false`)만 붙여 화면이 중립 안내("크레딧 있음 (꺼짐)")를 보여 준다. 크레딧 `balance`는 숫자로 읽힐 때만 보관하며 화면은 "N개"로 반올림한다. 금액(USD)은 추가 사용량에만 쓴다.
+- 한계(미검증): 이 Mac의 어떤 계정도 `has_credits=true`나 Claude extra usage 켜짐을 관측한 적이 없다. 공식 JSON 스키마(`codex app-server generate-json-schema`의 `CreditsSnapshot`)와 omp `claude.ts` 소스의 필드 형태로 만든 fixture로만 시험했다. Ojak은 자신이 라우팅하는 새 세션·요청만 통제한다. 이미 실행 중인 공식 Codex·Claude Code 세션이 구독 한도 뒤에 과금 경로로 넘어가는 것은 공급자가 정하므로 Ojak이 멈출 수 없다. 쓴 금액도 Ojak은 볼 수 없다.
 
 ## 라우팅 (`routes.rs:189-427`)
 우선순위: takeover → resume/parent(원래 계정 고정, 다르면 `SWITCH_UNSUPPORTED`) → 가장 깊은 폴더 규칙 → 저장소 규칙(git) → 명시 계정/전역. 경로가 바뀌면 `ROUTE_CHANGED`.

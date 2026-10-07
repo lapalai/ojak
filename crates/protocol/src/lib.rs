@@ -139,6 +139,58 @@ pub struct QuotaBucket {
     pub source: String,
     pub status: String,
 }
+/// Codex app-server `account/rateLimits/read`가 명시한 크레딧 상태. 공급자가 `hasCredits`/`unlimited`를 직접
+/// 알려 준 경우에만 `available`이 true다. 값은 조회 시각의 사실이며 계속 유효하다고 보장하지 않는다.
+/// 실제 크레딧을 쓰는 상태는 이 계정에서 한 번도 관측하지 못해 문서화된 필드만으로 만들었다(미검증).
+#[derive(Debug, Clone, Serialize, Deserialize, Default, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub struct CreditsState {
+    /// `hasCredits || unlimited`. 응답에 없거나 오래되면 쓰지 않는다.
+    pub available: bool,
+    pub unlimited: bool,
+    /// 숫자로 읽히는 값만 보관한다(ChatGPT 크레딧 단위, 금액 아님). 읽을 수 없으면 `None`.
+    pub balance: Option<String>,
+    /// 공급자가 알려 준 "기본 포함 사용량 허용" 여부. `Some(true)`면 크레딧 전환으로 보지 않는다.
+    #[serde(default)]
+    pub ordinary_usage_allowed: Option<bool>,
+    pub observed_at: i64,
+}
+impl CreditsState {
+    /// 크레딧 fallback에 쓸 수 있는 신선한 관측인지. 오래됐거나 미래 시각이면 쓰지 않는다.
+    pub fn usable(&self, now: i64, stale_after_seconds: u64) -> bool {
+        let freshness = stale_after_seconds.saturating_mul(1000).min(i64::MAX as u64) as i64;
+        self.available
+            && self.ordinary_usage_allowed != Some(true)
+            && self.observed_at > 0
+            && self.observed_at <= now.saturating_add(30_000)
+            && now.saturating_sub(self.observed_at) <= freshness
+    }
+}
+/// Claude 사용량 응답의 추가 사용량(extra usage, API 요금으로 과금). omp가 USD로 풀어 준 값만 읽으며
+/// 이 Mac에서 켜진 상태를 직접 관측한 적은 없다(소스의 필드 형태 기준, 미관측). 퍼센트 한도와 섞지 않는다.
+#[derive(Debug, Clone, Serialize, Deserialize, Default, PartialEq)]
+#[serde(rename_all = "camelCase")]
+pub struct ExtraUsageState {
+    pub enabled: bool,
+    /// 이번 기간에 쓴 금액(USD). 통화가 USD가 아니면 이 상태 자체를 만들지 않는다.
+    pub used_usd: f64,
+    /// 월 상한(USD). 없으면 상한 없음.
+    pub limit_usd: Option<f64>,
+    pub observed_at: i64,
+}
+impl ExtraUsageState {
+    /// 추가 사용량 fallback에 쓸 수 있는 신선한 관측인지. 켜져 있고 상한이 없거나 아직 안 찼을 때만 true.
+    pub fn usable(&self, now: i64, stale_after_seconds: u64) -> bool {
+        let freshness = stale_after_seconds.saturating_mul(1000).min(i64::MAX as u64) as i64;
+        self.enabled
+            && self.used_usd.is_finite()
+            && self.used_usd >= 0.0
+            && self.limit_usd.is_none_or(|limit| limit.is_finite() && limit > 0.0 && self.used_usd < limit)
+            && self.observed_at > 0
+            && self.observed_at <= now.saturating_add(30_000)
+            && now.saturating_sub(self.observed_at) <= freshness
+    }
+}
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, PartialOrd, Ord)]
 #[serde(rename_all = "camelCase")]
 pub struct OmpCredentialPin {
@@ -166,6 +218,12 @@ pub struct Account {
     pub max_concurrency: u32,
     pub buckets: Vec<QuotaBucket>,
     pub last_checked_at: i64,
+    /// Codex 크레딧 관측. 없으면 크레딧을 쓸 수 있다고 보지 않는다.
+    #[serde(default)]
+    pub credits: Option<CreditsState>,
+    /// Claude 추가 사용량 관측(USD). 없으면 추가 사용량을 쓸 수 있다고 보지 않는다.
+    #[serde(default)]
+    pub extra_usage: Option<ExtraUsageState>,
     /// 원본 OMP usage identity의 scope/case를 보존한 관측용 digest입니다.
     #[serde(default)]
     pub omp_credential_pins: Vec<OmpCredentialPin>,
@@ -258,6 +316,14 @@ pub struct Policy {
     /// 안전 여유량을 뺀 남은 한도가 이 % 이상일 때만 알린다.
     #[serde(default = "default_expiring_min_percent")]
     pub expiring_min_percent: f64,
+    /// 구독 한도를 다 쓴 Codex 계정에서 크레딧(과금될 수 있음)을 쓰도록 배정할지. 기본 꺼짐.
+    /// 구독 한도가 남은 계정이 하나라도 있으면 켜져 있어도 크레딧 계정은 고르지 않는다.
+    #[serde(default)]
+    pub use_credits_after_limit: bool,
+    /// 구독 한도를 다 쓴 Claude 계정에서 추가 사용량(API 요금으로 과금될 수 있음)을 쓰도록 배정할지. 기본 꺼짐.
+    /// 구독 한도가 남은 계정이 하나라도 있으면 켜져 있어도 추가 사용량 계정은 고르지 않는다.
+    #[serde(default)]
+    pub use_extra_usage_after_limit: bool,
 }
 fn default_expiring_window_hours() -> u32 {
     48
@@ -281,6 +347,8 @@ impl Default for Policy {
             expiring_boost: false,
             expiring_window_hours: default_expiring_window_hours(),
             expiring_min_percent: default_expiring_min_percent(),
+            use_credits_after_limit: false,
+            use_extra_usage_after_limit: false,
         }
     }
 }
@@ -398,6 +466,9 @@ pub struct Snapshot {
     /// 서비스가 계산한 계정 그룹별 한도 요약. 특정 실행의 허용 여부는 route.explain으로 확인한다.
     #[serde(default)]
     pub quota_summaries: Vec<AccountQuotaSummary>,
+    /// 서비스 실행 파일의 버전. 이 필드가 없던 이전 서비스는 `None`이라 앱이 '알 수 없음'(재시작 필요)으로 본다.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub service_version: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -412,6 +483,32 @@ pub struct AccountQuotaSummary {
     /// 곧 리셋되는데 많이 남은 긴 주기 한도. 리셋 전에 쓰면 한도를 아낄 수 있다.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub expiring: Option<ExpiringQuota>,
+    /// Codex 크레딧 표시용 사실. 구독 한도를 쓰는 중이면 `active`가 false다.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub credits: Option<CreditsSummary>,
+    /// Claude 추가 사용량(USD) 표시용 사실. 구독 한도를 쓰는 중이면 `active`가 false다.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub extra_usage: Option<ExtraUsageSummary>,
+}
+/// 신선한 관측에서 켜져 있는 Claude 추가 사용량의 표시 사실. 금액은 USD뿐이다.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+#[serde(rename_all = "camelCase")]
+pub struct ExtraUsageSummary {
+    /// 지금 이 계정이 구독 한도 대신 추가 사용량으로 배정되는 상태(kind == "extra").
+    pub active: bool,
+    pub used_usd: f64,
+    pub limit_usd: Option<f64>,
+    /// 월 상한에 이미 닿아 쓸 수 없는지.
+    pub limit_reached: bool,
+}
+/// 신선한 크레딧 관측이 있는 계정 묶음의 표시 사실.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub struct CreditsSummary {
+    /// 지금 이 계정이 구독 한도 대신 크레딧으로 배정되는 상태(kind == "credits").
+    pub active: bool,
+    pub unlimited: bool,
+    pub balance: Option<String>,
 }
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 #[serde(rename_all = "camelCase")]
@@ -466,6 +563,12 @@ pub struct LeaseGrant {
     /// 공급자 수동 배정 계정을 지금 쓸 수 없어 다른 계정을 배정했는지.
     #[serde(default)]
     pub pin_unavailable: bool,
+    /// 구독 한도가 남은 계정이 없어 크레딧 fallback으로 배정했는지.
+    #[serde(default)]
+    pub credits_fallback: bool,
+    /// 구독 한도가 남은 계정이 없어 추가 사용량 fallback으로 배정했는지.
+    #[serde(default)]
+    pub extra_usage_fallback: bool,
 }
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]

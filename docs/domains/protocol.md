@@ -27,6 +27,7 @@
 `ObservedAttribution.route`는 선택 필드(`bridge` / `direct` / `unknown`, 누락·null은 확인 불가)다. 요청별 hook에서 관측한 경로만 나타내며 응답 완료나 계정 identity를 승격하지 않는다. 역할을 알 수 없는 경로 기록의 `role`은 `unknown`이다. 과거 공급자 이름으로 route를 채우지 않는다.
 
 `Snapshot.quotaSummaries`는 서비스가 계산한 현재 계정 그룹별 한도 요약이다(`#[serde(default)]`, 구서비스에는 누락될 수 있음). 각 `AccountQuotaSummary`는 `accountIds`, `kind`(available/reserve/partial/resting/excluded/login/unknown), `until`, `models`, `label`, `rate`를 담는다. 실제 실행 입장 허용은 `route.explain`/`lease.acquire`가 판단한다. 화면은 누락된 요약을 자체 계산해 성공으로 대체하지 않는다.
+새 필드(모두 `#[serde(default)]`, `types.ts` 미러): `Account.credits`(`CreditsState`), `Account.extra_usage`(`ExtraUsageState`), `Policy.use_credits_after_limit`·`use_extra_usage_after_limit`(기본 false), `LeaseGrant.credits_fallback`·`extra_usage_fallback`, `AccountQuotaSummary.credits`·`extra_usage`와 `kind`의 `credits`/`extra`. 크레딧은 ChatGPT 크레딧 단위(금액 아님), 추가 사용량은 USD다. 둘을 섞지 않는다.
 
 ## 호환성
 - 새 필드는 `#[serde(default)]`로 추가한다. `ProjectRoute`는 `deny_unknown_fields`라 필드를 더 보내면 실패한다.

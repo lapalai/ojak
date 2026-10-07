@@ -17,6 +17,8 @@ Tauri 2 + React 19/Vite 메뉴바 앱(제품명 Ojak, bundle id `ai.aam.desktop`
 - 타입 스케일은 `--fs-title` 22 · `--fs-heading` 14 · `--fs-body` 13 · `--fs-meta` 12 네 단계다. 본 창의 보조 문구는 12px 아래로 내리지 않는다(트레이 팝오버만 예외). 숫자는 전역 `tabular-nums`.
 - `:lang(ko)`은 `word-break: keep-all`로 어절 단위 줄바꿈과 넓은 행간을 쓴다. `:lang(id)`는 긴 단어만 끊는다. 인도네시아어 문구는 사이드바·버튼 길이에 맞춰 짧게 쓴다.
 - 서비스가 보내는 계정 라벨의 `기본 프로필`은 `useSnapshot`이 받는 즉시 `accountLabel`로 표시 언어로 바꾼다(라벨은 서비스로 되돌려 보내지 않음). 호스트 연결 안내는 `hosts.note.*` 키로 받는다(`launcher.md` 호스트 연결).
+- **오류 표시** (`components.tsx` `ErrorMessage`, `errors.ts` `describeError`): `ApiError.code`에 `error.code.<CODE>`(en·ko·id) 문장이 있으면 그것을 주 문장으로 보이고, 서비스·CLI·앱이 보낸 원문(`ApiError.message`)은 접힌 `<details>`("자세히")에 바이트 그대로 둔다. 원문에는 변수·옵션 이름, 경로, 설정 파일 위치가 들어 있어 지원 문의와 진단에 쓴다. 주 문장에는 원문의 값을 옮기지 않는다(백엔드가 이름·경로를 기계가 읽는 형태로 주지 않기 때문에 `params`는 아직 없다). 사전에 없는 코드는 원문이 주 문장이고 "자세히"는 없다. 원문이 비었거나 주 문장과 같으면 "자세히"도 없다. 이메일 가림(`privacyText`)은 두 곳 모두 적용한다. 새 `ApiError::new("CODE", …)`를 화면까지 보내려면 `error.code.CODE`를 세 사전에 모두 추가한다(`errors.test.ts`가 en·ko·id 누락, 자리표시자 불일치, 한글 섞임(en·id), 앱 셸(`main.rs`)이 직접 내는 코드의 누락을 막는다). CLI·서비스 메시지 자체는 한국어뿐이다.
+- `main.rs` `run_management`는 `aam`이 stderr에 내는 `aam: <문장> (<CODE>)`에서 코드를 되살려 `ApiError`로 넘긴다(`management_error`). 이 모양이 아니면 `INSTALLATION_ERROR`와 원문이다. 이 코드가 없으면 연결·서비스·준비 작업의 실패가 모두 한 코드로 뭉쳐 화면이 안내를 고를 수 없다.
 - Windows 화면 확인용 `PrintWindow` 캡처는 DWM의 보이지 않는 테두리까지 담아 왼쪽·오른쪽·아래에 검은 띠가 생긴다. 실제 창 문제가 아니므로 `DWMWA_EXTENDED_FRAME_BOUNDS`로 잘라서 본다.
 - 캐릭터(깍이·호랑이)는 세 곳에만 나온다: 사용 현황의 호출 없음(낮잠, `tiger-nap.webp`, 회색 가는 선 + 주황 포인트 하나, 조회 완료·호출 0회일 때만, 순위 칸이 비면 한 줄 전체 사용), 공급자 전체 소진 띠, 정보 로고 7번(쌀가게). 그림은 장식(`alt=""`)이고 정보와 문구는 그대로 둔다(농담 문구 없음). 설정의 "캐릭터 표시"(`ojak.characters`, localStorage)를 끄면 낮잠 그림만 빠진다. 준비 완료·계정 카드·트레이 팝오버에는 넣지 않는다.
 
@@ -42,6 +44,7 @@ Tauri 2 + React 19/Vite 메뉴바 앱(제품명 Ojak, bundle id `ai.aam.desktop`
 - 관리 작업(`integration_action`, `omp_bridge_action`, `omp_broker_action`, `install_service`, `stop_service` …)은 `run_management`(`main.rs:195`)가 같은 폴더의 `aam`을 `AAM_HOME`과 함께 실행한다.
 - `bridge_usage`(`main.rs:561`): `logs/bridge.log`를 최대 4 MiB 읽어 5분 단위로 모은다.
 - `launch_session`: 새 관리 세션을 Terminal에서 연다.
+- `service_version_status` / `service_restart`: 앱만 DMG로 덮어써 서비스가 예전 버전으로 남은 경우를 위한 명령. 상태는 읽기 전용 비교(`aam_launcher::service_version`), 재시작은 사용자가 [서비스 다시 시작]을 눌렀을 때만 `service_version::restart`(lease 검사 → 재시작 → 버전 확인)를 부른다. 화면은 `SetupGuide.tsx`의 `ServiceVersionNotice`(앱 시작·서비스 시작 시각이 바뀔 때 비교)가 대시보드 위에 버튼 하나짜리 안내를 띄운다. 최근 15분 안에 쓴 omp 브릿지 세션이 있으면 `update.warn` 문구로 먼저 경고하고 한 번 더 누르게 한다. 쓰는 중인 관리 세션은 서비스가 `SESSION_BUSY`로 거절하고 화면이 나중에 다시 누르라고 안내한다. 성공 뒤 서비스 버전이 앱과 같은지 다시 읽어 확인하며, 실패하면 기존 서비스를 그대로 두고 현지화한 오류를 보인다. 연결 화면의 서비스 표에도 서비스 버전이 나온다.
 - `updates_status` / `install_update` / `restart_after_update`: 서명 공개키가 자리표시자가 아니면 시작 시·24시간마다 업데이트를 확인한다. 설치 뒤 `/bin/launchctl kickstart -k gui/<uid>/ai.aam.service`로 새 `aam-service`를 적용하고 앱을 재실행한다. RPC 허용 목록은 넓히지 않는다.
 
 ## 공급자 별칭 (`state.ts:13-19`)
@@ -151,6 +154,7 @@ graph TD
 - 왼쪽 클릭: 잔여 한도 팝오버(`popover` 창, 같은 번들을 `main.tsx`가 창 라벨로 분기). 헤더 오른쪽 버튼으로 사용량을 바로 다시 조회한다. 공급자(Claude·Codex·Gemini)마다 카드 하나, 계정은 카드 안의 줄. 줄을 누르면 쓰는 모델과 한도별 막대·리셋 시간을 펼친다. 모델 전용 한도는 그 모델을 쓸 때만 진하게. 이메일은 대시보드의 개인정보 가림 설정을 따른다.
 - 한도 묶기(`limits.ts`, 테스트 `npm run test:desktop`): 라벨 끝이 같아도 모델이나 값이 다르면(`Gemini · 주간` / `Claude & GPT · 주간`) 앞부분을 붙여 따로 둔다.
 - 잔여 색(`limits.ts` `remainingTone`): 사용량 화면과 팝오버가 같은 기준을 쓴다. 공급자·모델과 무관하게 남은 %만 본다. 31% 이상 초록, 30% 이하 주황, 안전 여유분 이하·소진 빨강, 관측 없음 회색. 공급자 색은 이름 옆 점과 사용량 그래프에만 쓰고 잔여 막대에는 쓰지 않는다.
+- 크레딧·추가 사용량 표시(`UsageView.tsx`, `ConnectionsView.tsx`, `Popover.tsx`, `limits.ts`): 서비스가 매 스냅샷마다 다시 계산한 `quotaSummaries[].kind`가 `credits`면 "크레딧 사용 중", `extra`면 "추가 사용량 사용 중"(en Using credits/Using extra usage, id Pakai kredit/Pakai penggunaan tambahan). 크레딧 잔액은 숫자로 읽힐 때만 "크레딧 N개 남음"(반올림, 금액 아님), 추가 사용량은 USD로만 "$12.40 / $50"(상한 없으면 "$12.40 사용"). 옵트인이 꺼져 있는데 관측이 있으면 "크레딧 있음 (꺼짐)"/"추가 사용량 켜짐 (Ojak에서는 꺼짐)" 중립 안내만 보이고 한도가 리셋되면 바로 사라진다. 설정은 사용 현황 → 배정 설정의 스위치 둘(Codex는 '크레딧', Claude는 '추가 사용량 (API 요금)')이고 켜도 한도가 남은 계정이 항상 먼저다. 둘 다 과금될 수 있고 Ojak이 쓴 금액을 막거나 볼 수 없다는 경고를 함께 보인다.
 - 오른쪽 클릭: 상태·대시보드 열기·종료 메뉴. 창을 닫으면 Dock에서 사라지고 메뉴바에만 남는다.
 - 설정(⌘, / Ctrl+,): 언어(시스템/한국어/English/Bahasa Indonesia), 로그인 시 자동 실행, macOS 메뉴바 숫자 기준(Windows에서는 숨김), 리셋 전 사용 알림, 앱 정보. 종료는 "앱만 종료 / Ojak 사용 중지 후 종료" 확인 창을 거친다(`aam deactivate`). 사용 중지는 로그인 자동 실행도 끈다. Windows 문구는 `i18n.ts`의 Windows 덮어쓰기로 LaunchAgent·이 Mac·메뉴바를 트레이·이 PC로 바꾼다.
 - 리셋 전 사용 알림: 트레이 폴링(5초)이 서비스의 `quotaSummaries[].expiring`을 읽어 `tauri-plugin-notification`으로 시스템 알림을 보낸다(macOS 알림 센터, Windows 토스트). 창이 닫혀 있어도 동작한다. 같은 (계정 묶음 최소 ID, 리셋 시각)은 한 번만 보내며 `ui-settings.json`의 `expiringNotified`에 ID와 시각만 저장하고 지난 리셋은 지운다. 본문에는 이메일 대신 공급자 이름만 쓴다. 설정 `expiringNotify`(기본 켬). 데스크톱 플러그인은 OS 허용 상태를 읽지 못해(항상 Granted) OS에서 막혀 있으면 조용히 표시되지 않는다. 판정 기준과 "곧 리셋 계정 먼저 쓰기"는 사용 현황 → 배정 설정에 있고, 해당 계정 줄에 파란 안내가 붙는다.

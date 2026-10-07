@@ -2,6 +2,7 @@ pub mod arguments;
 mod descendants;
 pub mod hosts;
 pub mod install;
+pub mod service_version;
 pub mod setup;
 pub mod supervisor;
 
@@ -474,7 +475,123 @@ fn management_unavailable(code: &str) -> bool {
     )
 }
 
+/// 관리 배정 없이 원본 CLI를 그대로 실행하면 공급자가 구독 한도 뒤에 추가 과금 경로로 넘어갈 수 있는 상태.
+/// 도구마다 단위가 달라(Codex 크레딧 / Claude 추가 사용량 USD) 서로 섞지 않는다.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum SpendRisk {
+    Credits,
+    ExtraUsage,
+}
+
+/// 원본 CLI가 쓸 계정: 도구의 기본 프로필 계정. 확인하지 못하면 그 도구의 사용 가능한 계정 전부.
+fn default_profile_accounts<'a>(snapshot: &'a Snapshot, tool: &str) -> Vec<&'a Account> {
+    let same_tool = || snapshot.accounts.iter().filter(|account| account.tool == tool && account.enabled);
+    let folder = match tool {
+        "claude" => ".claude",
+        "codex" => ".codex",
+        _ => return Vec::new(),
+    };
+    let Some(home) = aam_protocol::user_home() else {
+        return same_tool().collect();
+    };
+    let profile = home.join(folder);
+    let canonical = profile.canonicalize().ok();
+    let found: Vec<_> = same_tool()
+        .filter(|account| {
+            account.profile_path.as_deref().is_some_and(|path| {
+                canonical.as_ref().is_some_and(|resolved| Path::new(path) == resolved.as_path()) || Path::new(path) == profile
+            })
+        })
+        .collect();
+    if found.is_empty() { same_tool().collect() } else { found }
+}
+
+/// 구독 한도가 지금도 남아 있다고 확실한 계정인지. 확실하지 않으면(소진·미확인) 추가 과금 경로를 의심한다.
+fn subscription_clearly_left(account: &Account, now: i64, stale_after_seconds: u64) -> bool {
+    let freshness = stale_after_seconds.saturating_mul(1000).min(i64::MAX as u64) as i64;
+    let live = |bucket: &&aam_protocol::QuotaBucket| {
+        bucket.status == "known"
+            && bucket.observed_at > 0
+            && now.saturating_sub(bucket.observed_at) <= freshness
+            && bucket.resets_at.is_some_and(|reset| reset > now)
+            && bucket.used_percent.is_some_and(|used| used < 100.0)
+    };
+    account.buckets.iter().any(|bucket| bucket.model.is_none() && live(&bucket))
+        && !account.buckets.iter().any(|bucket| {
+            bucket.model.is_none() && (bucket.status == "exhausted" || bucket.used_percent.is_some_and(|used| used >= 100.0))
+        })
+}
+
+/// Ojak의 추가 과금 옵트인이 꺼져 있는데, 원본 CLI가 쓸 계정에 공급자가 명시한 추가 과금 경로가 있고 구독 한도가
+/// 확실히 남아 있지 않으면 위험으로 본다. 여기서는 관측이 오래됐어도 "있다"로 본다(확인을 한 번 더 묻는 쪽이 안전).
+/// Ojak은 이미 실행 중인 원본 CLI의 공급자 쪽 과금 전환을 막을 수 없다. 이 판단은 안내와 확인용이다.
+fn unmanaged_spend_risk(snapshot: &Snapshot, tool: &str, now: i64) -> Option<SpendRisk> {
+    let policy = &snapshot.policy;
+    let accounts = default_profile_accounts(snapshot, tool);
+    let risky = |check: &dyn Fn(&Account) -> bool| {
+        accounts
+            .iter()
+            .any(|account| check(*account) && !subscription_clearly_left(account, now, policy.stale_after_seconds))
+    };
+    match tool {
+        "codex" if !policy.use_credits_after_limit => risky(&|account| {
+            account
+                .credits
+                .as_ref()
+                .is_some_and(|credits| credits.available && credits.ordinary_usage_allowed != Some(true))
+        })
+        .then_some(SpendRisk::Credits),
+        "claude" if !policy.use_extra_usage_after_limit => risky(&|account| {
+            account.extra_usage.as_ref().is_some_and(|extra| {
+                extra.enabled && extra.limit_usd.is_none_or(|limit| extra.used_usd < limit)
+            })
+        })
+        .then_some(SpendRisk::ExtraUsage),
+        _ => None,
+    }
+}
+
+fn spend_risk_message(tool: &str, risk: SpendRisk) -> String {
+    match risk {
+        SpendRisk::Credits => format!(
+            "Ojak의 크레딧 설정이 꺼져 있어서 크레딧으로는 배정하지 않아요. 하지만 원본 {tool}은 구독 한도를 다 쓰면 OpenAI 크레딧을 쓸 수 있고, 과금될 수 있어요. Ojak은 쓴 금액을 볼 수 없고 원본 {tool}의 과금을 막을 수도 없어요."
+        ),
+        SpendRisk::ExtraUsage => format!(
+            "Ojak의 추가 사용량 설정이 꺼져 있어서 추가 사용량으로는 배정하지 않아요. 하지만 원본 {tool}은 구독 한도를 다 쓰면 추가 사용량(API 요금)을 쓸 수 있고, 과금될 수 있어요. 월 상한은 계정 설정을 따라요. Ojak은 쓴 금액을 막을 수 없어요."
+        ),
+    }
+}
+
+fn spend_confirmed(answer: &str) -> bool {
+    matches!(answer.trim().to_ascii_lowercase().as_str(), "y" | "yes" | "ㅛ")
+}
+
+/// 원본 CLI를 그냥 넘기기 전에 추가 과금 가능성을 확인한다. 터미널이면 `[y/N]`(기본 N), 아니면 거절한다.
+fn confirm_unmanaged_spend(tool: &str, risk: SpendRisk) -> Result<(), ApiError> {
+    use std::io::{BufRead, IsTerminal, Write};
+    let message = spend_risk_message(tool, risk);
+    if !(std::io::stdin().is_terminal() && std::io::stderr().is_terminal()) {
+        return Err(ApiError::new(
+            "SPEND_CONFIRMATION_REQUIRED",
+            format!("{message} 터미널에서 직접 실행해 확인하거나, 한도가 리셋된 뒤 다시 실행해 주세요."),
+        ));
+    }
+    eprint!("aam: {message}\naam: 그래도 원본 {tool}을(를) 실행할까요? [y/N] ");
+    let _ = std::io::stderr().flush();
+    let mut answer = String::new();
+    if std::io::stdin().lock().read_line(&mut answer).is_ok() && spend_confirmed(&answer) {
+        Ok(())
+    } else {
+        Err(ApiError::new(
+            "SPEND_CONFIRMATION_DECLINED",
+            "실행하지 않았어요. 한도가 리셋된 뒤 다시 실행해 주세요.",
+        ))
+    }
+}
+
 /// 관리 실행을 준비하지 못한 이유를 알린 뒤 원본 CLI를 그대로 실행합니다. 계정은 공식 CLI가 결정합니다.
+/// Ojak의 추가 과금 설정이 꺼져 있는데 원본 CLI가 추가 과금 경로가 있는 계정으로 실행될 수 있으면, 조용히 넘기지 않고
+/// 먼저 확인을 받는다.
 fn passthrough(
     paths: &Paths,
     tool: &str,
@@ -482,6 +599,11 @@ fn passthrough(
     args: Vec<OsString>,
     error: &ApiError,
 ) -> ApiError {
+    if let Some(risk) = read_snapshot(paths).ok().and_then(|snapshot| unmanaged_spend_risk(&snapshot, tool, now_ms())) {
+        if let Err(refused) = confirm_unmanaged_spend(tool, risk) {
+            return refused;
+        }
+    }
     eprintln!(
         "aam: 관리 배정을 적용하지 못해 원본 {tool}을(를) 그대로 실행합니다. 이 실행은 관리 세션으로 기록되지 않습니다. ({}) {}",
         error.code, error.message
@@ -1184,6 +1306,10 @@ enum LaunchNotice {
     Pinned,
     QuotaSwitch,
     PinFallback,
+    /// 구독 한도가 남은 계정이 없어 Codex 크레딧으로 배정했다.
+    Credits,
+    /// 구독 한도가 남은 계정이 없어 Claude 추가 사용량(API 요금)으로 배정했다.
+    ExtraUsage,
 }
 
 /// 앱이 보여주는 계정 이름. 가림이 켜져 있으면 이메일을 넣지 않는다.
@@ -1259,6 +1385,8 @@ fn launch_announcement(label: &str, email: Option<&str>, masked: bool, notice: L
         LaunchNotice::Pinned => " 고정된 계정이에요.",
         LaunchNotice::QuotaSwitch => " 다른 계정 한도 소진으로 전환했어요.",
         LaunchNotice::PinFallback => " 직접 고른 계정을 쓸 수 없어 바꿨어요.",
+        LaunchNotice::Credits => " 구독 한도를 다 써서 크레딧을 쓰고 있어요. 과금될 수 있어요.",
+        LaunchNotice::ExtraUsage => " 구독 한도를 다 써서 추가 사용량(API 요금)을 쓰고 있어요. 과금될 수 있어요.",
     };
     format!("aam: {name} 계정으로 실행해요.{why}")
 }
@@ -1282,7 +1410,11 @@ fn announce_chosen_account(paths: &Paths, intent: &LaunchIntent, grant: &LeaseGr
     if !user_terminal() {
         return;
     }
-    let notice = if intent.continue_elsewhere {
+    let notice = if grant.credits_fallback {
+        LaunchNotice::Credits
+    } else if grant.extra_usage_fallback {
+        LaunchNotice::ExtraUsage
+    } else if intent.continue_elsewhere {
         LaunchNotice::QuotaSwitch
     } else if grant.pin_unavailable {
         LaunchNotice::PinFallback
@@ -1382,6 +1514,92 @@ fn fallback_notice(paths: &Paths, tool: &str, mut error: ApiError) -> ApiError {
 #[cfg(test)]
 mod bridge_tests {
     use super::*;
+
+    fn spend_snapshot(tool: &str, credits: Option<Value>, extra: Option<Value>, policy: Value, bucket_used: f64, observed_at: i64) -> Snapshot {
+        let resets = now_ms() + 3_600_000;
+        let status = if bucket_used >= 100.0 { "exhausted" } else { "known" };
+        serde_json::from_value(json!({
+            "version":1, "generatedAt":observed_at, "serviceStartedAt":0,
+            "accounts":[{
+                "id":"a", "provider": if tool == "codex" { "openai" } else { "anthropic" }, "tool":tool, "label":"계정",
+                "email":null, "organization":null, "plan":null, "profilePath":null, "binaryPath":null, "identityKey":"id",
+                "authStatus":"authenticated", "verification":"preflight-verified", "canLaunch":true, "reason":null,
+                "enabled":true, "maxConcurrency":1, "lastCheckedAt":observed_at,
+                "buckets":[{"id":"w","label":"주간","model":null,"usedPercent":bucket_used,"resetsAt":resets,"observedAt":observed_at,"source":"t","status":status}],
+                "credits":credits, "extraUsage":extra
+            }],
+            "tools":[], "sessions":[], "policy":policy, "notices":[], "refreshing":false, "lastRefreshAt":null
+        }))
+        .unwrap()
+    }
+
+    fn policy(use_credits: bool, use_extra: bool) -> Value {
+        let mut value = serde_json::to_value(aam_protocol::Policy::default()).unwrap();
+        value["useCreditsAfterLimit"] = json!(use_credits);
+        value["useExtraUsageAfterLimit"] = json!(use_extra);
+        value
+    }
+
+    #[test]
+    fn unmanaged_passthrough_asks_first_when_credits_could_be_charged_and_the_option_is_off() {
+        let now = now_ms();
+        let credits = json!({"available":true,"unlimited":false,"balance":"12","observedAt":now});
+        // 설정 꺼짐 + 구독 한도 소진 + 크레딧 있음 -> 확인 필요.
+        let spent = spend_snapshot("codex", Some(credits.clone()), None, policy(false, false), 100.0, now);
+        assert_eq!(unmanaged_spend_risk(&spent, "codex", now), Some(SpendRisk::Credits));
+        // 구독 한도가 확실히 남아 있으면 기존 동작 그대로 통과.
+        let roomy = spend_snapshot("codex", Some(credits.clone()), None, policy(false, false), 40.0, now);
+        assert_eq!(unmanaged_spend_risk(&roomy, "codex", now), None);
+        // 크레딧이 없거나 모르면 기존 동작.
+        assert_eq!(unmanaged_spend_risk(&spend_snapshot("codex", None, None, policy(false, false), 100.0, now), "codex", now), None);
+        let none_left = json!({"available":false,"unlimited":false,"balance":null,"observedAt":now});
+        assert_eq!(unmanaged_spend_risk(&spend_snapshot("codex", Some(none_left), None, policy(false, false), 100.0, now), "codex", now), None);
+        // Ojak 설정이 켜져 있으면 Ojak이 고르는 길이라 이 확인은 하지 않는다.
+        assert_eq!(unmanaged_spend_risk(&spent_with(policy(true, false), now), "codex", now), None);
+        // 한도 관측이 낡아 구독이 남았는지 확실하지 않으면 보수적으로 확인한다.
+        let stale = spend_snapshot("codex", Some(credits), None, policy(false, false), 40.0, now - 3_600_000);
+        assert_eq!(unmanaged_spend_risk(&stale, "codex", now), Some(SpendRisk::Credits));
+    }
+
+    fn spent_with(policy: Value, now: i64) -> Snapshot {
+        let credits = json!({"available":true,"unlimited":false,"balance":"12","observedAt":now});
+        spend_snapshot("codex", Some(credits), None, policy, 100.0, now)
+    }
+
+    #[test]
+    fn unmanaged_passthrough_keeps_credits_and_extra_usage_separate() {
+        let now = now_ms();
+        let extra = json!({"enabled":true,"usedUsd":12.4,"limitUsd":50.0,"observedAt":now});
+        let claude = spend_snapshot("claude", None, Some(extra.clone()), policy(false, false), 100.0, now);
+        assert_eq!(unmanaged_spend_risk(&claude, "claude", now), Some(SpendRisk::ExtraUsage));
+        // Codex 크레딧 설정은 Claude 추가 사용량을 켜지 않는다.
+        let credits_on = spend_snapshot("claude", None, Some(extra.clone()), policy(true, false), 100.0, now);
+        assert_eq!(unmanaged_spend_risk(&credits_on, "claude", now), Some(SpendRisk::ExtraUsage));
+        let extra_on = spend_snapshot("claude", None, Some(extra), policy(false, true), 100.0, now);
+        assert_eq!(unmanaged_spend_risk(&extra_on, "claude", now), None);
+        // 월 상한에 닿았으면 더 쓸 수 없으니 확인하지 않는다.
+        let capped = json!({"enabled":true,"usedUsd":50.0,"limitUsd":50.0,"observedAt":now});
+        assert_eq!(unmanaged_spend_risk(&spend_snapshot("claude", None, Some(capped), policy(false, false), 100.0, now), "claude", now), None);
+        // 크레딧 안내문은 달러로 말하지 않고, 추가 사용량 안내문은 API 요금과 상한을 말한다.
+        assert!(!spend_risk_message("codex", SpendRisk::Credits).contains('$'));
+        assert!(spend_risk_message("claude", SpendRisk::ExtraUsage).contains("API 요금"));
+        assert!(spend_risk_message("codex", SpendRisk::Credits).contains("막을 수도 없어요"));
+    }
+
+    #[test]
+    fn spend_confirmation_defaults_to_no_and_announcement_names_the_billing_path() {
+        for yes in ["y", "Y\n", " yes ", "ㅛ"] {
+            assert!(spend_confirmed(yes), "{yes:?}");
+        }
+        for no in ["", "\n", "n", "no", "아니", "yy", "ye"] {
+            assert!(!spend_confirmed(no), "{no:?}");
+        }
+        let credits = launch_announcement("작업용", None, true, LaunchNotice::Credits);
+        assert!(credits.contains("구독 한도를 다 써서 크레딧을 쓰고 있어요"), "{credits}");
+        let extra = launch_announcement("작업용", None, true, LaunchNotice::ExtraUsage);
+        assert!(extra.contains("추가 사용량"), "{extra}");
+        assert!(!extra.contains("크레딧"), "{extra}");
+    }
 
     #[test]
     fn announcement_uses_the_label_and_hides_email_when_masked() {
