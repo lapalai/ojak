@@ -17,20 +17,20 @@ const OCCUPIED: [&str; 5] = ["PREPARED", "STARTING", "ACTIVE", "SUSPECT", "ORPHA
 /// broker 블록을 서비스보다 먼저 지운다. 서비스가 먼저 사라지면 omp가 죽은 broker를 계속 본다.
 const STEPS: [(&str, &str); 6] = [
     ("omp-bridge", "omp /login의 Ojak 공급자 확장 제거, Ojak 모델을 가리키던 역할을 원래 공급자로 복원"),
-    ("omp-broker", "omp 설정의 Ojak broker 연결 블록 제거 (omp가 로컬 로그인 저장소를 다시 사용)"),
-    ("omp-observer", "omp 관측 확장 제거"),
+    ("omp-broker", "omp 설정의 Ojak 로그인 연결 제거 (omp가 로컬 로그인을 다시 사용)"),
+    ("omp-observer", "omp 사용량 확인 확장 제거"),
     ("shell", SHELL_STEP),
-    ("integration", "Ojak 관리 shim(aam·claude·codex) 제거"),
+    ("integration", "Ojak 명령(aam·claude·codex) 제거"),
     ("service", SERVICE_STEP),
 ];
 #[cfg(windows)]
-const SHELL_STEP: &str = "사용자 PATH의 Ojak 항목 제거 (새 터미널부터 원본 claude·codex 실행)";
+const SHELL_STEP: &str = "사용자 PATH의 Ojak 항목 제거 (새 터미널부터 원래 claude·codex 실행)";
 #[cfg(not(windows))]
-const SHELL_STEP: &str = "zsh의 Ojak PATH 블록 제거 (새 터미널부터 원본 claude·codex 실행)";
+const SHELL_STEP: &str = "zsh의 Ojak PATH 제거 (새 터미널부터 원래 claude·codex 실행)";
 #[cfg(windows)]
-const SERVICE_STEP: &str = "관리 서비스 중지·로그인 자동 실행 등록 제거";
+const SERVICE_STEP: &str = "관리 서비스 중지, 로그인 시 자동 실행 제거";
 #[cfg(not(windows))]
-const SERVICE_STEP: &str = "관리 서비스 LaunchAgent 중지·제거";
+const SERVICE_STEP: &str = "관리 서비스 중지, 로그인 시 자동 실행 제거";
 
 /// 신규 배정 차단 창구. 실제로는 서비스 RPC, 테스트에서는 기록용 가짜를 쓴다.
 trait Admission {
@@ -48,7 +48,7 @@ impl Admission for Service<'_> {
                 .and_then(|v| v.as_str())
                 .filter(|v| !v.is_empty() && value.get("safe").and_then(|v| v.as_bool()) == Some(true))
                 .map(|permit| Some(permit.to_owned()))
-                .ok_or_else(|| ApiError::new("INVALID_UNINSTALL_PERMIT", "신규 배정 차단을 확인하지 못해 아무것도 바꾸지 않았습니다.")),
+                .ok_or_else(|| ApiError::new("INVALID_UNINSTALL_PERMIT", "새 배정 차단을 확인하지 못해 아무것도 바꾸지 않았어요.")),
             Err(error) if error.code == "DAEMON_UNAVAILABLE" => Ok(None),
             Err(error) => Err(error),
         }
@@ -72,7 +72,7 @@ fn run_step(paths: &Paths, step: &str) -> Result<(), ApiError> {
         "omp-bridge" => omp_bridge::disconnect(paths).map(|_| ()),
         "omp-broker" => omp_broker::disconnect(paths).map(|_| ()),
         "omp-observer" => omp_observer::run("uninstall").map(|_| ()).map_err(|_| {
-            ApiError::new("OMP_OBSERVER_UNINSTALL", "관측 확장을 제거하지 못했습니다. 사용자 파일은 그대로 두었습니다.")
+            ApiError::new("OMP_OBSERVER_UNINSTALL", "사용량 확인 확장을 지우지 못했어요. 사용자 파일은 그대로 뒀어요.")
         }),
         "shell" => install::shell_uninstall(paths).map(|_| ()),
         "integration" => install::integration_uninstall(paths).map(|_| ()),

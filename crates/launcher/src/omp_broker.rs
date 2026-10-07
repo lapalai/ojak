@@ -48,7 +48,7 @@ struct AgentReceipt { plist_digest: String }
 struct Snapshot { accounts: usize, providers: Vec<String> }
 
 fn home() -> Result<PathBuf, ApiError> {
-    aam_protocol::user_home().filter(|p| p.is_absolute()).ok_or_else(|| ApiError::new("HOME_UNAVAILABLE", "사용자 홈 경로를 확인하지 못했습니다."))
+    aam_protocol::user_home().filter(|p| p.is_absolute()).ok_or_else(|| ApiError::new("HOME_UNAVAILABLE", "사용자 홈 경로를 확인하지 못했어요."))
 }
 fn config_path() -> Result<PathBuf, ApiError> { Ok(home()?.join(".omp/agent/config.yml")) }
 fn yaml_path() -> Result<PathBuf, ApiError> { Ok(home()?.join(".omp/agent/config.yaml")) }
@@ -75,7 +75,7 @@ fn managed_block(text: &str) -> Result<Option<(usize, usize)>, ApiError> {
     let starts: Vec<_> = text.match_indices(CONFIG_BEGIN).map(|(i, _)| i).collect();
     let ends: Vec<_> = text.match_indices(CONFIG_END).map(|(i, _)| i).collect();
     if starts.len() > 1 || ends.len() > 1 || starts.len() != ends.len() || starts.first().zip(ends.first()).is_some_and(|(s, e)| s > e) {
-        return Err(ApiError::new("CONFIG_CONFLICT", "OMP 설정의 AAM 관리 블록이 중복되거나 손상되어 자동 변경하지 않습니다."));
+        return Err(ApiError::new("CONFIG_CONFLICT", "omp 설정의 Ojak 관리 구간이 겹치거나 손상돼 자동으로 바꾸지 않아요."));
     }
     Ok(starts.first().zip(ends.first()).map(|(start, end)| (*start, *end + CONFIG_END.len())))
 }
@@ -99,11 +99,11 @@ fn connected_block(text: &str) -> Result<Option<(usize, usize)>, ApiError> {
     Ok(managed_block(text)?.or_else(|| applied_block(text)))
 }
 fn atomic_write(path: &Path, bytes: &[u8]) -> Result<(), ApiError> {
-    let parent = path.parent().ok_or_else(|| ApiError::new("INVALID_PATH", "OMP 설정 경로가 올바르지 않습니다."))?;
-    fs::create_dir_all(parent).map_err(|_| ApiError::new("CONFIG_WRITE_FAILED", "OMP 설정 폴더를 만들지 못했습니다."))?;
+    let parent = path.parent().ok_or_else(|| ApiError::new("INVALID_PATH", "omp 설정 경로가 올바르지 않아요."))?;
+    fs::create_dir_all(parent).map_err(|_| ApiError::new("CONFIG_WRITE_FAILED", "omp 설정 폴더를 만들지 못했어요."))?;
     let existing = fs::symlink_metadata(path);
     if existing.as_ref().is_ok_and(|meta| meta.file_type().is_symlink()) {
-        return Err(ApiError::new("CONFIG_CONFLICT", "OMP 설정 파일이 symlink라 자동 변경하지 않습니다."));
+        return Err(ApiError::new("CONFIG_CONFLICT", "omp 설정 파일이 바로가기라 자동으로 바꾸지 않아요."));
     }
     #[cfg(unix)]
     let mode = existing.as_ref().ok().filter(|meta| meta.is_file()).map(|meta| meta.permissions().mode() & 0o777).unwrap_or(0o600);
@@ -112,14 +112,14 @@ fn atomic_write(path: &Path, bytes: &[u8]) -> Result<(), ApiError> {
         let mut options = OpenOptions::new();
         options.write(true).create_new(true);
         let mut file = aam_protocol::secure::private_options(&mut options).open(&tmp)
-            .map_err(|_| ApiError::new("CONFIG_WRITE_FAILED", "OMP 설정 임시 파일을 쓰지 못했습니다."))?;
-        file.write_all(bytes).map_err(|_| ApiError::new("CONFIG_WRITE_FAILED", "OMP 설정 임시 파일을 쓰지 못했습니다."))?;
+            .map_err(|_| ApiError::new("CONFIG_WRITE_FAILED", "omp 설정 임시 파일을 쓰지 못했어요."))?;
+        file.write_all(bytes).map_err(|_| ApiError::new("CONFIG_WRITE_FAILED", "omp 설정 임시 파일을 쓰지 못했어요."))?;
         #[cfg(unix)]
-        file.set_permissions(fs::Permissions::from_mode(mode)).map_err(|_| ApiError::new("CONFIG_WRITE_FAILED", "OMP 설정 권한을 보존하지 못했습니다."))?;
+        file.set_permissions(fs::Permissions::from_mode(mode)).map_err(|_| ApiError::new("CONFIG_WRITE_FAILED", "omp 설정 권한을 그대로 두지 못했어요."))?;
         #[cfg(windows)]
-        aam_protocol::secure::restrict_file(&tmp).map_err(|_| ApiError::new("CONFIG_WRITE_FAILED", "OMP 설정 권한을 보호하지 못했습니다."))?;
-        file.sync_all().map_err(|_| ApiError::new("CONFIG_WRITE_FAILED", "OMP 설정 임시 파일을 쓰지 못했습니다."))?;
-        fs::rename(&tmp, path).map_err(|_| ApiError::new("CONFIG_WRITE_FAILED", "OMP 설정을 원자적으로 교체하지 못했습니다."))
+        aam_protocol::secure::restrict_file(&tmp).map_err(|_| ApiError::new("CONFIG_WRITE_FAILED", "omp 설정 권한을 보호하지 못했어요."))?;
+        file.sync_all().map_err(|_| ApiError::new("CONFIG_WRITE_FAILED", "omp 설정 임시 파일을 쓰지 못했어요."))?;
+        fs::rename(&tmp, path).map_err(|_| ApiError::new("CONFIG_WRITE_FAILED", "omp 설정을 안전하게 바꾸지 못했어요."))
     })();
     if result.is_err() {
         let _ = fs::remove_file(&tmp);
@@ -129,11 +129,11 @@ fn atomic_write(path: &Path, bytes: &[u8]) -> Result<(), ApiError> {
 
 fn read_config() -> Result<(PathBuf, String), ApiError> {
     let path = config_path()?;
-    if fs::symlink_metadata(yaml_path()?).is_ok() { return Err(ApiError::new("CONFIG_CONFLICT", "OMP config.yml과 config.yaml이 함께 있어 자동 변경하지 않습니다.")); }
+    if fs::symlink_metadata(yaml_path()?).is_ok() { return Err(ApiError::new("CONFIG_CONFLICT", "omp config.yml과 config.yaml이 같이 있어 자동으로 바꾸지 않아요.")); }
     let text = match fs::read_to_string(&path) {
         Ok(value) => value,
         Err(error) if error.kind() == std::io::ErrorKind::NotFound => String::new(),
-        Err(_) => return Err(ApiError::new("CONFIG_READ_FAILED", "OMP 설정을 읽지 못했습니다. 기존 파일을 보존합니다.")),
+        Err(_) => return Err(ApiError::new("CONFIG_READ_FAILED", "omp 설정을 읽지 못했어요. 기존 파일은 그대로 둬요.")),
     };
     managed_block(&text)?;
     Ok((path, text))
@@ -142,19 +142,19 @@ fn read_config() -> Result<(PathBuf, String), ApiError> {
 fn load_receipt(paths: &Paths) -> Option<Receipt> { serde_json::from_slice(&fs::read(receipt_path(paths)).ok()?).ok() }
 
 fn save_receipt(paths: &Paths, receipt: &Receipt) -> Result<(), ApiError> {
-    fs::create_dir_all(&paths.home).map_err(|_| ApiError::new("BROKER_STATE_FAILED", "broker 소유권 폴더를 만들지 못했습니다."))?;
+    fs::create_dir_all(&paths.home).map_err(|_| ApiError::new("BROKER_STATE_FAILED", "로그인 연결 기록 폴더를 만들지 못했어요."))?;
     let path = receipt_path(paths);
-    if fs::symlink_metadata(&path).is_ok_and(|m| m.file_type().is_symlink()) { return Err(ApiError::new("BROKER_STATE_CONFLICT", "broker 소유권 기록이 symlink라 변경하지 않습니다.")); }
-    let bytes = serde_json::to_vec(receipt).map_err(|_| ApiError::new("BROKER_STATE_FAILED", "broker 소유권 기록을 만들지 못했습니다."))?;
-    fs::write(&path, bytes).map_err(|_| ApiError::new("BROKER_STATE_FAILED", "broker 소유권 기록을 쓰지 못했습니다."))?;
+    if fs::symlink_metadata(&path).is_ok_and(|m| m.file_type().is_symlink()) { return Err(ApiError::new("BROKER_STATE_CONFLICT", "로그인 연결 기록이 바로가기라 바꾸지 않아요.")); }
+    let bytes = serde_json::to_vec(receipt).map_err(|_| ApiError::new("BROKER_STATE_FAILED", "로그인 연결 기록을 만들지 못했어요."))?;
+    fs::write(&path, bytes).map_err(|_| ApiError::new("BROKER_STATE_FAILED", "로그인 연결 기록을 쓰지 못했어요."))?;
     // 승격 실행에서도 소유자가 현재 사용자로 남도록 명시한다(Windows의 기본 소유자는 Administrators일 수 있다).
-    aam_protocol::secure::restrict_file(&path).map_err(|_| ApiError::new("BROKER_STATE_FAILED", "broker 소유권 기록을 보호하지 못했습니다."))
+    aam_protocol::secure::restrict_file(&path).map_err(|_| ApiError::new("BROKER_STATE_FAILED", "로그인 연결 기록을 보호하지 못했어요."))
 }
 
 /// 인증된 broker 요청. 성공 응답 본문만 돌려주며 비밀을 저장하거나 오류에 담지 않는다.
 fn broker_request(method: &str, path: &str, body: Option<&str>) -> Result<Vec<u8>, ApiError> {
-    let token = fs::read_to_string(token_path()?).map_err(|_| ApiError::new("BROKER_NOT_READY", "OMP broker token을 읽지 못했습니다."))?;
-    let mut stream = TcpStream::connect(("127.0.0.1", BROKER_PORT)).map_err(|_| ApiError::new("BROKER_UNAVAILABLE", "OMP auth broker에 연결하지 못했습니다."))?;
+    let token = fs::read_to_string(token_path()?).map_err(|_| ApiError::new("BROKER_NOT_READY", "omp 로그인 연결 토큰을 읽지 못했어요."))?;
+    let mut stream = TcpStream::connect(("127.0.0.1", BROKER_PORT)).map_err(|_| ApiError::new("BROKER_UNAVAILABLE", "omp 로그인 연결에 닿지 못했어요."))?;
     stream.set_read_timeout(Some(Duration::from_secs(5))).ok();
     stream.set_write_timeout(Some(Duration::from_secs(5))).ok();
     let payload = body.map(|body| format!("Content-Type: application/json\r\nContent-Length: {}\r\n\r\n{body}", body.len())).unwrap_or_else(|| "\r\n".to_owned());

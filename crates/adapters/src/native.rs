@@ -9,7 +9,7 @@ use std::{collections::BTreeMap, path::Path};
 
 /// omp 계정은 Ojak이 직접 실행하지 않습니다. omp에서 `/model`로 `ojak-*` 모델을 고르면
 /// 계정 브릿지가 배정하며, 여기서는 사용량만 관측합니다.
-pub(crate) const OMP_GATE: &str = "omp 계정은 Ojak이 직접 실행하지 않습니다. omp에서 /model로 ojak-* 모델을 고르면 계정 브릿지가 배정합니다. 이 연결은 사용량 관측에만 사용합니다.";
+pub(crate) const OMP_GATE: &str = "omp 계정은 Ojak이 직접 실행하지 않아요. omp에서 /model로 ojak-* 모델을 고르면 Ojak이 계정을 골라요. 이 연결은 한도를 보는 데만 써요.";
 
 pub(crate) fn profile_env(tool: &str, profile: &Path) -> BTreeMap<String, String> {
     let mut env = base_env();
@@ -67,7 +67,7 @@ fn apply_identity(account: &mut Account, identity: Option<String>, profile: &Pat
         account.verification = "preflight-verified".into();
         account.can_launch = true;
     } else {
-        account.reason = Some("공식 상태 응답에 안정적인 subject/workspace 식별자가 없어 이메일만으로 계정을 고정하지 않습니다. identity 메타데이터를 제공하는 CLI 버전이 필요합니다.".into());
+        account.reason = Some("공식 상태 응답에 안정적인 계정 식별자가 없어 이메일만으로 계정을 고정하지 않아요. 식별자를 주는 CLI 버전이 필요해요.".into());
     }
 }
 
@@ -79,24 +79,24 @@ pub(crate) fn parse_claude(
     let Some(logged_in) = value.get("loggedIn").and_then(Value::as_bool) else {
         return Err(ApiError::new(
             "PROBE_SCHEMA",
-            "Claude auth status 응답 형식이 변경되었습니다. CLI 버전을 확인해 주세요.",
+            "Claude 로그인 상태 응답 형식이 바뀌었어요. CLI 버전을 확인해 주세요.",
         ));
     };
     if !logged_in {
         account.auth_status = "auth-required".into();
-        account.reason = Some("선택한 Claude 프로필에서 공식 로그인이 필요합니다.".into());
+        account.reason = Some("선택한 Claude 프로필에서 공식 로그인이 필요해요.".into());
         return Ok(account);
     }
     if value.get("authMethod").and_then(Value::as_str) != Some("claude.ai")
         || value.get("apiProvider").and_then(Value::as_str) != Some("firstParty")
     {
-        return Err(ApiError::new("AUTH_OVERRIDE_CONFLICT", "Claude 공식 상태가 Claude 구독 인증이 아닙니다. API 키 또는 다른 공급자로 자동 대체하지 않습니다."));
+        return Err(ApiError::new("AUTH_OVERRIDE_CONFLICT", "Claude 공식 상태가 구독 로그인이 아니에요. API 키나 다른 공급자로 자동 바꾸지 않아요."));
     }
     if let Some(reported) = text(value, "configDirectory") {
         if Path::new(&reported).canonicalize().ok().as_deref() != Some(profile) {
             return Err(ApiError::new(
                 "PROFILE_IDENTITY_MISMATCH",
-                "Claude가 선택한 프로필과 다른 인증 디렉터리를 보고했습니다.",
+                "Claude가 선택한 프로필과 다른 인증 폴더를 보고했어요.",
             ));
         }
     }
@@ -132,16 +132,16 @@ pub(crate) fn parse_codex(
     let Some(native) = value.get("account") else {
         return Err(ApiError::new(
             "PROBE_SCHEMA",
-            "Codex account/read 응답 형식이 변경되었습니다.",
+            "Codex 계정 응답 형식이 바뀌었어요.",
         ));
     };
     if native.is_null() {
         account.auth_status = "auth-required".into();
-        account.reason = Some("선택한 CODEX_HOME에서 공식 Codex 로그인이 필요합니다. OMP 로그인은 Codex 로그인을 대신하지 않습니다.".into());
+        account.reason = Some("선택한 CODEX_HOME에서 공식 Codex 로그인이 필요해요. omp 로그인은 Codex 로그인을 대신하지 않아요.".into());
         return Ok(account);
     }
     if native.get("type").and_then(Value::as_str) != Some("chatgpt") {
-        return Err(ApiError::new("AUTH_OVERRIDE_CONFLICT", "Codex가 ChatGPT 구독이 아닌 인증을 보고했습니다. API 과금 경로로 자동 대체하지 않습니다."));
+        return Err(ApiError::new("AUTH_OVERRIDE_CONFLICT", "Codex가 ChatGPT 구독이 아닌 로그인을 보고했어요. API 결제로 자동 바꾸지 않아요."));
     }
     account.auth_status = "authenticated".into();
     account.email = text(native, "email");
@@ -163,7 +163,7 @@ pub(crate) fn parse_codex(
     apply_identity(&mut account, Some(identity), profile);
     if workspace.is_none() {
         // 계정 구분은 이메일과 프로필 격리로만 보장합니다. 같은 이메일의 여러 워크스페이스는 구분하지 않습니다.
-        account.reason = Some("설치된 Codex CLI가 계정 식별자를 제공하지 않아 이메일과 선택한 CODEX_HOME으로만 계정을 구분합니다. 같은 이메일의 여러 워크스페이스는 구분하지 않습니다.".into());
+        account.reason = Some("설치된 Codex CLI가 계정 식별자를 주지 않아 이메일과 선택한 CODEX_HOME으로만 구분해요. 같은 이메일의 여러 워크스페이스는 구분하지 않습니다.".into());
     }
     Ok(account)
 }
@@ -200,13 +200,13 @@ pub(crate) fn inspect_at(
                 if Path::new(&home).canonicalize().ok().as_deref() != Some(profile) {
                     return Err(ApiError::new(
                         "PROFILE_IDENTITY_MISMATCH",
-                        "Codex가 선택한 CODEX_HOME과 다른 프로필을 보고했습니다.",
+                        "Codex가 선택한 CODEX_HOME과 다른 프로필을 보고했어요.",
                     ));
                 }
             } else {
                 return Err(ApiError::new(
                     "PROFILE_UNVERIFIED",
-                    "Codex app-server가 실제 CODEX_HOME을 확인해 주지 않았습니다.",
+                    "Codex가 실제 CODEX_HOME을 확인해 주지 않았어요.",
                 ));
             }
             server.send(&json!({"method":"initialized"}))?;

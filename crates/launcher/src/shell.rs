@@ -56,7 +56,7 @@ fn read_config(path: &Path) -> Result<Option<ConfigFile>, ApiError> {
         || metadata.nlink() != 1
         || metadata.len() > 1024 * 1024
     {
-        return Err(error("UNSAFE_SHELL_PATH", "shell 설정은 현재 사용자 소유의 일반 파일이어야 합니다. 링크 파일은 변경하지 않습니다."));
+        return Err(error("UNSAFE_SHELL_PATH", "셸 설정은 지금 사용자 소유의 일반 파일이어야 해요. 바로가기는 바꾸지 않아요."));
     }
     let mut bytes = Vec::new();
     file.read_to_end(&mut bytes).map_err(io_error)?;
@@ -70,11 +70,11 @@ fn zshrc() -> Result<PathBuf, ApiError> {
     let directory = std::env::var_os("ZDOTDIR")
         .or_else(|| std::env::var_os("HOME"))
         .map(PathBuf::from)
-        .ok_or_else(|| error("HOME_MISSING", "HOME 또는 ZDOTDIR가 필요합니다."))?;
+        .ok_or_else(|| error("HOME_MISSING", "HOME 또는 ZDOTDIR가 필요해요."))?;
     if !directory.is_absolute() {
         return Err(error(
             "INVALID_SHELL_PATH",
-            "HOME과 ZDOTDIR는 절대 경로여야 합니다.",
+            "HOME과 ZDOTDIR는 절대 경로여야 해요.",
         ));
     }
     // 상위 디렉터리 링크는 실제 경로로 고정하고 .zshrc 링크 자체는 거부합니다.
@@ -86,7 +86,7 @@ fn zshrc() -> Result<PathBuf, ApiError> {
 fn check_parent(path: &Path) -> Result<(), ApiError> {
     let parent = path
         .parent()
-        .ok_or_else(|| error("INVALID_SHELL_PATH", "shell 설정 경로가 올바르지 않습니다."))?;
+        .ok_or_else(|| error("INVALID_SHELL_PATH", "셸 설정 경로가 올바르지 않아요."))?;
     let metadata = fs::symlink_metadata(parent).map_err(io_error)?;
     if !path.is_absolute()
         || path.file_name().is_none_or(|name| name != ".zshrc")
@@ -98,7 +98,7 @@ fn check_parent(path: &Path) -> Result<(), ApiError> {
     {
         return Err(error(
             "UNSAFE_SHELL_PATH",
-            "shell 설정 디렉터리의 소유권 또는 경로가 변경되어 작업하지 않았습니다.",
+            "셸 설정 폴더의 소유나 경로가 바뀌어 작업하지 않았어요.",
         ));
     }
     Ok(())
@@ -253,16 +253,16 @@ pub fn shell_install(paths: &Paths) -> Result<String, ApiError> {
     {
         return Err(error(
             "INTEGRATION_REQUIRED",
-            "관리 bin의 설치 상태가 올바르지 않습니다. integration install을 먼저 실행하세요.",
+            "Ojak 명령 폴더 설치 상태가 맞지 않아요. 먼저 aam integration install을 실행해 주세요.",
         ));
     }
     let bin_text = bin
         .to_str()
-        .ok_or_else(|| error("INVALID_SHELL_PATH", "관리 bin 경로는 UTF-8이어야 합니다."))?;
+        .ok_or_else(|| error("INVALID_SHELL_PATH", "명령 폴더 경로를 읽지 못했어요."))?;
     if bin_text.contains(['\n', '\r', ':']) {
         return Err(error(
             "INVALID_SHELL_PATH",
-            "관리 bin 경로에는 줄바꿈이나 콜론을 사용할 수 없습니다.",
+            "명령 폴더 경로에는 줄바꿈이나 콜론을 쓸 수 없어요.",
         ));
     }
     let current = read_config(&target)?;
@@ -273,7 +273,7 @@ pub fn shell_install(paths: &Paths) -> Result<String, ApiError> {
     if occurrences(bytes, BEGIN.as_bytes()) != 0 || occurrences(bytes, END.as_bytes()) != 0 {
         return Err(error(
             "SHELL_BLOCK_CONFLICT",
-            "설치 기록이 없는 앱 shell 블록이 있어 기존 설정을 보존했습니다.",
+            "설치 기록이 없는 Ojak 셸 구간이 있어 기존 설정을 그대로 뒀어요.",
         ));
     }
     let newline = if bytes.windows(2).any(|pair| pair == b"\r\n") {

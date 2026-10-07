@@ -26,7 +26,7 @@ fn decode<T: serde::de::DeserializeOwned>(value: Value) -> Result<T, ApiError> {
     serde_json::from_value(value).map_err(|_| {
         ApiError::new(
             "PROTOCOL_MISMATCH",
-            "관리 서비스 응답 형식이 올바르지 않습니다.",
+            "관리 서비스 응답을 읽지 못했어요.",
         )
     })
 }
@@ -49,12 +49,12 @@ fn bounded_call(
     let fail = |_| {
         ApiError::new(
             "DAEMON_UNAVAILABLE",
-            "관리 서비스 수명 보고에 실패했습니다. 살아 있는 native 작업은 계속 유지됩니다.",
+            "서비스에 상태를 알리지 못했어요. 돌아가고 있는 작업은 그대로 둬요.",
         )
     };
     let mut stream = aam_protocol::connect(&paths.socket).map_err(fail)?;
     if !aam_protocol::peer_is_self(&stream) {
-        return Err(ApiError::new("DAEMON_UNTRUSTED", "관리 서비스 소켓의 소유자가 현재 사용자가 아닙니다. 연결하지 않았습니다."));
+        return Err(ApiError::new("DAEMON_UNTRUSTED", "서비스 연결의 소유자가 지금 사용자가 아니에요. 연결하지 않았어요."));
     }
     stream.set_read_timeout(Some(timeout)).map_err(fail)?;
     stream.set_write_timeout(Some(timeout)).map_err(fail)?;
@@ -64,7 +64,7 @@ fn bounded_call(
     if response.id != request.id || response.version != PROTOCOL_VERSION {
         return Err(ApiError::new(
             "PROTOCOL_MISMATCH",
-            "수명 보고 응답이 요청과 다릅니다.",
+            "상태 보고 응답이 요청과 달라요.",
         ));
     }
     if let Some(error) = response.error {
@@ -72,7 +72,7 @@ fn bounded_call(
     }
     response
         .result
-        .ok_or_else(|| ApiError::new("PROTOCOL_MISMATCH", "수명 보고 결과가 없습니다."))
+        .ok_or_else(|| ApiError::new("PROTOCOL_MISMATCH", "상태 보고 결과가 없어요."))
 }
 
 fn abort(paths: &Paths, grant: &LeaseGrant, reason: &str) {
@@ -84,7 +84,7 @@ fn abort(paths: &Paths, grant: &LeaseGrant, reason: &str) {
     .is_err()
     {
         eprintln!(
-            "aam: 미실행 예약 정리를 보고하지 못했습니다. 서비스 복구 후 상태 확인이 필요합니다."
+            "aam: 쓰지 않은 예약을 정리했다고 알리지 못했어요. 서비스가 돌아오면 상태를 확인해 주세요."
         );
     }
 }
@@ -93,7 +93,7 @@ fn intent_checked(mut intent: LaunchIntent) -> Result<LaunchIntent, ApiError> {
     if !["claude", "codex"].contains(&intent.tool.as_str()) {
         return Err(ApiError::new(
             "UNSUPPORTED_TOOL",
-            "지원하는 도구는 claude, codex입니다.",
+            "쓸 수 있는 도구는 claude, codex예요.",
         ));
     }
     if intent.model.trim().is_empty()
@@ -102,17 +102,17 @@ fn intent_checked(mut intent: LaunchIntent) -> Result<LaunchIntent, ApiError> {
     {
         return Err(ApiError::new(
             "MODEL_REQUIRED",
-            "빈 값이나 옵션이 아닌 명시적인 모델 ID가 필요합니다.",
+            "모델 ID를 정확히 적어 주세요. 빈 값이나 옵션은 안 돼요.",
         ));
     }
     let cwd = std::fs::canonicalize(&intent.cwd)
-        .map_err(|_| ApiError::new("INVALID_CWD", "작업 폴더가 없거나 접근할 수 없습니다."))?;
+        .map_err(|_| ApiError::new("INVALID_CWD", "작업 폴더가 없거나 열 수 없어요."))?;
     if !cwd.is_dir() {
-        return Err(ApiError::new("INVALID_CWD", "작업 경로가 폴더가 아닙니다."));
+        return Err(ApiError::new("INVALID_CWD", "작업 경로가 폴더가 아니에요."));
     }
     intent.cwd = cwd
         .to_str()
-        .ok_or_else(|| ApiError::new("INVALID_CWD", "작업 폴더 경로는 UTF-8이어야 합니다."))?
+        .ok_or_else(|| ApiError::new("INVALID_CWD", "작업 폴더 경로를 읽지 못했어요."))?
         .to_owned();
     if let Some(parent) = std::env::var_os("AAM_PARENT_SESSION_ID") {
         let parent = parent
@@ -121,7 +121,7 @@ fn intent_checked(mut intent: LaunchIntent) -> Result<LaunchIntent, ApiError> {
             .ok_or_else(|| {
                 ApiError::new(
                     "PARENT_CONTEXT_INVALID",
-                    "상속된 관리 부모 세션을 확인할 수 없습니다.",
+                    "물려받은 부모 대화를 확인하지 못했어요.",
                 )
             })?;
         if intent
@@ -131,7 +131,7 @@ fn intent_checked(mut intent: LaunchIntent) -> Result<LaunchIntent, ApiError> {
         {
             return Err(ApiError::new(
                 "PARENT_CONTEXT_CONFLICT",
-                "상속된 부모 세션을 다른 세션으로 변경할 수 없습니다.",
+                "물려받은 부모 대화를 다른 대화로 바꿀 수 없어요.",
             ));
         }
         intent.parent_session_id = Some(parent.to_owned());
@@ -147,7 +147,7 @@ fn resolve_resume(
     if selection.is_some() && intent.resume_session_id.is_some() {
         return Err(ApiError::new(
             "SESSION_CONFLICT",
-            "재개 대상을 중복 지정할 수 없습니다.",
+            "다시 열 대상을 두 번 지정할 수 없어요.",
         ));
     }
     let selection = selection.or_else(|| {
@@ -194,19 +194,19 @@ fn select_continue<'a>(
     let original = latest.ok_or_else(|| {
         ApiError::new(
             "SESSION_NOT_FOUND",
-            "재개할 관리 세션을 찾지 못했습니다. 계정이나 외부 대화 파일을 추측하지 않습니다.",
+            "다시 열 대화를 찾지 못했어요. 계정이나 바깥 대화 파일은 추측하지 않아요.",
         )
     })?;
     if ambiguous {
         return Err(ApiError::new(
             "CONTINUE_AMBIGUOUS",
-            "최근 관리 대화를 하나로 결정할 수 없습니다. 명시적인 세션 ID로 재개하세요.",
+            "최근 대화를 하나로 고르지 못했어요. 대화 ID를 적어 다시 열어 주세요.",
         ));
     }
     if !matches!(original.tool.as_str(), "claude" | "codex") || original.native_session_id.is_none() {
         return Err(ApiError::new(
             "RESUME_UNSUPPORTED",
-            "검증된 native 대화 매핑이 없는 세션입니다.",
+            "확인된 공식 대화 연결이 없는 세션이에요.",
         ));
     }
     if intent
@@ -216,7 +216,7 @@ fn select_continue<'a>(
     {
         return Err(ApiError::new(
             "CROSS_ACCOUNT_RESUME_BLOCKED",
-            "원래 대화와 다른 계정으로 재개할 수 없습니다.",
+            "원래 대화와 다른 계정으로는 다시 열 수 없어요.",
         ));
     }
     Ok(original)
@@ -322,7 +322,7 @@ impl Heartbeat {
                     )
                 };
                 if result.is_err() && !warned {
-                    eprintln!("aam: 서비스 연결이 끊겼습니다. native 작업은 중단하지 않으며 예약은 보수적으로 유지합니다.");
+                    eprintln!("aam: 서비스 연결이 끊겼어요. 돌아가고 있는 작업은 멈추지 않고, 계정 사용은 그대로 둬요.");
                     warned = true;
                 }
                 match receive.recv_timeout(Duration::from_secs(10)) {
@@ -518,7 +518,7 @@ fn run_inner(
         if !matches!(reason.code.as_str(), "PARENT_SESSION_UNKNOWN" | "PARENT_PROCESS_UNVERIFIED") {
             return None;
         }
-        eprintln!("aam: 이 터미널이 물려받은 부모 관리 세션 정보가 지금 실행과 맞지 않아 무시하고 새로 배정합니다. ({})", reason.code);
+        eprintln!("aam: 이 터미널이 물려받은 부모 대화 정보가 지금 실행과 맞지 않아 무시하고 새로 골라요. ({})", reason.code);
         std::env::remove_var("AAM_PARENT_SESSION_ID");
         std::env::remove_var("AAM_PARENT_CAPABILITY");
         Some(run_inner(paths, intent, native_args, original_args))
@@ -582,7 +582,7 @@ fn run_inner(
         // 기록한 원본 CLI(integration.json)와 같은 실행 파일일 때만 계획을 세우고 identity 확인을 한다.
         let registered = install::registered_native(paths, &intent.tool)?;
         let bound = grant.account.binary_path.as_deref().ok_or_else(|| {
-            ApiError::new("BINARY_UNVERIFIED", "계정의 검증된 native 바이너리가 없습니다.")
+            ApiError::new("BINARY_UNVERIFIED", "이 계정의 확인된 공식 CLI가 없어요.")
         })?;
         if install::native_program(Path::new(bound))? != registered {
             return Err(ApiError::new(
@@ -593,7 +593,7 @@ fn run_inner(
         if intent.continue_elsewhere {
             // 서비스가 확인한 원래 세션(continued_from)의 계정에서 대화 기록만 새 계정 프로필로 옮긴다.
             let snapshot = read_snapshot(paths)?;
-            let unknown = || ApiError::new("CONTINUE_UNKNOWN", "이어 갈 원래 세션을 확인하지 못했습니다.");
+            let unknown = || ApiError::new("CONTINUE_UNKNOWN", "이어 갈 원래 대화를 확인하지 못했어요.");
             let original = grant.session.continued_from.as_ref()
                 .and_then(|id| snapshot.sessions.iter().find(|session| &session.id == id))
                 .ok_or_else(unknown)?;
@@ -745,7 +745,7 @@ fn run_inner(
             watch = Some(WriterWatch::start(identity.clone()));
         }
         if identity.is_none() {
-            eprintln!("aam: native 시작 시각을 확인하지 못했습니다. 작업은 유지하며 예약 상태는 불확실로 남깁니다.");
+            eprintln!("aam: 시작 시각을 확인하지 못했어요. 작업은 그대로 두고, 계정 사용 상태는 불확실로 남겨요.");
         }
         heartbeat = Some(Heartbeat::start(
             paths.clone(),
@@ -783,7 +783,7 @@ fn run_inner(
                 .then(|| aam_adapters::codex_session_from(&grant.account, &grant.session.cwd, &written))
                 .flatten();
             if lifecycle_call(paths, "lease.release", json!({"sessionId":grant.session.id,"capability":grant.capability,"exitCode":code,"reason":reason,"sessionPersisted":session_persisted,"backgroundProcesses":outcome.background_processes,"nativeSessionId":discovered})).is_err() {
-                eprintln!("aam: native 종료 보고를 저장하지 못했습니다. 서비스 복구 후 보수적으로 정리됩니다.");
+                eprintln!("aam: 종료를 저장하지 못했어요. 서비스가 돌아오면 조심스럽게 정리해요.");
             }
             let native = grant.session.native_session_id.clone().or(discovered);
             if let Some(next) = offer_continue(paths, &grant, native.as_deref()) {
@@ -840,7 +840,7 @@ fn offer_continue(paths: &Paths, grant: &LeaseGrant, native: Option<&str>) -> Op
         snapshot.accounts.iter().find(|account| &account.id == id).map(|account| (account.label.clone(), account.email.clone()))
     }));
     if !interactive || account.is_none() {
-        eprintln!("aam: 이 계정은 한도를 다 썼습니다. 다른 계정에서 이어 가려면 aam continue를 실행하세요.");
+        eprintln!("aam: 이 계정은 한도를 다 썼어요. 다른 계정에서 이으려면 aam continue를 실행해 주세요.");
         return None;
     }
     let (label, email) = account?;
@@ -893,7 +893,7 @@ pub fn continue_elsewhere(paths: &Paths, tool: Option<String>, session: Option<S
                 }
             }
             let latest = found.into_iter().max_by_key(|session| session.started_at).ok_or_else(|| {
-                last_error.unwrap_or_else(|| ApiError::new("SESSION_NOT_FOUND", "이어 갈 관리 대화를 찾지 못했습니다."))
+                last_error.unwrap_or_else(|| ApiError::new("SESSION_NOT_FOUND", "이어 갈 대화를 찾지 못했어요."))
             })?;
             intent.tool = latest.tool.clone();
             latest.id.clone()
@@ -1010,7 +1010,7 @@ fn claude_exec(paths: &Paths, args: &[OsString], root_spawn: bool) -> Result<(),
     }
     let profile =
         grant.account.profile_path.as_deref().ok_or_else(|| {
-            ApiError::new("PROFILE_UNBOUND", "원래 Claude 프로필 연결이 없습니다.")
+            ApiError::new("PROFILE_UNBOUND", "원래 Claude 프로필이 연결돼 있지 않아요.")
         })?;
     let inherited = std::env::var_os("CLAUDE_CONFIG_DIR")
         .map(PathBuf::from)
@@ -1072,7 +1072,7 @@ pub fn account_login(
     if let Some(settings) = settings {
         aam_adapters::apply_settings_import(Path::new(&plan.profile_path), settings)?;
     } else {
-        eprintln!("aam: 새 프로필의 기본 설정으로 시작합니다. 기존 permissions·MCP·skills·plugins·인증 파일은 복제하지 않습니다.");
+        eprintln!("aam: 새 프로필의 기본 설정으로 시작해요. 기존 권한, MCP, skills, plugins, 로그인 파일은 복사하지 않아요.");
     }
     let program = install::native_program(Path::new(&plan.program))?;
     let mut command = Command::new(program);
@@ -1107,13 +1107,13 @@ pub fn account_relogin(paths: &Paths, tool: &str, account_id: &str) -> Result<Ex
         || account_id.len() > 128
         || !account_id.chars().all(|ch| ch.is_ascii_alphanumeric() || matches!(ch, '-' | '_'))
     {
-        return Err(ApiError::new("INVALID_PARAMS", "다시 로그인할 계정을 확인하지 못했습니다."));
+        return Err(ApiError::new("INVALID_PARAMS", "다시 로그인할 계정을 확인하지 못했어요."));
     }
     let snapshot = read_snapshot(paths)?;
     let account = snapshot.accounts.iter().find(|account| account.id == account_id && account.tool == tool)
-        .ok_or_else(|| ApiError::new("ACCOUNT_NOT_FOUND", "다시 로그인할 계정을 찾지 못했습니다."))?;
+        .ok_or_else(|| ApiError::new("ACCOUNT_NOT_FOUND", "다시 로그인할 계정을 찾지 못했어요."))?;
     let profile = account.profile_path.clone().ok_or_else(|| {
-        ApiError::new("PROFILE_UNBOUND", "이 계정에 연결된 프로필이 없어 다시 로그인할 수 없습니다.")
+        ApiError::new("PROFILE_UNBOUND", "이 계정에 연결된 프로필이 없어 다시 로그인할 수 없어요.")
     })?;
     let label = {
         let trimmed = account.label.trim();
@@ -1126,7 +1126,7 @@ pub fn account_relogin(paths: &Paths, tool: &str, account_id: &str) -> Result<Ex
         }
     };
     let plan = aam_adapters::relogin_plan(paths, tool, &label, Path::new(&profile))?;
-    eprintln!("aam: 기존 프로필에서 공식 로그인을 다시 엽니다. 설정과 자격 증명은 복사하지 않습니다.");
+    eprintln!("aam: 기존 프로필에서 공식 로그인을 다시 열어요. 설정과 로그인 정보는 복사하지 않아요.");
     let program = install::native_program(Path::new(&plan.program))?;
     let mut command = Command::new(program);
     command.args(&plan.args).envs(&plan.env);
@@ -1164,9 +1164,9 @@ pub fn extend_integration(paths: &Paths, tool: &str) -> Result<bool, ApiError> {
 
 fn announce_integration(paths: &Paths, tool: &str) {
     match extend_integration(paths, tool) {
-        Ok(true) => eprintln!("aam: 새 터미널의 `{tool}` 명령이 이제 Ojak 관리 실행으로 연결됩니다."),
+        Ok(true) => eprintln!("aam: 새 터미널의 `{tool}` 명령이 이제 Ojak으로 연결돼요."),
         Ok(false) => {}
-        Err(error) => eprintln!("aam: `{tool}` 연결을 추가하지 못했습니다. 앱의 연결 화면에서 다시 설치하세요. ({})", error.code),
+        Err(error) => eprintln!("aam: `{tool}` 연결을 추가하지 못했어요. 앱의 연결 화면에서 다시 설치해 주세요. ({})", error.code),
     }
 }
 
@@ -1256,11 +1256,11 @@ fn launch_announcement(label: &str, email: Option<&str>, masked: bool, notice: L
     let name = display_account_label(label, email, masked);
     let why = match notice {
         LaunchNotice::Default => "",
-        LaunchNotice::Pinned => " 고정된 계정입니다.",
-        LaunchNotice::QuotaSwitch => " 다른 계정 한도 소진으로 전환했습니다.",
-        LaunchNotice::PinFallback => " 수동으로 고른 계정을 쓸 수 없어 전환했습니다.",
+        LaunchNotice::Pinned => " 고정된 계정이에요.",
+        LaunchNotice::QuotaSwitch => " 다른 계정 한도 소진으로 전환했어요.",
+        LaunchNotice::PinFallback => " 직접 고른 계정을 쓸 수 없어 바꿨어요.",
     };
-    format!("aam: {name} 계정으로 실행합니다.{why}")
+    format!("aam: {name} 계정으로 실행해요.{why}")
 }
 
 fn user_terminal() -> bool {
@@ -1354,10 +1354,10 @@ fn default_profile_label(snapshot: &Snapshot, tool: &str, masked: bool) -> Strin
 
 fn exhausted_fallback_line(tool: &str, earliest_reset: Option<&str>, original_account: &str) -> String {
     let until = match earliest_reset {
-        Some(reset) => format!("가장 빠른 리셋은 {reset}입니다."),
-        None => "리셋 시각은 아직 확인되지 않았습니다.".into(),
+        Some(reset) => format!("가장 빠른 리셋은 {reset}예요."),
+        None => "리셋 시각은 아직 몰라요.".into(),
     };
-    format!("Ojak 계정이 모두 한도를 다 썼습니다. {until} 원본 {tool}은(는) {original_account} 계정을 사용합니다. 자세한 내용은 aam explain --tool {tool}에서 확인하세요.")
+    format!("Ojak 계정이 모두 한도를 다 썼어요. {until} 원래 {tool}은 {original_account} 계정을 써요. 자세한 내용은 aam explain --tool {tool}에서 확인해 주세요.")
 }
 
 fn fallback_notice(paths: &Paths, tool: &str, mut error: ApiError) -> ApiError {
@@ -1374,7 +1374,7 @@ fn fallback_notice(paths: &Paths, tool: &str, mut error: ApiError) -> ApiError {
         let reset = snapshot.as_ref().and_then(|snapshot| earliest_reset_phrase(snapshot, tool));
         exhausted_fallback_line(tool, reset.as_deref(), &original)
     } else {
-        format!("배정 가능한 Ojak 계정이 없습니다. 원본 {tool}은(는) {original} 계정을 사용합니다. 자세한 내용은 aam explain --tool {tool}에서 확인하세요.")
+        format!("쓸 수 있는 Ojak 계정이 없어요. 원래 {tool}은 {original} 계정을 써요. 자세한 내용은 aam explain --tool {tool}에서 확인해 주세요.")
     };
     error
 }

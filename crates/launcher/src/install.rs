@@ -59,7 +59,7 @@ fn error(code: &str, text: &str) -> ApiError {
 fn io_error(_: std::io::Error) -> ApiError {
     error(
         "INSTALL_IO_ERROR",
-        "설치 파일을 처리하지 못했습니다. 경로 소유권과 쓰기 권한을 확인하세요.",
+        "설치 파일을 처리하지 못했어요. 폴더 소유와 쓰기 권한을 확인해 주세요.",
     )
 }
 fn platform() -> Result<(), ApiError> {
@@ -68,7 +68,7 @@ fn platform() -> Result<(), ApiError> {
     } else {
         Err(error(
             "UNSUPPORTED_PLATFORM",
-            "서비스와 shim 설치는 현재 macOS만 지원합니다.",
+            "서비스와 명령 연결 설치는 지금 macOS만 지원해요.",
         ))
     }
 }
@@ -77,7 +77,7 @@ pub(crate) fn private_dir(path: &Path) -> Result<(), ApiError> {
     if !path.is_absolute() {
         return Err(error(
             "INVALID_PATH",
-            "앱 관리 경로는 절대 경로여야 합니다.",
+            "앱 폴더는 절대 경로여야 해요.",
         ));
     }
     fs::create_dir_all(path).map_err(io_error)?;
@@ -85,7 +85,7 @@ pub(crate) fn private_dir(path: &Path) -> Result<(), ApiError> {
     if !metadata.is_dir() || metadata.file_type().is_symlink() || !owned_by_me(path, &metadata) {
         return Err(error(
             "UNSAFE_PATH",
-            "앱 관리 디렉터리의 소유권 또는 종류가 올바르지 않습니다.",
+            "앱 폴더의 소유나 종류가 맞지 않아요.",
         ));
     }
     aam_protocol::secure::restrict_dir(path).map_err(io_error)
@@ -118,7 +118,7 @@ fn read_owned<T: serde::de::DeserializeOwned>(path: &Path) -> Result<Option<T>, 
     {
         return Err(error(
             "UNSAFE_PATH",
-            "앱 설치 기록의 소유권 또는 파일 형식이 올바르지 않습니다.",
+            "설치 기록의 소유나 파일 형식이 맞지 않아요.",
         ));
     }
     serde_json::from_slice(&fs::read(path).map_err(io_error)?)
@@ -126,14 +126,14 @@ fn read_owned<T: serde::de::DeserializeOwned>(path: &Path) -> Result<Option<T>, 
         .map_err(|_| {
             error(
                 "INVALID_INSTALL_RECORD",
-                "기존 설치 기록을 해석하지 못했습니다. 해당 파일을 덮어쓰지 않았습니다.",
+                "기존 설치 기록을 읽지 못했어요. 그 파일은 덮어쓰지 않았어요.",
             )
         })
 }
 
 fn atomic_write(path: &Path, bytes: &[u8]) -> Result<(), ApiError> {
     if fs::symlink_metadata(path).is_ok_and(|meta| meta.file_type().is_symlink()) {
-        return Err(error("UNSAFE_PATH", "심볼릭 링크는 교체하지 않습니다."));
+        return Err(error("UNSAFE_PATH", "바로가기는 바꾸지 않아요."));
     }
     let name = path.file_name().and_then(|name| name.to_str()).unwrap_or("write");
     let temp = path.with_file_name(format!(".{name}.{}.tmp", aam_protocol::new_id()));
@@ -160,13 +160,13 @@ fn save(path: &Path, value: &impl Serialize) -> Result<(), ApiError> {
     atomic_write(
         path,
         &serde_json::to_vec_pretty(value)
-            .map_err(|_| error("INSTALL_SERIALIZATION", "설치 기록을 생성하지 못했습니다."))?,
+            .map_err(|_| error("INSTALL_SERIALIZATION", "설치 기록을 만들지 못했어요."))?,
     )
 }
 
 pub(crate) fn native_program(path: &Path) -> Result<PathBuf, ApiError> {
     let path = fs::canonicalize(path)
-        .map_err(|_| error("BINARY_MISSING", "native 실행 파일이 없습니다."))?;
+        .map_err(|_| error("BINARY_MISSING", "공식 실행 파일이 없어요."))?;
     let metadata = fs::metadata(&path).map_err(io_error)?;
     let own = std::env::current_exe()
         .and_then(fs::canonicalize)
@@ -174,7 +174,7 @@ pub(crate) fn native_program(path: &Path) -> Result<PathBuf, ApiError> {
     if !metadata.is_file() || !runnable(&path, &metadata) || same_file(&path, &own)? {
         return Err(error(
             "RECURSIVE_BINARY",
-            "native 바이너리가 launcher 자신이거나 실행할 수 없는 파일입니다.",
+            "실행 파일이 Ojak 자신이거나 실행할 수 없어요.",
         ));
     }
     Ok(path)
@@ -217,13 +217,13 @@ pub(crate) fn registered_native(paths: &Paths, tool: &str) -> Result<PathBuf, Ap
         read_owned(&paths.home.join("integration.json"))?.ok_or_else(|| {
             error(
                 "INTEGRATION_REQUIRED",
-                "원본 CLI 등록이 없습니다. 연결을 먼저 설치하세요.",
+                "원래 CLI 등록이 없어요. 연결을 먼저 설치해 주세요.",
             )
         })?;
     if record.owner != OWNER || !TOOLS.contains(&tool) {
         return Err(error(
             "INVALID_INSTALL_RECORD",
-            "앱 소유의 도구 등록만 사용할 수 있습니다.",
+            "이 앱이 등록한 도구만 쓸 수 있어요.",
         ));
     }
     let original = record
@@ -233,13 +233,13 @@ pub(crate) fn registered_native(paths: &Paths, tool: &str) -> Result<PathBuf, Ap
         .ok_or_else(|| {
             error(
                 "BINARY_MISSING",
-                "등록된 원본 CLI가 없습니다. 원본 CLI 설치 후 연결을 다시 설치하세요.",
+                "등록된 원래 CLI가 없어요. 원래 CLI를 설치한 뒤 연결을 다시 설치해 주세요.",
             )
         })?;
     if !original.is_absolute() {
         return Err(error(
             "INVALID_INSTALL_RECORD",
-            "등록된 원본 CLI 경로가 절대 경로가 아닙니다. 연결을 다시 설치하세요.",
+            "등록된 원래 CLI 경로가 절대 경로가 아니에요. 연결을 다시 설치해 주세요.",
         ));
     }
     let verified = native_program(&original)?;
@@ -253,7 +253,7 @@ pub(crate) fn registered_native(paths: &Paths, tool: &str) -> Result<PathBuf, Ap
     {
         return Err(error(
             "RECURSIVE_BINARY",
-            "등록된 원본 CLI 경로가 관리 shim을 가리킵니다.",
+            "등록된 원래 CLI가 Ojak 명령을 가리켜요.",
         ));
     }
     Ok(verified)
@@ -268,7 +268,7 @@ pub(crate) fn shim_installed(paths: &Paths, tool: &str) -> Result<bool, ApiError
     if record.owner != OWNER {
         return Err(error(
             "FOREIGN_INSTALL",
-            "앱 소유가 아닌 연결 기록입니다. 기존 파일을 보존하고 설치 경로를 확인하세요.",
+            "이 앱 소유가 아닌 연결 기록이에요. 기존 파일은 그대로 두고 설치 경로를 확인해 주세요.",
         ));
     }
     Ok(record.shims.iter().any(|name| name == tool)
@@ -292,7 +292,7 @@ pub fn integration_install(paths: &Paths) -> Result<String, ApiError> {
     if previous.as_ref().is_some_and(|p| p.owner != OWNER) {
         return Err(error(
             "FOREIGN_INSTALL",
-            "다른 프로그램의 설치 기록을 덮어쓰지 않습니다.",
+            "다른 프로그램의 설치 기록은 덮어쓰지 않아요.",
         ));
     }
     if previous.as_ref().is_some_and(|p| {
@@ -305,7 +305,7 @@ pub fn integration_install(paths: &Paths) -> Result<String, ApiError> {
     }) {
         return Err(error(
             "INVALID_INSTALL_RECORD",
-            "설치 기록의 shim 이름이 허용 목록에 없습니다.",
+            "설치 기록의 명령 이름이 허용 목록에 없어요.",
         ));
     }
     let launcher =
@@ -415,7 +415,7 @@ pub fn integration_install(paths: &Paths) -> Result<String, ApiError> {
                 if !owned {
                     return Err(error(
                         "SHIM_CONFLICT",
-                        "shim 경로에 사용자 파일이 있습니다. 기존 파일은 보존했습니다.",
+                        "명령 경로에 사용자 파일이 있어요. 기존 파일은 그대로 뒀어요.",
                     ));
                 }
                 original_links.insert(name.clone(), Some(existing));
@@ -423,7 +423,7 @@ pub fn integration_install(paths: &Paths) -> Result<String, ApiError> {
             _ => {
                 return Err(error(
                     "SHIM_CONFLICT",
-                    "shim 경로에 사용자 파일이 있습니다. 기존 파일은 보존했습니다.",
+                    "명령 경로에 사용자 파일이 있어요. 기존 파일은 그대로 뒀어요.",
                 ))
             }
         }
@@ -448,7 +448,7 @@ pub fn integration_install(paths: &Paths) -> Result<String, ApiError> {
             {
                 return Err(error(
                     "SHIM_CONFLICT",
-                    "설치 중 shim 경로가 변경되었습니다. 사용자 파일을 보존했습니다.",
+                    "설치 중 명령 경로가 바뀌었어요. 사용자 파일은 그대로 뒀어요.",
                 ));
             }
             if original.is_some() {
@@ -468,7 +468,7 @@ pub fn integration_install(paths: &Paths) -> Result<String, ApiError> {
                     fs::remove_file(&target).map_err(io_error)?;
                 }
                 Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
-                _ => return Err(error("SHIM_ROLLBACK_CONFLICT", "설치 중 파일이 변경되어 자동 복원을 중단했습니다. 관리 bin과 기존 설치 기록을 확인하세요.")),
+                _ => return Err(error("SHIM_ROLLBACK_CONFLICT", "설치 중 파일이 바뀌어 자동 복원을 멈췄어요. Ojak bin과 기존 설치 기록을 확인해 주세요.")),
             }
             if let Some(original) = &original_links[name] {
                 symlink(original, &target).map_err(io_error)?;
@@ -476,7 +476,7 @@ pub fn integration_install(paths: &Paths) -> Result<String, ApiError> {
         }
         return Err(failure);
     }
-    Ok(format!("관리 실행 가능한 등록 도구의 shim을 설치했습니다. 기존 관리 도구는 인증 상태와 무관하게 유지합니다. 원본 CLI·호스트 설정은 변경하지 않았습니다.\n현재 zsh/bash에만 적용: export PATH={}:\"$PATH\"; hash -r\n영구 연결: aam shell install (제거: aam shell uninstall).\n실행 중인 세션은 유지하고 새 터미널에서 command -v claude와 command -v codex를 확인하세요. 기존 zsh에서는 rehash 후 확인하세요. 호스트 재시작은 필요하지 않습니다. 별도 명령 설정은 앱의 호스트 연결 안내에서 절대 shim 경로를 확인하세요.\n모델을 생략하면 도구의 기본 모델을 사용하며 격리 미검증 도구는 새로 가로채지 않습니다.", shell_quote(&bin)))
+    Ok(format!("등록된 도구의 Ojak 명령을 설치했어요. 이미 연결된 도구는 로그인 상태와 관계없이 그대로 둬요. 원래 CLI와 다른 앱 설정은 바꾸지 않았어요.\n지금 터미널에만 적용: export PATH={}:\"$PATH\"; hash -r\n계속 쓰려면 aam shell install (빼기: aam shell uninstall).\n진행 중인 작업은 그대로 두고, 새 터미널에서 command -v claude와 command -v codex를 확인해 주세요. 이미 연 zsh는 rehash 후 확인해 주세요. 다른 앱은 다시 켤 필요 없어요. 앱의 연결 안내에서 절대 경로를 확인해 주세요.\n모델을 비우면 도구의 기본 모델을 써요. 아직 확인되지 않은 도구는 새로 가로채지 않아요.", shell_quote(&bin)))
 }
 
 #[cfg(unix)]
@@ -485,13 +485,13 @@ pub fn integration_uninstall(paths: &Paths) -> Result<String, ApiError> {
     let record_path = paths.home.join("integration.json");
     let Some(record): Option<Integration> = read_owned(&record_path)? else {
         return Ok(
-            "설치 기록이 없어 shim을 삭제하지 않았습니다. shell 설정은 변경하지 않았습니다.".into(),
+            "설치 기록이 없어 명령을 지우지 않았어요. 셸 설정은 바꾸지 않았어요.".into(),
         );
     };
     if record.owner != OWNER {
         return Err(error(
             "FOREIGN_INSTALL",
-            "앱 소유가 아닌 설치 기록은 제거하지 않습니다.",
+            "이 앱 소유가 아닌 설치 기록은 지우지 않아요.",
         ));
     }
     let bin = paths.home.join("bin");
@@ -499,7 +499,7 @@ pub fn integration_uninstall(paths: &Paths) -> Result<String, ApiError> {
         if name != "aam" && !TOOLS.contains(&name.as_str()) && !LEGACY_TOOLS.contains(&name.as_str()) {
             return Err(error(
                 "INVALID_INSTALL_RECORD",
-                "설치 기록의 shim 이름이 허용 목록에 없습니다.",
+                "설치 기록의 명령 이름이 허용 목록에 없어요.",
             ));
         }
         let path = bin.join(name);
@@ -508,7 +508,7 @@ pub fn integration_uninstall(paths: &Paths) -> Result<String, ApiError> {
         {
             return Err(error(
                 "SHIM_MODIFIED",
-                "사용자가 변경한 shim 파일이 있어 제거하지 않았습니다.",
+                "사용자가 바꾼 명령 파일이 있어 지우지 않았어요.",
             ));
         }
     }
@@ -521,7 +521,7 @@ pub fn integration_uninstall(paths: &Paths) -> Result<String, ApiError> {
     }
     fs::remove_file(record_path).map_err(io_error)?;
     let _ = fs::remove_dir(bin);
-    Ok("앱 소유 shim만 제거했습니다. 원본 CLI·로그인·shell 설정은 보존했습니다. 앱의 PATH 연결은 aam shell uninstall로 제거할 수 있습니다.".into())
+    Ok("이 앱이 만든 명령만 지웠어요. 원래 CLI, 로그인, 셸 설정은 그대로 뒀어요. 앱의 PATH 연결은 aam shell uninstall로 뺄 수 있어요.".into())
 }
 
 #[cfg(unix)]
@@ -532,7 +532,7 @@ fn launchctl(args: &[String]) -> Result<bool, ApiError> {
         .stdout(Stdio::null())
         .stderr(Stdio::null())
         .spawn()
-        .map_err(|_| error("LAUNCHCTL_FAILED", "launchctl을 시작하지 못했습니다."))?;
+        .map_err(|_| error("LAUNCHCTL_FAILED", "자동 실행 도구를 시작하지 못했어요."))?;
     let until = Instant::now() + Duration::from_secs(15);
     loop {
         match child.try_wait().map_err(io_error)? {
@@ -543,7 +543,7 @@ fn launchctl(args: &[String]) -> Result<bool, ApiError> {
                 let _ = child.wait();
                 return Err(error(
                     "LAUNCHCTL_TIMEOUT",
-                    "launchctl 응답 시간이 초과되었습니다. 실제 서비스 상태를 다시 확인하세요.",
+                    "자동 실행 도구가 응답하지 않아요. 서비스 상태를 다시 확인해 주세요.",
                 ));
             }
             None => thread::sleep(Duration::from_millis(40)),
@@ -572,7 +572,7 @@ fn user_home() -> Result<PathBuf, ApiError> {
     std::env::var_os("HOME")
         .map(PathBuf::from)
         .filter(|p| p.is_absolute())
-        .ok_or_else(|| error("HOME_MISSING", "사용자 HOME 절대 경로가 필요합니다."))
+        .ok_or_else(|| error("HOME_MISSING", "사용자 홈의 절대 경로가 필요해요."))
 }
 
 /// 데몬이 CLI를 찾을 때 쓰는 고정 PATH. 설치 셸의 PATH는 넣지 않는다.
@@ -587,7 +587,7 @@ fn service_path(home: &Path) -> Result<String, ApiError> {
     dirs.extend(["/opt/homebrew/bin", "/usr/local/bin", "/usr/bin", "/bin", "/usr/sbin", "/sbin"].map(PathBuf::from));
     std::env::join_paths(dirs)
         .map(|path| path.to_string_lossy().into_owned())
-        .map_err(|_| error("INVALID_PATH", "서비스 PATH를 구성하지 못했습니다."))
+        .map_err(|_| error("INVALID_PATH", "서비스 경로를 만들지 못했어요."))
 }
 
 #[cfg(unix)]
@@ -599,7 +599,7 @@ pub fn service_install(paths: &Paths) -> Result<String, ApiError> {
     let service = native_program(
         &launcher
             .parent()
-            .ok_or_else(|| error("BINARY_MISSING", "launcher 설치 경로를 찾지 못했습니다."))?
+            .ok_or_else(|| error("BINARY_MISSING", "설치 경로를 찾지 못했어요."))?
             .join("aam-service"),
     )?;
     let record_path = paths.home.join("service-install.json");
@@ -607,7 +607,7 @@ pub fn service_install(paths: &Paths) -> Result<String, ApiError> {
     if old.as_ref().is_some_and(|r| r.owner != OWNER) {
         return Err(error(
             "FOREIGN_INSTALL",
-            "다른 프로그램의 설치 기록을 덮어쓰지 않습니다.",
+            "다른 프로그램의 설치 기록은 덮어쓰지 않아요.",
         ));
     }
     let home = user_home()?;
@@ -626,7 +626,7 @@ pub fn service_install(paths: &Paths) -> Result<String, ApiError> {
         {
             return Err(error(
                 "LAUNCH_AGENT_CONFLICT",
-                "기존 LaunchAgent가 앱 소유 기록과 다릅니다. 덮어쓰지 않았습니다.",
+                "기존 자동 실행이 앱 기록과 달라요. 덮어쓰지 않았어요.",
             ));
         }
     }
@@ -637,7 +637,7 @@ pub fn service_install(paths: &Paths) -> Result<String, ApiError> {
                 previous.uninstall_permit = None;
                 save(&record_path, &previous)?;
                 return Ok(
-                    "동일한 사용자 관리 서비스가 이미 실행 중이며 신규 배정을 명시적으로 재개했습니다."
+                    "같은 관리 서비스가 이미 실행 중이고, 새 배정을 다시 열었어요."
                         .into(),
                 );
             }
@@ -645,14 +645,14 @@ pub fn service_install(paths: &Paths) -> Result<String, ApiError> {
             // 서비스 재시작과 같으며 실행 중인 세션과 lease 기록은 그대로 둡니다.
             Some(previous) if !previous.binary_path.exists() => {
                 if !launchctl(&["bootout".into(), target()])? {
-                    return Err(error("SERVICE_BOOTOUT_FAILED", "이전 위치의 LaunchAgent를 내리지 못했습니다. 설치 파일은 보존했습니다."));
+                    return Err(error("SERVICE_BOOTOUT_FAILED", "이전 위치의 자동 실행을 끄지 못했어요. 설치 파일은 그대로 뒀어요."));
                 }
                 let deadline = Instant::now() + Duration::from_secs(10);
                 while Instant::now() < deadline && call(paths, "status.read", json!({})).is_ok() {
                     thread::sleep(Duration::from_millis(200));
                 }
             }
-            _ => return Err(error("SERVICE_ALREADY_LOADED", "이미 등록된 서비스가 있습니다. 활성 세션을 종료한 뒤 기존 서비스를 제거하고 다시 설치하세요.")),
+            _ => return Err(error("SERVICE_ALREADY_LOADED", "이미 등록된 서비스가 있어요. 진행 중인 작업을 끝낸 뒤 기존 서비스를 지우고 다시 설치해 주세요.")),
         }
     }
     match call(paths, "status.read", json!({})) {
@@ -660,7 +660,7 @@ pub fn service_install(paths: &Paths) -> Result<String, ApiError> {
         _ => {
             return Err(error(
                 "UNMANAGED_SERVICE",
-                "LaunchAgent가 아닌 관리 서비스가 이미 실행 중이거나 응답을 검증할 수 없습니다. 직접 실행한 터미널에서 해당 서비스를 종료한 뒤 설치해 주세요.",
+                "자동 실행이 아닌 서비스가 이미 실행 중이거나 응답을 확인하지 못했어요. 직접 켠 터미널에서 끈 뒤 설치해 주세요.",
             ));
         }
     }
@@ -673,7 +673,7 @@ pub fn service_install(paths: &Paths) -> Result<String, ApiError> {
         }) {
             return Err(error(
                 "UNSAFE_LOG_PATH",
-                "로그 경로가 일반 앱 소유 파일이 아닙니다.",
+                "로그 경로가 이 앱의 일반 파일이 아니에요.",
             ));
         }
         OpenOptions::new()
@@ -699,17 +699,17 @@ pub fn service_install(paths: &Paths) -> Result<String, ApiError> {
         domain(),
         plist.to_string_lossy().into_owned(),
     ])? {
-        return Err(error("SERVICE_BOOTSTRAP_FAILED", "사용자 LaunchAgent 등록이 실패했습니다. 설치 기록은 보존했으므로 service status로 확인하거나 다시 설치할 수 있습니다."));
+        return Err(error("SERVICE_BOOTSTRAP_FAILED", "로그인 시 자동 실행 등록에 실패했어요. 설치 기록은 남겼으니 aam service status로 확인하거나 다시 설치해 주세요."));
     }
     let deadline = Instant::now() + Duration::from_secs(15);
     while Instant::now() < deadline {
         if call(paths, "status.read", json!({})).is_ok() {
             call(paths, "service.resumeAdmission", json!({}))?;
-            return Ok("사용자 LaunchAgent를 설치하고 관리 서비스 연결과 신규 배정 재개를 확인했습니다. 앱 창을 닫아도 서비스는 유지됩니다.".into());
+            return Ok("로그인 시 자동 실행을 설치하고, 서비스 연결과 새 배정 재개를 확인했어요. 앱 창을 닫아도 서비스는 유지돼요.".into());
         }
         thread::sleep(Duration::from_millis(200));
     }
-    Err(error("SERVICE_NOT_READY", "LaunchAgent는 등록했지만 관리 서비스 연결을 확인하지 못했습니다. service status와 앱 소유 로그를 확인하세요."))
+    Err(error("SERVICE_NOT_READY", "자동 실행은 등록했지만 서비스 연결을 확인하지 못했어요. aam service status와 앱 로그를 확인해 주세요."))
 }
 
 #[cfg(unix)]
@@ -718,9 +718,9 @@ pub fn service_status(paths: &Paths) -> Result<String, ApiError> {
     let loaded = launchctl(&["print".into(), target()])?;
     let healthy = call(paths, "status.read", json!({})).is_ok();
     Ok(format!(
-        "사용자 LaunchAgent: {}\n관리 서비스 연결: {}",
-        if loaded { "등록됨" } else { "미등록" },
-        if healthy { "정상" } else { "연결 불가" }
+        "로그인 시 자동 실행: {}\n서비스 연결: {}",
+        if loaded { "등록됨" } else { "없음" },
+        if healthy { "정상" } else { "연결 안 됨" }
     ))
 }
 
@@ -742,11 +742,11 @@ fn service_shutdown(paths: &Paths, remove_installation: bool) -> Result<String, 
         if !remove_installation {
             return Err(error(
                 "UNMANAGED_SERVICE",
-                "앱 소유 LaunchAgent 설치 기록이 없어 서비스를 안전하게 중지할 수 없습니다. 직접 실행한 서비스는 해당 터미널에서 종료해 주세요.",
+                "앱이 설치한 자동 실행 기록이 없어 서비스를 안전하게 끌 수 없어요. 직접 켠 서비스는 그 터미널에서 종료해 주세요.",
             ));
         }
         return Ok(
-            "앱 소유 설치 기록이 없습니다. LaunchAgent와 사용자 파일을 변경하지 않았습니다.".into(),
+            "앱 설치 기록이 없어요. 자동 실행과 사용자 파일은 바꾸지 않았어요.".into(),
         );
     };
     let expected = user_home()?
@@ -755,7 +755,7 @@ fn service_shutdown(paths: &Paths, remove_installation: bool) -> Result<String, 
     if record.owner != OWNER || record.plist_path != expected {
         return Err(error(
             "FOREIGN_INSTALL",
-            "앱 소유 LaunchAgent 기록이 아니므로 제거하지 않습니다.",
+            "앱이 설치한 자동 실행 기록이 아니라서 지우지 않아요.",
         ));
     }
     let plist_exists = fs::symlink_metadata(&expected).is_ok();
@@ -768,7 +768,7 @@ fn service_shutdown(paths: &Paths, remove_installation: bool) -> Result<String, 
     {
         return Err(error(
             "LAUNCH_AGENT_MODIFIED",
-            "사용자가 변경한 LaunchAgent를 제거하지 않습니다.",
+            "사용자가 바꾼 자동 실행은 지우지 않아요.",
         ));
     }
     let loaded = launchctl(&["print".into(), target()])?;
@@ -781,7 +781,7 @@ fn service_shutdown(paths: &Paths, remove_installation: bool) -> Result<String, 
         if prepared.get("safe").and_then(|v| v.as_bool()) != Some(true) || permit.is_none() {
             return Err(error(
                 "INVALID_UNINSTALL_PERMIT",
-                "신규 배정 차단과 lease 안전 검사를 확인하지 못해 서비스를 중지하지 않았습니다.",
+                "새 배정 차단과 사용 중 안전 검사를 확인하지 못해 서비스를 끄지 않았어요.",
             ));
         }
         record.uninstall_permit = permit.map(str::to_owned);
@@ -804,30 +804,30 @@ fn service_shutdown(paths: &Paths, remove_installation: bool) -> Result<String, 
                 record.uninstall_permit = None;
                 save(&record_path, &record)?;
             }
-            return Err(error("SERVICE_BOOTOUT_FAILED", "LaunchAgent 중지를 확인하지 못했습니다. 설치 파일은 보존했습니다. 서비스가 배정 중지 상태라면 service install로 명시적으로 재개하세요."));
+            return Err(error("SERVICE_BOOTOUT_FAILED", "자동 실행이 꺼졌는지 확인하지 못했어요. 설치 파일은 그대로 뒀어요. 배정이 멈춰 있으면 aam service install로 다시 열어 주세요."));
         }
         if launchctl(&["print".into(), target()])? {
             return Err(error(
                 "SERVICE_STILL_LOADED",
-                "서비스가 아직 등록되어 있어 설치 파일을 보존했습니다.",
+                "서비스가 아직 등록돼 있어 설치 파일은 그대로 뒀어요.",
             ));
         }
     } else if call(paths, "status.read", json!({})).is_ok() {
         return Err(error(
             "UNMANAGED_SERVICE",
-            "LaunchAgent가 아닌 방식으로 실행 중인 서비스는 이 명령으로 중지하지 않습니다.",
+            "자동 실행이 아닌 방식으로 켜진 서비스는 이 명령으로 끄지 않아요.",
         ));
     } else if paths.database.exists() && record.uninstall_permit.is_none() {
-        return Err(error("LEASE_STATE_UNKNOWN", "서비스가 꺼져 있지만 저장된 lease의 생존 여부를 확인할 수 없습니다. 서비스를 다시 시작하여 안전하게 제거하세요."));
+        return Err(error("LEASE_STATE_UNKNOWN", "서비스는 꺼져 있지만 저장된 사용 중 상태를 확인하지 못해요. 서비스를 다시 켠 뒤 안전하게 지워 주세요."));
     }
     if !remove_installation {
-        return Ok("신규 배정과 활성·불확실 lease의 안전 조건을 확인한 뒤 관리 서비스를 중지했습니다. LaunchAgent 설치 파일과 계정·프로필·로그는 보존했습니다. 서비스 설치·시작으로 다시 연결할 수 있습니다.".into());
+        return Ok("새 배정과 사용 중·불확실 상태의 안전 조건을 확인한 뒤 서비스를 껐어요. 자동 실행 파일과 계정·프로필·로그는 그대로 뒀어요. aam service install로 다시 연결할 수 있어요.".into());
     }
     if plist_exists {
         fs::remove_file(expected).map_err(io_error)?;
     }
     fs::remove_file(record_path).map_err(io_error)?;
-    Ok("신규 배정과 활성·불확실 lease의 안전 조건을 확인한 뒤 앱 소유 LaunchAgent만 제거했습니다. 계정·프로필·로그는 보존했습니다.".into())
+    Ok("새 배정과 사용 중·불확실 상태의 안전 조건을 확인한 뒤, 앱이 설치한 자동 실행만 지웠어요. 계정·프로필·로그는 그대로 뒀어요.".into())
 }
 
 /// 시스템 PATH가 사용자 PATH보다 앞이라 shim을 가릴 때 보여 줄 문장. 도구 이름만 넣는다.

@@ -107,21 +107,21 @@ impl TakeoverRequest {
         if self.tool != "claude" {
             return Err(ApiError::new(
                 "TAKEOVER_UNSUPPORTED",
-                "검증된 대화 인계는 claude만 지원합니다.",
+                "확인된 대화 넘기기는 claude만 지원해요.",
             ));
         }
         let native = self.native_session_id.trim();
         if native.is_empty() || native.len() > 4096 || native.chars().any(char::is_control) {
             return Err(ApiError::new(
                 "INVALID_PARAMS",
-                "인계할 대화 식별자가 올바르지 않습니다.",
+                "넘길 대화 ID가 올바르지 않아요.",
             ));
         }
         Ok(uuid::Uuid::parse_str(native)
             .map_err(|_| {
                 ApiError::new(
                     "TAKEOVER_UNSUPPORTED",
-                    "Claude 대화는 완전한 UUID로만 인계할 수 있습니다.",
+                    "Claude 대화는 완전한 UUID로만 넘길 수 있어요.",
                 )
             })?
             .to_string())
@@ -161,13 +161,13 @@ fn parse<T: serde::de::DeserializeOwned>(value: Value) -> Result<T, ApiError> {
     serde_json::from_value(value).map_err(|_| {
         ApiError::new(
             "INVALID_PARAMS",
-            "요청 필드 또는 자료형이 올바르지 않습니다.",
+            "요청 항목이나 형식이 맞지 않아요.",
         )
     })
 }
 fn value<T: Serialize>(result: T) -> Result<Value, ApiError> {
     serde_json::to_value(result)
-        .map_err(|_| ApiError::new("STATE_INVALID", "응답을 만들 수 없습니다."))
+        .map_err(|_| ApiError::new("STATE_INVALID", "응답을 만들지 못했어요."))
 }
 fn config_ms(name: &str, default: i64, min: i64, max: i64) -> i64 {
     std::env::var(name)
@@ -192,7 +192,7 @@ fn validate_intent(intent: &LaunchIntent) -> Result<(), ApiError> {
     {
         return Err(ApiError::new(
             "INVALID_INTENT",
-            "지원 도구, 명시적인 모델 ID, 절대 프로젝트 경로가 필요합니다.",
+            "지원 도구, 정확한 모델 ID, 절대 프로젝트 경로가 필요해요.",
         ));
     }
     Ok(())
@@ -221,7 +221,7 @@ fn authorize(record: &LeaseRecord, capability: &str) -> Result<(), ApiError> {
     if !matches {
         return Err(ApiError::new(
             "LEASE_FORBIDDEN",
-            "이 세션을 제어할 권한이 없습니다.",
+            "이 대화를 제어할 권한이 없어요.",
         ));
     }
     Ok(())
@@ -234,7 +234,7 @@ fn expire(connection: &rusqlite::Connection, now: i64) -> Result<(), ApiError> {
         if record.session.state == "PREPARED" && now >= record.expires_at {
             record.session.state = "ABORTED".into();
             record.session.reason =
-                Some("시작 전 예약이 만료되었습니다. 새 요청으로 다시 배정하세요.".into());
+                Some("시작 전 예약이 끝났어요. 다시 요청해 주세요.".into());
             record.session.updated_at = now;
             save_lease(connection, &record)?;
         }
@@ -261,7 +261,7 @@ impl Service {
         self.store.lock().map_err(|_| {
             ApiError::new(
                 "SERVICE_UNHEALTHY",
-                "서비스 상태 잠금에 오류가 발생했습니다. 서비스를 다시 시작하세요.",
+                "서비스 상태 잠금에 문제가 생겼어요. 서비스를 다시 시작해 주세요.",
             )
         })
     }
@@ -330,7 +330,7 @@ impl Service {
             .flatten()
             .is_some()
         {
-            notices.push(Notice { id: "admission-disabled".into(), level: "warning".into(), title: "서비스 해제 준비 중".into(), message: "신규 배정을 일시 정지했습니다. 해제를 취소하거나 서비스를 다시 설치하면 재개됩니다.".into() });
+            notices.push(Notice { id: "admission-disabled".into(), level: "warning".into(), title: "서비스 해제 준비 중".into(), message: "새 배정을 잠시 멈췄어요. 해제를 취소하거나 서비스를 다시 설치하면 다시 열려요.".into() });
         }
         // 이미 관리 세션이 생긴 인계 기록은 화면에서 제외합니다.
         let adopted: Vec<Takeover> = takeovers(&store.connection)?
@@ -464,7 +464,7 @@ impl Service {
             "lease.abort" => value(self.finish(parse(params)?, true, now_ms())?),
             _ => Err(ApiError::new(
                 "METHOD_NOT_FOUND",
-                "지원하지 않는 관리 서비스 요청입니다.",
+                "지원하지 않는 요청이에요.",
             )),
         }
     }
@@ -481,7 +481,7 @@ impl Service {
         {
             return Err(ApiError::new(
                 "SESSION_BUSY",
-                "실행 중이거나 시작 결과가 불확실한 세션이 남아 있어 서비스를 해제할 수 없습니다.",
+                "실행 중이거나 시작 결과가 불확실한 대화가 남아 있어 서비스를 해제할 수 없어요.",
             ));
         }
         let permit = metadata::<Option<String>>(&tx, "uninstallPermit")?
@@ -510,7 +510,7 @@ impl Service {
         {
             return Err(ApiError::new(
                 "UNINSTALL_PERMIT_MISMATCH",
-                "서비스 해제 승인과 일치하지 않습니다.",
+                "서비스 해제 확인이 맞지 않아요.",
             ));
         }
         set_metadata(&tx, "uninstallPermit", &Option::<String>::None)?;
@@ -527,7 +527,7 @@ impl Service {
         if current.revision != request.expected_revision {
             return Err(ApiError::new(
                 "POLICY_CONFLICT",
-                "다른 창에서 정책을 변경했습니다. 최신 상태를 읽고 다시 시도하세요.",
+                "다른 창에서 설정을 바꿨어요. 최신 상태를 읽고 다시 시도해 주세요.",
             ));
         }
         if let Some(priority) = request.account_priority {
@@ -536,7 +536,7 @@ impl Service {
                 if !seen.insert(id) {
                     return Err(ApiError::new(
                         "INVALID_PARAMS",
-                        "계정 소비 순서에는 같은 계정을 중복 지정할 수 없습니다.",
+                        "계정 순서에 같은 계정을 두 번 넣을 수 없어요.",
                     ));
                 }
                 account(&tx, id)?;
@@ -550,7 +550,7 @@ impl Service {
             if !reserve.is_finite() || !(0.0..100.0).contains(&reserve) {
                 return Err(ApiError::new(
                     "INVALID_PARAMS",
-                    "안전 잔여량은 0 이상 100 미만이어야 합니다.",
+                    "안전 잔여량은 0 이상 100 미만이어야 해요.",
                 ));
             }
             current.safety_reserve_percent = reserve;
@@ -560,13 +560,13 @@ impl Service {
         }
         if let Some(hours) = request.expiring_window_hours {
             if !(1..=168).contains(&hours) {
-                return Err(ApiError::new("INVALID_PARAMS", "곧 리셋 기준은 1~168시간이어야 합니다."));
+                return Err(ApiError::new("INVALID_PARAMS", "곧 리셋 기준은 1~168시간이어야 해요."));
             }
             current.expiring_window_hours = hours;
         }
         if let Some(percent) = request.expiring_min_percent {
             if !percent.is_finite() || !(1.0..=100.0).contains(&percent) {
-                return Err(ApiError::new("INVALID_PARAMS", "알림 기준 잔여량은 1~100%여야 합니다."));
+                return Err(ApiError::new("INVALID_PARAMS", "알림 기준 잔여량은 1~100%여야 해요."));
             }
             current.expiring_min_percent = percent;
         }
@@ -578,7 +578,7 @@ impl Service {
                 {
                     return Err(ApiError::new(
                         "INVALID_PARAMS",
-                        "수동 배정 계정과 공급자가 일치하지 않습니다.",
+                        "직접 고른 계정과 공급자가 맞지 않아요.",
                     ));
                 }
             }
@@ -588,7 +588,7 @@ impl Service {
             if allowlist.len() > 1024 {
                 return Err(ApiError::new(
                     "INVALID_PARAMS",
-                    "프로젝트 제한은 최대 1,024개 계정에 설정할 수 있습니다.",
+                    "프로젝트 제한은 계정 1,024개까지 설정할 수 있어요.",
                 ));
             }
             let mut canonical = BTreeMap::new();
@@ -633,7 +633,7 @@ impl Service {
             current.auto_takeover = auto;
         }
         current.revision = current.revision.checked_add(1).ok_or_else(|| {
-            ApiError::new("POLICY_CONFLICT", "정책 revision 범위를 초과했습니다.")
+            ApiError::new("POLICY_CONFLICT", "설정 버전 범위를 넘었어요.")
         })?;
         set_metadata(&tx, "policy", &current)?;
         tx.commit().map_err(db_error)?;
@@ -745,7 +745,7 @@ impl Service {
                 ));
             }
             if limit > 1 && !aam_adapters::supports_shared_profile_concurrency(&current) {
-                return Err(ApiError::new("ADAPTER_UNVERIFIED", "이 도구는 공유 native 인증으로 여러 세션을 실행하는 계약이 확인되지 않았습니다."));
+                return Err(ApiError::new("ADAPTER_UNVERIFIED", "이 도구는 같은 로그인으로 여러 대화를 동시에 여는 방식이 확인되지 않았어요."));
             }
             current.max_concurrency = limit;
         }
@@ -849,7 +849,7 @@ impl Service {
                 if changed {
                     current_policy.revision =
                         current_policy.revision.checked_add(1).ok_or_else(|| {
-                            ApiError::new("POLICY_CONFLICT", "정책 revision 범위를 초과했습니다.")
+                            ApiError::new("POLICY_CONFLICT", "설정 버전 범위를 넘었어요.")
                         })?;
                     set_metadata(&tx, "policy", &current_policy)?;
                 }
@@ -969,7 +969,7 @@ impl Service {
                 .and_then(|reason| reason.split_once(':'))
                 .map(|(code, _)| code)
                 .unwrap_or("NO_ELIGIBLE_ACCOUNT");
-            return Err(ApiError::new(code, format!("배정 가능한 계정이 없습니다. aam explain --tool {}로 제외 이유를 확인하세요.", request.intent.tool)));
+            return Err(ApiError::new(code, format!("배정할 수 있는 계정이 없어요. aam explain --tool {}로 제외 이유를 확인해 주세요.", request.intent.tool)));
         };
         let manual = resolution.account_id.is_some();
         let id = new_id();
@@ -1178,7 +1178,7 @@ impl Service {
             .iter()
             .any(|candidate| candidate.account_id == current.id && candidate.eligible)
         {
-            return Err(ApiError::new("ADMISSION_CHANGED", "예약 이후 인증·사용량·동시 슬롯 조건이 달라져 시작을 중지했습니다. 새 배정 설명을 확인하세요."));
+            return Err(ApiError::new("ADMISSION_CHANGED", "예약한 뒤 로그인·한도·동시 사용 조건이 바뀌어 시작을 멈췄어요. 새 배정 설명을 확인해 주세요."));
         }
         if request.evidence.tier != "preflight-verified"
             || current.identity_key.as_deref() != Some(request.evidence.identity_key.as_str())
@@ -1538,7 +1538,7 @@ impl Service {
         policy_changed |= routes != current_policy.project_routes.len();
         if policy_changed {
             current_policy.revision = current_policy.revision.checked_add(1).ok_or_else(|| {
-                ApiError::new("POLICY_CONFLICT", "정책 revision 범위를 초과했습니다.")
+                ApiError::new("POLICY_CONFLICT", "설정 버전 범위를 넘었어요.")
             })?;
             set_metadata(&tx, "policy", &current_policy)?;
         }
