@@ -1,3 +1,5 @@
+mod access;
+pub use access::{native_access, NativeAccess};
 mod native;
 mod observed;
 #[cfg(any(target_os = "macos", windows))]

@@ -4,22 +4,24 @@ version = 4
 
 [[package]]
 name = "aam-adapters"
-version = "0.2.0"
+version = "0.3.0"
 dependencies = [
  "aam-protocol",
+ "base64 0.22.1",
  "libc",
  "serde",
  "serde_json",
  "sha2",
  "time",
  "toml 0.8.23",
+ "unicode-normalization",
  "uuid",
  "windows-sys 0.59.0",
 ]
 
 [[package]]
 name = "aam-launcher"
-version = "0.2.0"
+version = "0.3.0"
 dependencies = [
  "aam-adapters",
  "aam-protocol",
@@ -35,7 +37,7 @@ dependencies = [
 
 [[package]]
 name = "aam-protocol"
-version = "0.2.0"
+version = "0.3.0"
 dependencies = [
  "libc",
  "serde",
@@ -46,7 +48,7 @@ dependencies = [
 
 [[package]]
 name = "aam-service"
-version = "0.2.0"
+version = "0.3.0"
 dependencies = [
  "aam-adapters",
  "aam-protocol",
@@ -88,7 +90,7 @@ dependencies = [
 
 [[package]]
 name = "ai-account-manager"
-version = "0.2.0"
+version = "0.3.0"
 dependencies = [
  "aam-launcher",
  "aam-protocol",
@@ -4885,6 +4887,15 @@ name = "unicode-ident"
 version = "1.0.26"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "d245f478577f809a851594d02313b640fb437e0bb33866753cff937863096954"
+
+[[package]]
+name = "unicode-normalization"
+version = "0.1.25"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "5fd4f6878c9cb28d874b009da9e8d183b5abc80117c40bbd187a1fde336be6e8"
+dependencies = [
+ "tinyvec",
+]
 
 [[package]]
 name = "unicode-segmentation"

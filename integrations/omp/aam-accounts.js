@@ -1,6 +1,6 @@
-// Ojak(오작) — omp `/login`에 Ojak 공급자를 추가한다. (OMP v18.3 ExtensionAPI)
+// Ojak(오작) — omp에 Ojak 공급자를 등록한다. (OMP v18.8 ExtensionAPI)
 //
-// `/login` → "Ojak · Claude" 등을 고르면 Ojak 계정 브릿지 토큰을 로그인 정보로 저장한다.
+// 기존 CLI·omp 로그인이 연결되면 서비스가 Ojak 공급자를 자동 등록한다. /login은 수동 연결 경로다.
 // 모델 목록은 두 겹이다. ① `fetchDynamicModels`가 Ojak 브릿지에서 실제 계정의 모델을 직접 받는다(캐시됨).
 // 원래 공급자의 목록이 늦게 와도 Ojak 모델이 비지 않는다. ② `modifyModels`는 원래 공급자 행이 있으면
 // 그 정보(thinking 단계·비용)로 덮어쓴다. 요청은 pi-native 형식으로 Ojak 브릿지에 보내고, 계정은 Ojak이 고른다.
@@ -90,7 +90,7 @@ export default function aamAccounts(pi) {
       models: [
         {
           id: 'ojak-login-required',
-          name: `${label} (로그인 필요)`,
+          name: `${label} (연결 확인 필요)`,
           reasoning: false,
           input: ['text'],
           cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
@@ -103,7 +103,10 @@ export default function aamAccounts(pi) {
         async login() {
           const token = bridgeToken();
           if ((await connectedAccounts(token, upstream)) === 0) {
-            throw new Error(`Ojak에 연결된 ${label.slice('Ojak · '.length)} 계정이 없어요. omp에서 원래 공급자로 /login하면 최대 1분 뒤에 보여요.`);
+            const existing = upstream === 'anthropic' || upstream === 'openai-codex'
+              ? '기존 CLI에 로그인했다면 Ojak → 연결에서 해당 계정 상태를 확인해 주세요. omp에서 다시 로그인할 필요는 없어요.'
+              : `omp /login ${upstream}에서 원래 공급자에 로그인해 주세요. Ojak에는 별도 로그인이 필요 없어요.`;
+            throw new Error(`Ojak의 ${label.slice('Ojak · '.length)} 계정 연결이 아직 준비되지 않았어요. ${existing}`);
           }
           return credentials(token);
         },

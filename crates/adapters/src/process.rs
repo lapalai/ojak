@@ -438,6 +438,22 @@ impl Probe {
         })
     }
 
+    /// Bounded, silent credential-store query. Never include stdout in errors.
+    #[cfg(target_os = "macos")]
+    pub(crate) fn output_bytes(mut self) -> Result<(std::process::ExitStatus, Vec<u8>), ApiError> {
+        self.child.stdin.take();
+        while self.pump()? {}
+        loop {
+            if let Some(status) = self.child.try_wait().map_err(|_| ApiError::new("PROBE_IO", "인증 저장소 조회가 종료됐는지 확인하지 못했어요."))? {
+                return Ok((status, std::mem::take(&mut self.buffer)));
+            }
+            if Instant::now() >= self.deadline {
+                return Err(ApiError::new("PROBE_TIMEOUT", "인증 저장소 조회 시간이 초과됐어요."));
+            }
+            thread::sleep(Duration::from_millis(10));
+        }
+    }
+
     fn version(mut self) -> Result<String, ApiError> {
         self.child.stdin.take();
         while self.pump()? {}

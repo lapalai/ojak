@@ -43,6 +43,8 @@ export interface SettingsPreview {
 }
 export const settingsPreview = (tool: string) => native<SettingsPreview>("settings_preview", { tool });
 export const loginAccount = (tool: string, label: string, settingsDigest?: string | null, accountId?: string) => native<{ opened: boolean }>("login_account", { tool, label, settingsDigest, accountId });
+/// macOS는 입력줄에 `claude`/`codex`만 적힌 Terminal을 연다(실행은 사용자가 Enter를 칠 때). 채울 수 없는 환경은 `{ opened: false, prefilled: false }`이고 아무것도 열지 않는다.
+export const openPrefilledTerminal = (tool: "claude" | "codex") => native<{ opened: boolean; prefilled: boolean }>("open_prefilled_terminal", { tool });
 export const stopService = () => native<string>("stop_service");
 export const exportDiagnostics = (range: { from?: number; to?: number } = {}) => native<{ saved: boolean; cancelled: boolean }>("export_diagnostics", range);
 export interface OmpBrokerStatus {

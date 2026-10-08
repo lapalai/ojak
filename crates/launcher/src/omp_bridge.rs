@@ -84,8 +84,8 @@ const RENAMED: [(&str, &str); 5] = [
     ("aam-grok", "ojak-grok"),
     ("aam-zai", "ojak-zai"),
 ];
-/// omp에 원래 공급자 계정이 하나도 없을 때. gateway가 생기지 않으므로 기다리지 않는다.
-const NO_OMP_ACCOUNT: &str = "omp에 로그인된 계정이 없어요. omp에서 /login으로 Claude·Codex 등 계정을 먼저 추가해 주세요.";
+/// Neither the broker nor a registered native CLI has a usable login.
+const NO_OMP_ACCOUNT: &str = "사용할 수 있는 로그인이 없어요. Ojak에 Claude·Codex 계정을 연결하거나 omp /login에서 원래 공급자에 한 번 로그인해 주세요.";
 /// Ojak 공급자와 원래 공급자. 연결을 해제하면 역할 모델을 원래 공급자로 되돌린다. `service/src/bridge.rs` ALIASES와 같은 표다.
 const UPSTREAM: [(&str, &str); 5] = [
     ("ojak-claude", "anthropic"),
@@ -251,6 +251,17 @@ pub(crate) fn has_upstream_account(providers: &[String]) -> bool {
     UPSTREAM.iter().any(|(_, upstream)| providers.iter().any(|item| item == upstream))
 }
 
+pub(crate) fn has_native_account(snapshot: &Value) -> bool {
+    snapshot.get("accounts").and_then(Value::as_array).is_some_and(|accounts|
+        accounts.iter().any(|account| {
+            matches!(account["tool"].as_str(), Some("claude" | "codex"))
+                && account["enabled"] == true
+                && account["authStatus"] == "authenticated"
+                && account["profilePath"].is_string()
+                && account["identityKey"].is_string()
+        }))
+}
+
 
 fn extension_error(error: Box<dyn std::error::Error>) -> ApiError {
     ApiError::new("EXTENSION_FAILED", error.to_string())
@@ -275,13 +286,13 @@ pub fn status(paths: &Paths) -> Result<Status, ApiError> {
 }
 
 pub fn connect(paths: &Paths) -> Result<Status, ApiError> {
-    call(paths, "status.read", json!({}))?;
+    let snapshot = call(paths, "status.read", json!({}))?;
     if !omp_broker::status(paths)?.connected {
-        return Err(error("BROKER_REQUIRED", "이 연결은 omp 로그인 연결의 계정을 써요. 먼저 `aam omp-broker connect`를 실행해 주세요."));
+        return Err(error("BROKER_REQUIRED", "omp에 Ojak 모델을 등록하려면 로그인 연결 서비스가 필요해요. 먼저 `aam omp-broker connect`를 실행해 주세요. 계정에 다시 로그인할 필요는 없어요."));
     }
     write_settings(paths, true)?;
     // 계정이 없으면 gateway가 생기지 않는다. 30초를 기다리지 않고 다음 행동을 알려 준다.
-    if omp_broker::logged_in_providers().is_ok_and(|providers| !has_upstream_account(&providers)) {
+    if !has_native_account(&snapshot) && omp_broker::logged_in_providers().is_ok_and(|providers| !has_upstream_account(&providers)) {
         return Err(error("BRIDGE_NOT_READY", NO_OMP_ACCOUNT));
     }
     // 계정은 있는데 gateway가 아직 뜨는 중이면 기존처럼 기다린다. 오래 걸리면 진행을 보여 준다.

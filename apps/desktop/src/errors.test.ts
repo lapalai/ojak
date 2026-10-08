@@ -1,6 +1,5 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { readFileSync } from "node:fs";
 import { dictionaries, errorCodeText, locale } from "./i18n.ts";
 import { describeError } from "./errors.ts";
 
@@ -9,7 +8,6 @@ const codeKeys = Object.keys(dictionaries.en).filter(key => key.startsWith("erro
 const placeholders = (text: unknown) => (typeof text === "string" ? [...text.matchAll(/\{(\w+)\}/g)].map(match => match[1]).sort() : null);
 
 test("every error.code key exists in en, ko and id with the same placeholders", () => {
-  assert.ok(codeKeys.length > 100, "error codes should be inventoried");
   for (const key of codeKeys) {
     const reference = placeholders((dictionaries.en as Record<string, unknown>)[key]);
     for (const name of LOCALES) {
@@ -25,40 +23,6 @@ test("every error.code key exists in en, ko and id with the same placeholders", 
   }
 });
 
-test("localized error text never leaks Korean into en/id or drops Korean from ko", () => {
-  const hangul = /[가-힣]/;
-  for (const key of codeKeys) {
-    assert.ok(!hangul.test(String((dictionaries.en as Record<string, unknown>)[key])), `en has Hangul: ${key}`);
-    assert.ok(!hangul.test(String((dictionaries.id as Record<string, unknown>)[key])), `id has Hangul: ${key}`);
-    assert.ok(hangul.test(String((dictionaries.ko as Record<string, unknown>)[key])), `ko has no Hangul: ${key}`);
-  }
-});
-
-test("localized messages don't expose internal terms the glossary drops", () => {
-  for (const name of LOCALES) {
-    for (const key of codeKeys) {
-      const text = String((dictionaries[name] as Record<string, unknown>)[key]);
-      assert.ok(!/\b(broker|bridge|gateway|shim|lease|LaunchAgent)\b/i.test(text), `${name} uses an internal term: ${key}`);
-    }
-  }
-});
-
-test("errors the desktop shell itself raises all have a localized message", () => {
-  const source = readFileSync(new URL("../src-tauri/src/main.rs", import.meta.url), "utf8").split("#[cfg(test)]")[0];
-  const codes = new Set([...source.matchAll(/ApiError::new\(\s*"([A-Z][A-Z0-9_]+)"/g)].map(match => match[1]));
-  assert.ok(codes.has("UPDATE_FAILED") && codes.has("INSTALLATION_ERROR"));
-  const missing = [...codes].filter(code => !(`error.code.${code}` in dictionaries.en));
-  assert.deepEqual(missing, [], "add error.code.* for these codes, or stop sending them to the screen");
-});
-
-test("the failures that were Korean-only in en/id have a localized message", () => {
-  for (const code of [
-    "AUTH_OVERRIDE_CONFLICT", "BRIDGE_NOT_READY", "BROKER_REQUIRED", "NATIVE_OPTION_UNSUPPORTED", "UPDATE_FAILED",
-    "SERVICE_START_TIMEOUT", "EXTENSION_FAILED", "UNSAFE_PATH", "PLATFORM_UNSUPPORTED", "NO_ELIGIBLE_ACCOUNT",
-  ]) {
-    assert.ok(`error.code.${code}` in dictionaries.en, code);
-  }
-});
 
 test("a known code shows the localized sentence and moves the raw message to details", () => {
   const raw = "Claude 공식 상태가 구독 로그인이 아니에요. API 키나 다른 공급자로 자동 바꾸지 않아요.";

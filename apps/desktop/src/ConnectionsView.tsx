@@ -16,15 +16,16 @@ const ojakLoginId: Record<string, string> = {
   "xai-oauth": "ojak-grok",
   zai: "ojak-zai",
 };
-function providerStatus(upstream: string, providers: string[], gateways: { provider: string }[]): string {
+function providerStatus(upstream: string, providers: string[], gateways: { provider: string; running: boolean }[]): string {
   const name = providerNames[canonicalProvider(upstream)];
-  if (providers.includes(ojakLoginId[upstream])) return t("omp.provider.loggedIn", { name });
-  const hasAccount = providers.includes(upstream) || gateways.some(gateway => gateway.provider === upstream);
+  const running = gateways.some(gateway => gateway.provider === upstream && gateway.running);
+  if (running && providers.includes(ojakLoginId[upstream])) return t("omp.provider.loggedIn", { name });
+  const hasAccount = providers.includes(upstream) || running;
   return hasAccount ? t("omp.provider.syncing", { name }) : t("omp.provider.noAccount", { name, upstream });
 }
 
 
-function OmpPanel({ masked }: { masked: boolean }) {
+function OmpPanel({ masked, accounts }: { masked: boolean; accounts: Account[] }) {
   const [broker, setBroker] = useState<OmpBrokerStatus | null>(null);
   const [bridge, setBridge] = useState<OmpBridgeStatus | null>(null);
   const [statusError, setStatusError] = useState<ApiError | null>(null);
@@ -38,7 +39,12 @@ function OmpPanel({ masked }: { masked: boolean }) {
     void refresh().catch(error => { if (active) setStatusError(toApiError(error)); });
     return () => { active = false; };
   }, []);
-  const storeReady = Boolean(broker?.connected && (broker.accountCount ?? 0) > 0);
+  const nativeProviders = accounts.filter(account =>
+    (account.tool === "claude" || account.tool === "codex") && account.enabled
+    && account.authStatus === "authenticated" && account.identityKey && account.profilePath
+  ).map(account => account.tool === "claude" ? "anthropic" : "openai-codex");
+  const availableProviders = [...(broker?.providers ?? []), ...nativeProviders];
+  const storeReady = Boolean(broker?.connected && bridgeProviderOrder.some(provider => availableProviders.includes(provider)));
   const loginReady = Boolean(bridge?.connected && bridge.extensionInstalled);
   const gateways = bridge?.bridge?.gateways ?? [];
   const running = gateways.filter(gateway => gateway.running).length;
@@ -66,11 +72,11 @@ function OmpPanel({ masked }: { masked: boolean }) {
   return <div className="panel">
     <header><Dot color="var(--accent)" /><h2>omp</h2><Badge tone={connected ? "good" : partial ? "warning" : "neutral"}>{connected ? t("status.connected") : partial ? t("status.partial") : broker === null && !statusError ? t("common.checking") : t("status.disconnected")}</Badge></header>
     <div className="steps">
-      <div className="step"><div className="t"><Badge tone={storeReady ? "good" : "neutral"}>{storeReady ? t("step.done") : t("step.required")}</Badge>{t("omp.store")}</div><p>{storeReady ? <>{t("omp.store.readyBefore", { count: broker?.accountCount ?? 0 })}<code>/login</code>{t("omp.store.readyAfter")}</> : broker?.connected ? t("omp.store.noAccounts") : t("omp.store.notConnected")}</p></div>
-      <div className="step"><div className="t"><Badge tone={loginReady ? "good" : "neutral"}>{loginReady ? t("step.done") : t("step.required")}</Badge>{t("omp.login")}</div><p>{loginReady ? <>{t("omp.login.readyBefore")}<code>/model</code>{t("omp.login.readyAfter")}{ojakLogins > 0 ? t("omp.login.count", { count: ojakLogins }) : t("omp.login.none")}</> : t("omp.login.notReady")}</p>{loginReady && broker && <ul className="field-help">{bridgeProviderOrder.map(upstream => <li key={upstream}>{providerStatus(upstream, broker.providers ?? [], gateways)}</li>)}</ul>}</div>
+      <div className="step"><div className="t"><Badge tone={storeReady ? "good" : "neutral"}>{storeReady ? t("step.done") : t("step.required")}</Badge>{t("omp.store")}</div><p>{storeReady ? <>{t("omp.store.readyBefore")}<code>/login</code>{t("omp.store.readyAfter")}</> : broker?.connected ? t("omp.store.noAccounts") : t("omp.store.notConnected")}</p></div>
+      <div className="step"><div className="t"><Badge tone={loginReady ? "good" : "neutral"}>{loginReady ? t("step.done") : t("step.required")}</Badge>{t("omp.login")}</div><p>{loginReady ? <>{t("omp.login.readyBefore")}<code>/model</code>{t("omp.login.readyAfter")}{ojakLogins > 0 ? t("omp.login.count", { count: ojakLogins }) : t("omp.login.none")}</> : t("omp.login.notReady")}</p>{loginReady && broker && <ul className="field-help">{bridgeProviderOrder.map(upstream => <li key={upstream}>{providerStatus(upstream, availableProviders, gateways)}</li>)}</ul>}</div>
       <div className="step"><div className="t"><Badge tone={running > 0 ? "good" : "neutral"}>{running > 0 ? t("step.done") : t("step.waiting")}</Badge>{t("omp.gateways", { count: gateways.length })}</div><p>{gateways.length ? <>{counts.map(([name, count]) => `${name} ${count}`).join(", ")}. {running === gateways.length ? t("omp.gateways.allRunning") : t("omp.gateways.stopped", { count: gateways.length - running })}</> : t("omp.gateways.pending")}</p></div>
     </div>
-    {bridge?.bridge?.error && <p className="gate-reason">{privacyText(bridge.bridge.error, masked)}</p>}
+    {bridge?.bridge?.error && <p className="gate-reason" role="alert">{privacyText(bridge.bridge.error, masked)}</p>}
     {bridge?.bridge?.blocks.length ? <p className="gate-reason">{t("omp.blocked", { list: bridge.bridge.blocks.map(block => t("omp.blockEntry", { who: masked ? t("privacy.accountHidden") : block.email, scope: block.scope ? ` ${block.scope}` : "", reason: block.reason, until: absoluteTime(block.until) })).join(", ") })}</p> : null}
     <div className="row-actions"><span className="hint">{t("omp.hint")}</span><button type="button" className="button" disabled={action.pending} onClick={() => { void action.run(refresh, () => t("omp.refreshed")); }}><RefreshCw size={13} />{t("omp.recheck")}</button>{connected || (storeReady && loginReady) ? <><button type="button" className="button" disabled={action.pending} onClick={resync}>{t("omp.resync")}</button><button type="button" className="button" disabled={action.pending} onClick={disconnect}>{t("common.disconnect")}</button></> : <button type="button" className="button primary" disabled={action.pending || broker === null} onClick={connect}>{action.pending ? <Busy label={t("common.connecting")} /> : t("common.connect")}</button>}</div>
     <ActionFeedback error={action.error || statusError} message={action.message} />
@@ -169,7 +175,7 @@ export function ConnectionsView({ snapshot, masked, online, refreshing, onRefres
   };
   return <section className="view" aria-labelledby="connect-title">
     <div className="top"><div><h1 id="connect-title">{t("nav.connect")}</h1><div className="sub">{t("connect.subtitle")}</div></div></div>
-    <OmpPanel masked={masked} />
+    <OmpPanel masked={masked} accounts={snapshot.accounts} />
     <ToolPanel tool="claude" snapshot={snapshot} masked={masked} online={online} shimInstalled={shim("claude")} onAdd={onAdd} />
     <ToolPanel tool="codex" snapshot={snapshot} masked={masked} online={online} shimInstalled={shim("codex")} onAdd={onAdd} />
     <HostsPanel connections={connections} loadError={loadError} masked={masked} online={online} onIntegration={onIntegration} onRefresh={loadHosts} />

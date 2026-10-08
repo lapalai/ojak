@@ -58,9 +58,9 @@ omp 연동은 선택 기능입니다. 브릿지를 연결하고 `ojak-*` 공급�
 
 1. **시작하기**를 누릅니다. 백그라운드 서비스와 터미널 명령 연결이 한 번에 설정됩니다.
 2. 이 컴퓨터에서 이미 Claude Code나 Codex에 로그인해 두었다면 그 계정을 자동으로 찾습니다. 없으면 **로그인** 버튼으로 공식 로그인을 진행하세요.
-3. **준비 완료**가 뜨면 새 터미널 창을 열고 `claude` 또는 `codex`를 입력합니다. 이제 Ojak이 알맞은 계정을 골라 실행합니다.
+3. **준비 완료**가 뜨면 **터미널 열기**를 누릅니다(Mac). 입력줄에 `claude`(또는 `codex`)가 적힌 터미널이 열리니 Enter만 누르면 됩니다. Windows는 명령을 복사해 새 터미널에 붙여 넣으세요. 이제 Ojak이 알맞은 계정을 골라 실행합니다.
 
-계정을 더 추가하려면 **연결 → 계정 추가**를 누르세요. 어떤 계정이 쓰였는지는 **세션** 화면에서 볼 수 있습니다.
+계정을 더 추가하려면 **연결 → 계정 추가**를 누르세요. 창을 닫아도 **사용 현황** 맨 위의 **시작하기** 카드가 남은 단계를 보여 줍니다. 네 단계가 끝나면 한 줄로 접히고, 사이드바의 **Ojak 시작하기**로 언제든 다시 열 수 있습니다.
 
 <details><summary>고급: 터미널 한 줄 설치 (Mac)</summary>
 
@@ -83,7 +83,13 @@ curl -fsSL https://raw.githubusercontent.com/lapalai/ojak/main/install.sh | sh
 
 ## 사용
 
-- 터미널에서 평소처럼 `claude`·`codex`를 입력하면 됩니다. 한 번 시작한 대화는 끝날 때까지 같은 계정을 씁니다.
+1. **설치하고 엽니다.** 위 [설치](#설치)를 마치고 Ojak을 엽니다. **시작하기**가 서비스와 터미널 연결을 설정합니다.
+2. **계정을 연결합니다.** 이미 로그인해 둔 계정은 자동으로 찾습니다. 없으면 **시작하기** 카드나 **연결**에서 **Claude 로그인**·**Codex 로그인**을 누르세요.
+3. **터미널에서 평소처럼 `claude`·`codex`를 입력합니다.** 한 번 시작한 대화는 끝날 때까지 같은 계정을 씁니다. Ojak이 한도가 남은 계정을 골라 줍니다.
+4. **어느 계정이 쓰였는지 확인합니다.** **세션** 화면에서 볼 수 있고, 처음 시작하면 사용 현황 맨 위에 한 번 알려 줍니다.
+
+더 알아 두면 좋은 것:
+
 - 한도를 다 쓴 대화는 종료할 때 다른 계정에서 이어 열지 물어봅니다. 나중에 `aam continue`로도 이어 갈 수 있습니다.
 - `~/.claude`·`~/.codex`의 스킬·플러그인·지침은 모든 계정에서 함께 쓰입니다.
 - omp 브릿지는 선택입니다. 연결하지 않아도 사용량 화면과 CLI 실행은 동작합니다.
@@ -92,7 +98,7 @@ curl -fsSL https://raw.githubusercontent.com/lapalai/ojak/main/install.sh | sh
 aam omp-broker connect && aam omp-bridge connect
 ```
 
-연결하면 실행 중인 omp 계정의 Ojak 공급자(`ojak-*`)가 자동으로 로그인됩니다. 새 omp 세션에서 `/model`로 `ojak-*` 모델을 고르세요. omp에서 계정을 나중에 추가해도 약 1분 안에 맞춰집니다.
+연결하면 기존 로그인에 맞는 Ojak 공급자(`ojak-*`)가 자동으로 등록됩니다. Claude·Codex는 Ojak에 연결한 공식 CLI 계정 **또는** omp의 원래 공급자 로그인 중 하나만 있으면 됩니다. Gemini(Antigravity)·Grok·Z.AI는 omp에서 원래 공급자에 한 번 로그인합니다. 새 omp 세션에서 `/model`로 `ojak-*` 모델을 고르세요. 계정을 나중에 추가해도 약 1분 안에 맞춰집니다. Claude는 원래 키체인·인증 파일, Codex는 파일 기반 인증 프로필을 사용하며, 인증 갱신은 공식 CLI가 맡습니다. 다른 Codex 인증 저장소를 파일로 자동 변경하지 않습니다.
 
 브릿지는 구독 자격 증명을 로컬 프록시로 통과시킵니다. 공급자 약관과 충돌할 수 있습니다. 아래 [고지](#고지)를 읽으세요.
 
@@ -226,6 +232,8 @@ node scripts/bump-version.mjs 0.2.0
 
 언제·어떤 버전을 내는지, 태그 전 확인 목록과 되돌리기는 [docs/release-policy.md](docs/release-policy.md)를, 변경 내용은 [CHANGELOG.md](CHANGELOG.md)를 따릅니다.
 
+태그를 푸시하면 서명된 **비공개 draft**만 만들어집니다. Mac·Windows 검증 후 Admin이 같은 산출물을 공개합니다. 0.3.0은 기존 앱의 고정된 공개 endpoint 때문에 서명 설치 파일로 먼저 검증하고, 공개 후 앱 안 업데이트를 별도로 확인합니다.
+
 ## 저장소 이름
 
 저장소는 `lapalai/ojak`입니다. 이름을 바꾸면 아래를 함께 고칩니다.
@@ -329,9 +337,9 @@ The **Get started with Ojak** screen appears. Finish it and you're set. No termi
 
 1. Press **Start**. The background service and terminal commands are set up in one step.
 2. If you already signed in to Claude Code or Codex on this computer, Ojak finds that account. Otherwise use **Sign in** for the official login.
-3. When **You're all set** appears, open a new terminal and type `claude` or `codex`. Ojak now picks the right account.
+3. When **You're all set** appears, press **Open terminal** (Mac). A terminal opens with `claude` (or `codex`) already typed on the prompt; just press Enter. On Windows, copy the command and paste it into a new terminal. Ojak now picks the right account.
 
-Add more accounts under **Connections → Add account**. The **Sessions** view shows which account was used.
+Add more accounts under **Connections → Add account**. If you close the window early, the **Getting started** card at the top of **Usage now** keeps showing what's left. It folds to one line when all four steps are done, and **Get started with Ojak** in the sidebar reopens it any time. The **Sessions** view shows which account was used.
 
 <details><summary>Advanced: one-line terminal install (Mac)</summary>
 
@@ -354,7 +362,13 @@ The build is not notarized and is ad-hoc signed, so macOS may ask again for perm
 
 ## Usage
 
-- Type `claude` or `codex` in a terminal as usual. A conversation keeps the same account until it ends.
+1. **Install and open.** Finish [Install](#install) above and open Ojak. **Get started** sets up the service and terminal commands.
+2. **Connect accounts.** Accounts you already signed in to are found automatically. Otherwise use **Sign in to Claude** or **Sign in to Codex** on the **Getting started** card or in **Connections**.
+3. **Type `claude` or `codex` in a terminal as usual.** A conversation keeps the same account until it ends. Ojak picks an account that still has limit left.
+4. **Check which account was used.** The **Sessions** view shows it, and the first time you start, a note at the top of Usage tells you once.
+
+Good to know:
+
 - When a conversation runs out of limit, Ojak offers to continue it on another account as you exit. `aam continue` does the same later.
 - Skills, plugins and instructions in `~/.claude` and `~/.codex` are shared by every account.
 - The omp bridge is optional. Usage and CLI launches work without it.
@@ -363,7 +377,7 @@ The build is not notarized and is ad-hoc signed, so macOS may ask again for perm
 aam omp-broker connect && aam omp-bridge connect
 ```
 
-Connecting logs in an Ojak provider (`ojak-*`) automatically for each running omp account. Open a new omp session and pick an `ojak-*` model with `/model`. An account added later in omp is picked up within about a minute.
+Connecting automatically registers the Ojak providers (`ojak-*`) for existing logins. Claude and Codex can use either an official CLI profile registered in Ojak **or** the original provider login in omp; signing in twice is not required. Gemini (Antigravity), Grok, and Z.AI use their original provider login in omp. Open a new omp session and pick an `ojak-*` model with `/model`. Later account additions are picked up within about a minute. Claude uses its original keychain or credential file, and Codex uses file-backed auth profiles. Official CLIs own renewal; Ojak never changes another Codex storage backend to file storage.
 
 The bridge passes subscription credentials through a local proxy and may conflict with provider terms. Read the [Disclaimer](#disclaimer).
 
@@ -496,6 +510,8 @@ node scripts/bump-version.mjs 0.2.0
 Values that are not `x.y.z` are refused. The git tag must be `v` plus that version.
 
 When to release, which version to bump, the pre-tag checklist and rollback rules are in [docs/release-policy.md](docs/release-policy.md) (Korean). Changes go in [CHANGELOG.md](CHANGELOG.md).
+
+A tag push creates only a **private draft** with signed artifacts. An Admin publishes those same artifacts after Mac and Windows verification. For 0.3.0, the previous app's fixed public endpoint requires verifying the signed installer first; in-app updating is checked separately after publication.
 
 ## Repository name
 

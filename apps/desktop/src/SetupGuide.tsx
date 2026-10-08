@@ -3,6 +3,8 @@ import { CheckCircle2, Circle, Loader2 } from "lucide-react";
 import { ompBridgeAction, serviceRestart, serviceVersionStatus, setupCheck, setupInstall, setupStatus, toApiError } from "./api";
 import type { ServiceVersionReport, SetupStatus } from "./api";
 import { ActionFeedback, Modal } from "./components";
+import { codeText, OpenTerminal } from "./OnboardingCard";
+import { preferredTool } from "./onboarding";
 import { useAction } from "./state";
 import type { ApiError, Snapshot } from "./types";
 import { setupNotice, t } from "./i18n";
@@ -79,7 +81,7 @@ const SKIP_KEY = "ojak.setupSkipped";
 
 /// 첫 실행 준비 화면. 서비스·명령 연결·터미널 PATH를 한 번의 동의로 설치하고, 계정을 확인한 뒤 끝을 알린다.
 /// 준비가 끝났거나 사용자가 [나중에]를 누르면 띄우지 않는다. [나중에]는 앱을 다시 켤 때까지만 유지한다.
-export function SetupGuide({ snapshot, onAdd, onReload, request = 0, suspended = false, masked = true }: { snapshot: Snapshot | null; onAdd: (tool: string) => void; onReload: () => Promise<void>; request?: number; suspended?: boolean; masked?: boolean }) {
+export function SetupGuide({ snapshot, onAdd, onReload, onChanged, request = 0, suspended = false, masked = true }: { snapshot: Snapshot | null; onAdd: (tool: string) => void; onReload: () => Promise<void>; onChanged?: () => void; request?: number; suspended?: boolean; masked?: boolean }) {
   const [status, setStatus] = useState<SetupStatus | null>(null);
   const [open, setOpen] = useState(false);
   const [checkError, setCheckError] = useState<ApiError | null>(null);
@@ -121,6 +123,7 @@ export function SetupGuide({ snapshot, onAdd, onReload, request = 0, suspended =
       setStatus(next);
       setCheckError(null);
       await onReload();
+      onChanged?.();
     });
   };
   const run = () => {
@@ -129,6 +132,7 @@ export function SetupGuide({ snapshot, onAdd, onReload, request = 0, suspended =
       setStatus(next);
       setCheckError(null);
       await onReload();
+      onChanged?.();
     });
   };
   if (!status) return <Modal title={t("setup.title")} onClose={skip} busy={action.pending}>
@@ -140,19 +144,22 @@ export function SetupGuide({ snapshot, onAdd, onReload, request = 0, suspended =
   const notices = status.notices ?? [];
   const forStep = (step: string) => notices.filter(notice => notice.step === step);
   const steps = [
-    { id: "service", label: t("setup.stepService"), done: status.service && forStep("service").length === 0 },
-    { id: "terminal", label: t("setup.stepTerminal"), done: hasAccount && status.shell && status.tools.every(tool => !tool.account || (tool.connected && tool.verified !== false)) && forStep("terminal").length === 0 },
-    { id: "account", label: t("setup.stepAccount"), done: hasAccount && forStep("account").length === 0 },
+    { id: "service", label: t("setup.stepService"), why: t("setup.whyService"), done: status.service && forStep("service").length === 0 },
+    { id: "terminal", label: t("setup.stepTerminal"), why: t("setup.whyTerminal"), done: hasAccount && status.shell && status.tools.every(tool => !tool.account || (tool.connected && tool.verified !== false)) && forStep("terminal").length === 0 },
+    { id: "account", label: t("setup.stepAccount"), why: t("setup.whyAccount"), done: hasAccount && forStep("account").length === 0 },
   ];
   // omp는 선택 기능이다. 연결이 실패해도 Claude·Codex 준비는 완료로 보고, omp에는 경고와 이유를 따로 보여 준다.
   const ompAttempted = status.ompSupported && status.ompDetected && withOmp && Boolean(status.omp);
   const ompFailed = ompAttempted && Boolean(status.omp?.error);
   const ready = status.ready && (!ompAttempted || ompFailed || Boolean(status.omp?.broker && status.omp.bridge && status.omp.observer));
 
-  return <Modal title={ready ? t("setup.doneTitle") : t("setup.title")} subtitle={ready ? undefined : t("setup.subtitle")} onClose={skip} busy={action.pending}>
+  const startTool = preferredTool(accounts) ?? preferredTool(status.tools.filter(tool => tool.account).map(tool => ({ tool: tool.tool, enabled: true, canLaunch: true })));
+  return <Modal title={ready ? t("setup.doneTitle") : t("setup.title")} onClose={skip} busy={action.pending}>
+    {!ready && <p className="setup-value">{codeText(t("setup.value"))}</p>}
     <ol className="setup-steps">
       {steps.map(step => <li key={step.id} className={step.done ? "done" : undefined}>
         <div className="setup-step-row">{step.done ? <CheckCircle2 size={18} /> : action.pending ? <Loader2 size={18} className="spinner" /> : <Circle size={18} />}<span>{step.label}</span></div>
+        <p className="field-help setup-why">{codeText(step.why)}</p>
         {!step.done && forStep(step.id).map(notice => <p key={`${notice.code}:${notice.tool ?? ""}`} className="field-help warning-text setup-next">{setupNotice(notice)}</p>)}
       </li>)}
     </ol>
@@ -168,7 +175,7 @@ export function SetupGuide({ snapshot, onAdd, onReload, request = 0, suspended =
         {status.omp && <p className={status.omp.error ? "warning-text" : undefined}>omp · {t(status.omp.broker && status.omp.bridge && status.omp.observer ? "setup.ompConfigured" : status.omp.error ? "setup.ompFailed" : "setup.notConnected")}{status.omp.error && <> · {status.omp.error}</>}</p>}
       </>}
       {status.ompDetected && !status.ompSupported && <p className="field-help">{t("setup.ompUnsupported")}</p>}
-      {ready && <><p>{t("setup.doneBody")}</p><pre className="setup-command">{status.tools.filter(tool => tool.account).map(tool => tool.tool).join("\n")}</pre><p className="field-help">{t("setup.doneHelp")}</p></>}
+      {ready && <>{startTool && <OpenTerminal tool={startTool} />}<p className="field-help">{t("setup.doneHelp")}</p></>}
     </div>
     {!ready && (installed && !hasAccount ? <div className="setup-body">
       <p>{t("setup.noAccount")}</p>

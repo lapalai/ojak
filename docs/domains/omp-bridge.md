@@ -1,11 +1,15 @@
 # omp-bridge
 
 ## 개요
-omp `/login`의 `Ojak · …` 공급자(`ojak-claude` 등)를 고르면 요청이 `127.0.0.1:4020` 브릿지로 오고, 브릿지가 세션마다 계정을 골라 계정별 omp gateway(4101–4199)로 넘긴다. gateway는 OMP auth broker(:8765)에서 그 계정 하나만 본다. 설계 문서: `docs/specs/2026-09-26-aam-account-bridge.md`.
+omp의 `ojak-*` 모델 요청은 `127.0.0.1:4020` 브릿지로 오고, 브릿지가 세션마다 계정을 골라 계정별 omp gateway(4101–4199)로 넘긴다. gateway는 원래 omp auth broker(:8765) 또는 공식 CLI의 access-only 인증 소스에서 해당 계정 하나만 본다. 설계 문서: `docs/specs/2026-09-26-aam-account-bridge.md`.
+
+Claude·Codex는 Ojak에 등록된 기존 공식 CLI 로그인과 omp의 원래 공급자 로그인 중 하나만 있으면 된다. 같은 공급자·계정·워크스페이스가 양쪽에 있으면 broker를 우선해 중복 gateway를 만들지 않는다. Gemini(Antigravity)·Grok·Z.AI는 omp의 원래 공급자 로그인을 쓴다. 사용자는 원래 로그인 한 번만 하고, Ojak은 `ojak-*` 등록과 계정 배정을 자동 처리한다. 인증이 실제로 폐기됐을 때만 그 인증을 소유한 공식 CLI 또는 omp 공급자에서 다시 로그인한다.
 
 ## 구성
 - 서비스 쪽: `crates/service/src/bridge.rs` — `Bridge::start`(`:370`), `handle`(`:565`), `stream`(`:636`), `choose`(`:205`), `spawn_gateway`(`:934`)
 - launcher 쪽: `crates/launcher/src/omp_bridge.rs`(`aam omp-bridge`), `omp_broker.rs`(`aam omp-broker`); Windows 로그인 자동 실행과 감독은 `omp_broker_windows.rs`.
+- 공식 CLI 인증: `crates/adapters/src/access*.rs`, `crates/service/src/bridge_native.rs`. Claude는 프로필별 macOS 키체인(항목이 없을 때만 `.credentials.json`) 또는 Windows 인증 파일, Codex는 파일 기반 `auth.json`을 읽는다. Codex의 다른 저장소 모드는 오래된 파일로 대체하지 않고 명시적으로 거절한다. 프로필·워크스페이스는 읽기 전후 공식 CLI로 확인한다.
+- 갱신 소유권: Claude의 공식 `/usage` 무추론 명령, Codex app-server의 `account/read {refreshToken:true}`가 원래 저장소와 잠금 규칙으로 갱신한다. Ojak은 refresh token을 복사·저장·재발급하지 않으며 access token과 실제 만료 시각만 메모리에서 중개한다.
 - omp 확장: `integrations/omp/aam-accounts.js` (설치 위치 `${PI_CODING_AGENT_DIR:-~/.omp/agent}/extensions/aam-accounts`)
 - 모델 목록(`aam-accounts.js`, 테스트 `node --test integrations/omp/aam-accounts.test.mjs`): ① `fetchDynamicModels`가 브릿지 `GET /v1/models`에서 해당 원래 공급자(`owned_by`) 행만 받아 `provider/` 접두어를 떼고 Ojak 공급자 목록으로 쓴다. omp가 `models.db`에 24시간 캐시하므로 다음 실행부터 시작 즉시 보인다. ② `modifyModels`는 원래 공급자 행이 있으면 같은 id를 그 정보(thinking 단계·비용)로 덮어쓰고, 없으면 ①의 행을 남긴다. 예전에는 ②만 있어서 새 omp 시작 직후 원래 공급자 채팅 모델이 오기 전에 복사돼 이미지·TTS 모델만 보이는 일이 있었다(2026-10-03).
 
@@ -14,6 +18,9 @@ omp `/login`의 `Ojak · …` 공급자(`ojak-claude` 등)를 고르면 요청�
 |---|---|
 | `GET /healthz` | 없음 |
 | `GET /v1/models`, `GET /v1/providers`, `POST /v1/pi/stream` | `Bearer <AAM_HOME/bridge.token>`, 꺼져 있으면 503 |
+| `/native/<account-id>/v1/*` | 별도 `bridge-native.token`. 공개 `bridge.token`으로 인증 정보 조회 불가. 매 요청 등록·활성·identity·프로필·원본 CLI 경로 확인 |
+
+네이티브 소스는 omp 18.8.3의 snapshot/ETag/long-poll·refresh·disable·block 규약을 따른다. SSE snapshot은 404로 공식 long-poll fallback을 사용한다. `refresh: "__remote__"`는 원격 갱신 표식이며 실제 refresh token이 아니다. 거절된 access token은 같은 값인 동안 격리하고, 공식 갱신으로 값이 바뀐 경우에만 다시 쓴다.
 
 ## 공급자 ID
 - 현재: `ojak-claude`→`anthropic`, `ojak-codex`→`openai-codex`, `ojak-antigravity`→`google-antigravity`, `ojak-grok`→`xai-oauth`, `ojak-zai`→`zai` (`bridge.rs:33-39`)
@@ -33,8 +40,12 @@ omp `/login`의 `Ojak · …` 공급자(`ojak-claude` 등)를 고르면 요청�
 
 ## 연결 흐름
 1. `aam omp-broker connect`가 먼저 필요(`BROKER_REQUIRED`). broker는 `~/.omp/agent/config.yml` 관리 블록을 사용한다. macOS는 LaunchAgent `ai.aam.omp-broker`로 감독한다. Windows는 `omp-broker-service.json`에 검증된 omp 경로를 기록하고 로그인 때 뜨는 `aam-service`가 창 없이 broker를 띄워 감시한다(작업 스케줄러·`conhost --headless`는 서명 없는 바이너리에서 백신 행위 탐지를 불러 쓰지 않는다). 이전 버전이 만든 앱 소유 작업은 정의 hash가 소유 기록과 같을 때만 한 번 지우고, 다르거나 지울 수 없으면 `BROKER_AGENT_CONFLICT`로 멈춘다. 첫 기동은 최대 90초 걸릴 수 있고, 터미널에서는 진행을 보여 준다.
-2. `bridge.json {enabled:true}` 쓰기. omp에 원래 공급자 계정이 없으면 `BRIDGE_NOT_READY`로 바로 끝난다(omp에서 `/login`으로 Claude·Codex 등 계정을 먼저 추가). 계정은 있는데 gateway가 아직 뜨는 중이면 최대 30초 동안 healthz·gateway·token을 기다린다.
+2. `bridge.json {enabled:true}` 쓰기. 등록된 Claude·Codex 공식 로그인과 omp의 원래 공급자 로그인이 모두 없을 때만 `BRIDGE_NOT_READY`로 바로 끝난다. 이미 공식 CLI에 로그인한 사용자에게 omp 중복 로그인을 요구하지 않는다. 계정은 있는데 gateway가 아직 뜨는 중이면 최대 30초 동안 healthz·gateway·token을 기다린다.
 3. 확장 설치 → `enabledModels`에 `ojak-*/*` 추가(목록이 비어 있지 않을 때만) → `modelRoles`의 `aam-*` 참조를 `ojak-*`로 변경. Ojak 로그인은 연결 때가 아니라 서비스 `sync`(약 60초, gateway가 아직 안 떠 있으면 더 자주)가 맞춘다. 실행 중인 원래 공급자 gateway가 있고 broker에 `ojak-*`가 없으면 브릿지 토큰을 올린다. 이전 `aam-*` 로그인도 새 ID로 맞추고, 있는 자격 증명은 지우지 않는다(`missing_ojak_logins`).
+- broker snapshot의 `credentials` 배열에서 공급자 존재와 OAuth 계정 identity를 따로 읽는다. `ojak-*` 자격 증명의 `identityKey`는 null일 수 있으므로, identity가 없다는 이유로 공급자를 누락하거나 매 sync마다 같은 로그인을 다시 등록하지 않는다. 잘못된 snapshot 형식은 빈 계정 목록으로 처리하지 않고 기존 gateway를 유지한다.
+- 공급자 계정이 어느 인증 소스에도 없고 후보 gateway도 없으면 `401 / UPSTREAM_AUTH_REQUIRED`를 돌려준다. 공식 CLI의 인증 실패·계정 변경·배정 꺼짐·키체인 잠금·파일 접근 오류는 별도 코드와 해결 행동으로 구분한다. 최초 조회 전·gateway 장애·한도 소진을 미로그인으로 단정하지 않는다.
+- 오류 본문은 `{error:{type,message,code?}}` 형식이다. omp의 pi-native 처리기가 메시지만 읽을 수 있어 advisor·judge 경고에 JSON 전체가 노출되지 않는다. 인증·연결 오류는 요청한 omp 화면과 Ojak 연결 화면에 표시한다. OS 알림은 기존 한도 리셋 전 알림만 사용하며 인증 실패마다 중복 알림을 보내지 않는다.
+- 종료 화면의 최근 15분 omp 사용 안내와 관리 CLI 세션 보호는 별개다. `PREPARED/STARTING/ACTIVE/SUSPECT/ORPHANED`는 사용 중지를 막고, 종료 확인 전까지 슬롯을 유지한다. UI는 사용 중지 버튼을 비활성화하고 해당 터미널 종료 또는 `앱만 종료`를 안내한다.
 
 ## 주의
 - gateway는 상속된 `OMP_*`/`PI_*` 환경을 지우고 전용 `PI_CODING_AGENT_DIR=<AAM_HOME>/bridge/agent`로 띄운다. 안 그러면 사용자 설정이 요청을 다시 브릿지로 돌려 루프가 된다 (`bridge.rs:946-973`).
@@ -75,12 +86,14 @@ graph TD
   TICK -->|"sync ~60s: GET /v1/snapshot"| BRK
   TICK -->|"upload missing ojak-*"| BRK
   TICK -->|"spawn_gateway per identity"| GW["omp auth-gateway :4101-4199<br/>pool = 1 account"]
+  TICK -->|"verified native profile"| NAT["Official CLI access-only source<br/>refresh stays with native CLI"]
   CFG --> EXT["install aam-accounts.js<br/>enabledModels / modelRoles"]
   EXT --> MODEL["/model ojak-claude/*"]
   MODEL -->|"POST /v1/pi/stream"| BR["Bridge :4020"]
   BR --> CHOOSE{"choose: sticky 60m, reserve, hot, active, weekly"}
   CHOOSE -->|"forward"| GW
-  GW -->|"single identity"| BRK
+  GW -->|"broker-owned identity"| BRK
+  GW -->|"native-owned identity"| NAT
   GW -->|"429 or quota"| BLOCK["block + retry next"]
   BLOCK --> CHOOSE
   CHOOSE -->|"none left"| Q429["429 Retry-After / 503"]

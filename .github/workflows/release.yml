@@ -2,9 +2,9 @@
 # compiles the aam and aam-service sidecars and then runs `tauri build`.
 # tauri-action always invokes `tauri build` itself, so it would skip that sidecar
 # step or build twice. It also does not write SHA256SUMS, which install.sh requires.
-# This workflow runs the project's build once, then publishes the DMG, updater
-# archive, signature, latest.json, and SHA256SUMS with gh.
-# macOS and Windows build in a matrix; one publish job writes latest.json for both.
+# This workflow builds once and stages a draft with the DMG, updater archive,
+# signature, latest.json, and SHA256SUMS. It never publishes automatically.
+# An Admin publishes the unchanged draft only after the release-policy checks.
 #
 # Tag push only. There is no pull_request or pull_request_target trigger, so a
 # fork PR cannot read secrets. Jobs also refuse every repository except
@@ -24,7 +24,7 @@ concurrency:
   cancel-in-progress: false
 
 jobs:
-  # 두 OS를 각각 빌드해 산출물만 올린다. 릴리스 게시와 latest.json·SHA256SUMS는 publish 한 곳에서 만든다.
+  # 두 OS 산출물은 draft job에서 모은다. 실기기 검증 전에는 latest에 공개하지 않는다.
   build:
     if: github.repository == 'lapalai/ojak' && github.event_name == 'push' && startsWith(github.ref, 'refs/tags/v')
     permissions:
@@ -178,7 +178,7 @@ jobs:
           path: ${{ runner.temp }}/ojak-${{ matrix.platform }}
           if-no-files-found: error
 
-  publish:
+  draft:
     needs: build
     if: github.repository == 'lapalai/ojak' && github.event_name == 'push' && startsWith(github.ref, 'refs/tags/v')
     permissions:
@@ -208,7 +208,7 @@ jobs:
           path: ${{ runner.temp }}/dist
           merge-multiple: true
 
-      - name: Publish GitHub Release
+      - name: Stage draft GitHub Release
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
@@ -247,6 +247,7 @@ jobs:
           sha256sum "$(basename "$dmg")" Ojak.app.tar.gz Ojak.app.tar.gz.sig "$(basename "$setup")" "$(basename "$setup").sig" > SHA256SUMS
           test -s SHA256SUMS
           gh release create "$GITHUB_REF_NAME" --repo "$GITHUB_REPOSITORY" \
+            --draft \
             --title "Ojak ${version}" \
             --notes "$notes" \
             "$(basename "$dmg")" Ojak.app.tar.gz Ojak.app.tar.gz.sig \

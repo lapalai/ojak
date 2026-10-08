@@ -1,7 +1,9 @@
 import { useMemo, useState } from "react";
+import { isTauri } from "@tauri-apps/api/core";
 import type { CSSProperties } from "react";
 import { ActionFeedback, Badge, Dot, ErrorMessage, Sparkline } from "./components";
 import { AllocationSettings } from "./AllocationSettings";
+import { FirstSuccessNotice, OnboardingCard } from "./OnboardingCard";
 import { rpc } from "./api";
 import { absoluteTime, bucketState, canonicalProvider, groupAccounts, isCurrentGroup, projectName, providerColor, providerNames, relativeTime, toolNames, useAction, useBridge, useCharacters } from "./state";
 import type { AccountGroup } from "./state";
@@ -105,7 +107,7 @@ function pinMember(group: AccountGroup, provider: string): Account | undefined {
   return group.members.find(member => canonicalProvider(member.provider) === provider) ?? undefined;
 }
 
-export function UsageView({ snapshot, masked, online, onReload, onConnect, onSessions }: { snapshot: Snapshot; masked: boolean; online: boolean; onReload: () => Promise<void>; onConnect: () => void; onSessions: () => void }) {
+export function UsageView({ snapshot, masked, online, onReload, onConnect, onSessions, onAdd, onSetup, setupRequest, setupRevision }: { snapshot: Snapshot; masked: boolean; online: boolean; onReload: () => Promise<void>; onConnect: () => void; onSessions: () => void; onAdd: (tool: string) => void; onSetup: () => void; setupRequest: number; setupRevision: number }) {
   const pinAction = useAction();
   const characters = useCharacters();
   const pins = snapshot.policy.providerPins ?? {};
@@ -202,6 +204,8 @@ export function UsageView({ snapshot, masked, online, onReload, onConnect, onSes
       <div><h1 id="usage-title">{t("nav.usage")}</h1><div className="sub">{bridgeOn ? t("usage.subtitle", { period: periodLabel }) : t("usage.subtitle.accounts")}</div></div>
       {bridgeOn && <div className="segmented" role="group" aria-label={t("usage.periodAria")}>{periods.map(value => <button type="button" key={value} aria-pressed={period === value} onClick={() => setPeriod(value)}>{t(`usage.periodShort.${value}`)}</button>)}</div>}
     </div>
+    {online && <FirstSuccessNotice snapshot={snapshot} masked={masked} />}
+    {online && isTauri() && <OnboardingCard snapshot={snapshot} request={setupRequest} revision={setupRevision} onAdd={onAdd} onSetup={onSetup} />}
     <div className="notice"><p>{bridgeOn ? t("usage.scope") : t("usage.scope.accounts")} <button type="button" className="text-button" onClick={onSessions}>{t("nav.sessions")}</button> · <button type="button" className="text-button" onClick={onConnect}>{t("nav.connect")}</button></p></div>
     <details className="settings-strip">
       <summary>{t("usage.settings.summary", { mode: (snapshot.policy.allocationMode ?? "smart") === "priority" ? t("policy.mode.priority") : t("policy.mode.smart"), reserve })}</summary>

@@ -123,11 +123,17 @@ fn service_missing_failure() -> VerifyFailure {
 }
 
 /// 서비스가 앱보다 예전이거나 버전을 알리지 못할 때의 안내. 서비스 단계와 분리해 설치 단계를 미완료로 만들지 않는다.
+/// 버전을 모르면 `service` 값은 빈 문자열이다. 화면이 표시 언어로 "버전을 알 수 없는" 문장을 고른다(한국어 값을 끼워 넣지 않는다).
 fn service_version_failure(service: Option<&str>) -> VerifyFailure {
-    let shown = service.unwrap_or("알 수 없음");
+    let shown = service.unwrap_or("");
+    let text = if service.is_some() {
+        format!("실행 중인 서비스(버전 {shown})가 앱(버전 {})과 달라요. 쓰는 중인 세션이 없을 때 `aam service restart`를 실행하거나 앱의 [서비스 다시 시작]을 눌러 주세요.", service_version::APP_VERSION)
+    } else {
+        format!("실행 중인 서비스가 버전을 알리지 못하는 예전 서비스예요. 앱은 {} 버전이에요. 쓰는 중인 세션이 없을 때 `aam service restart`를 실행하거나 앱의 [서비스 다시 시작]을 눌러 주세요.", service_version::APP_VERSION)
+    };
     notice(
         "service-version-mismatch",
-        format!("실행 중인 서비스(버전 {shown})가 앱(버전 {})과 달라요. 쓰는 중인 세션이 없을 때 `aam service restart`를 실행하거나 앱의 [서비스 다시 시작]을 눌러 주세요.", service_version::APP_VERSION),
+        text,
         params(&[("service", shown), ("app", service_version::APP_VERSION)]),
     )
 }
@@ -381,7 +387,7 @@ mod tests {
         assert_eq!(value["serviceVersionMismatch"], true);
         let notice = &value["notices"][0];
         assert_eq!(notice["code"], "service-version-mismatch");
-        assert_eq!(notice["params"]["service"], "알 수 없음");
+        assert_eq!(notice["params"]["service"], "");
         assert!(notice["message"].as_str().unwrap().contains("aam service restart"));
     }
 
