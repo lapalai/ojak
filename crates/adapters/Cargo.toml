@@ -17,6 +17,8 @@ sha2.workspace = true
 libc.workspace = true
 toml = "0.8"
 time = { version = "0.3", default-features = false, features = ["parsing"] }
+base64 = "0.22"
+unicode-normalization = "0.1"
 
 [target.'cfg(windows)'.dependencies]
 windows-sys = { version = "0.59", features = [

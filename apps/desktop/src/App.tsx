@@ -28,6 +28,7 @@ export default function App() {
   const [view, setView] = useState<View>("usage");
   const [dialog, setDialog] = useState<Dialog | null>(null);
   const [setupRequest, setSetupRequest] = useState(0);
+  const [setupRevision, setSetupRevision] = useState(0);
   const [launchMessage, setLaunchMessage] = useState<string | null>(null);
   const [version, setVersion] = useState<string | null>(null);
   const [masked, setMasked] = useState(() => { try { return localStorage.getItem("aam.privacy") !== "visible"; } catch { return true; } });
@@ -99,7 +100,7 @@ export default function App() {
         <ActionFeedback error={policyAction.error} message={policyAction.message} />
         {isTauri() && <ServiceVersionNotice snapshot={snapshot} onReload={onReload} />}
         {launchMessage && <div className="launch-notice" role="status"><Terminal size={16} /><span>{launchMessage}</span><button type="button" className="text-button" onClick={() => { setView("sessions"); setLaunchMessage(null); }}>{t("launch.viewSessions")}<ChevronRight size={13} /></button></div>}
-        {view === "usage" && <UsageView snapshot={snapshot} masked={masked} online={online} onReload={onReload} onConnect={() => setView("connect")} onSessions={() => setView("sessions")} />}
+        {view === "usage" && <UsageView snapshot={snapshot} masked={masked} online={online} onReload={onReload} onConnect={() => setView("connect")} onSessions={() => setView("sessions")} onAdd={onAdd} onSetup={() => setSetupRequest(value => value + 1)} setupRequest={setupRequest} setupRevision={setupRevision} />}
         {view === "sessions" && <SessionsView snapshot={snapshot} masked={masked} online={online} onNewSession={onNewSession} onResume={onResume} />}
         {view === "connect" && <ConnectionsView snapshot={snapshot} masked={masked} online={online} refreshing={busy} onRefresh={refresh} onReload={onReload} onAdd={onAdd} onService={() => setDialog({ kind: "service" })} onIntegration={action => setDialog({ kind: "integration", action })} />}
       </div></div>}
@@ -108,8 +109,8 @@ export default function App() {
     {dialog?.kind === "integration" && <IntegrationDialog action={dialog.action} onClose={() => setDialog(null)} onReload={onReload} />}
     {dialog?.kind === "add" && snapshot && <AddAccountDialog snapshot={snapshot} initialTool={dialog.tool} onClose={() => setDialog(null)} onReload={onReload} onConnected={() => setView("connect")} />}
     {dialog?.kind === "launch" && snapshot && <LaunchDialog snapshot={snapshot} initialAccountId={dialog.accountId} initialTool={dialog.tool} initialModel={dialog.model} initialCwd={dialog.cwd} resumeSessionId={dialog.resumeSessionId} masked={masked} onClose={() => setDialog(null)} onOpened={() => { setLaunchMessage(t("launch.opened")); void onReload(); }} />}
-    {isTauri() && <SetupGuide snapshot={snapshot} onAdd={tool => onAdd(tool)} onReload={onReload} request={setupRequest} suspended={dialog !== null} masked={masked} />}
+    {isTauri() && <SetupGuide snapshot={snapshot} onAdd={tool => onAdd(tool)} onReload={onReload} onChanged={() => setSetupRevision(value => value + 1)} request={setupRequest} suspended={dialog !== null} masked={masked} />}
     {dialog?.kind === "settings" && <SettingsDialog snapshot={snapshot} onClose={() => setDialog(null)} />}
-    {dialog?.kind === "quit" && <QuitDialog onClose={() => setDialog(null)} />}
+    {dialog?.kind === "quit" && <QuitDialog snapshot={snapshot} onClose={() => setDialog(null)} />}
   </div></PrivacyContext.Provider>;
 }

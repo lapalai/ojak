@@ -615,6 +615,106 @@ fn open_terminal(args: Vec<String>) -> Result<Value, ApiError> {
     // 터미널을 연 것과 계정 검증·native CLI 실행 성공은 다릅니다.
     Ok(json!({"opened":true}))
 }
+
+/// 터미널에 명령을 "입력만" 해 두는 `.zshrc` 조각. 사용자 설정(PATH·별칭·프롬프트)을 먼저 읽은 뒤, 첫 프롬프트에서
+/// 한 번만 입력줄에 채우고 지운다. 실행하지 않는다. 채울 문장은 환경변수 `OJAK_PREFILL`로만 받는다.
+#[cfg(unix)]
+const PREFILL_ZSHRC: &str = r#"_ojak_real="${OJAK_REAL_ZDOTDIR:-$HOME}"
+export ZDOTDIR="$_ojak_real"
+[[ -r "$_ojak_real/.zshenv" ]] && source "$_ojak_real/.zshenv" 2>/dev/null
+[[ -r "$_ojak_real/.zshrc" ]] && source "$_ojak_real/.zshrc"
+unset _ojak_real OJAK_REAL_ZDOTDIR
+if [[ -n "$OJAK_PREFILL" ]]; then
+  _ojak_fill() { print -z -- "$OJAK_PREFILL"; unset OJAK_PREFILL; add-zsh-hook -d precmd _ojak_fill; unfunction _ojak_fill; }
+  autoload -Uz add-zsh-hook
+  add-zsh-hook precmd _ojak_fill
+fi
+"#;
+
+/// 입력해 둘 수 있는 명령. 임의 문자열은 받지 않는다. 사용자가 Enter를 쳐야 실행되는 공식 CLI 이름뿐이다.
+fn prefill_word(tool: &str) -> Option<&'static str> {
+    match tool {
+        "claude" => Some("claude"),
+        "codex" => Some("codex"),
+        _ => None,
+    }
+}
+
+/// 사용자의 원래 ZDOTDIR(없으면 홈)과 임시 폴더로 `.command` 본문을 만든다. 경로는 모두 따옴표로 감싼다.
+#[cfg(unix)]
+fn prefill_script(temp_dir: &std::path::Path, real_zdotdir: &str, word: &str) -> String {
+    format!(
+        "#!/bin/zsh\n/bin/rm -- \"$0\"\nexport OJAK_REAL_ZDOTDIR={real}\nexport OJAK_PREFILL={word}\nexport ZDOTDIR={temp}\nexec /bin/zsh -i\n",
+        real = shell_quote(real_zdotdir),
+        word = shell_quote(word),
+        temp = shell_quote(&temp_dir.to_string_lossy()),
+    )
+}
+
+/// macOS: Terminal.app을 사용자 zsh 환경 그대로 열고 `claude`/`codex`를 입력줄에 채워 둔다(실행하지 않는다).
+/// 그 밖의 환경(Windows 등)은 열지 않고 `prefilled:false`를 돌려 화면이 복사 버튼을 보이게 한다.
+#[cfg(unix)]
+#[tauri::command]
+async fn open_prefilled_terminal(tool: String) -> Result<Value, ApiError> {
+    use std::io::Write;
+    use std::os::unix::fs::{OpenOptionsExt, PermissionsExt};
+    let word = prefill_word(&tool).ok_or_else(|| ApiError::new("INVALID_PARAMS", "Claude Code나 Codex만 열 수 있어요."))?;
+    if !cfg!(target_os = "macos") {
+        return Ok(json!({"opened": false, "prefilled": false}));
+    }
+    // 사용자의 zsh가 아니면(bash·fish) 채우는 방법이 달라서 열지 않는다. 화면이 복사 버튼으로 안내한다.
+    let shell = std::env::var("SHELL").unwrap_or_default();
+    if !shell.ends_with("/zsh") {
+        return Ok(json!({"opened": false, "prefilled": false}));
+    }
+    let p = paths()?;
+    p.prepare().map_err(|e| ApiError::new("PATH_ERROR", e.to_string()))?;
+    let dir = p.home.join("launches");
+    std::fs::create_dir_all(&dir).map_err(|e| ApiError::new("PATH_ERROR", e.to_string()))?;
+    std::fs::set_permissions(&dir, std::fs::Permissions::from_mode(0o700)).map_err(|e| ApiError::new("PATH_ERROR", e.to_string()))?;
+    let id = aam_protocol::new_id();
+    // 임시 ZDOTDIR: 이 폴더의 .zshrc가 사용자 설정을 읽은 뒤 입력만 채운다. 셸이 읽고 나면 스크립트가 지우지는 못하므로
+    // 다음 실행 때 오래된 폴더를 함께 치운다(아래 cleanup).
+    let zdot = dir.join(format!("zdot-{id}"));
+    std::fs::create_dir(&zdot).map_err(|e| ApiError::new("LAUNCH_ERROR", e.to_string()))?;
+    std::fs::set_permissions(&zdot, std::fs::Permissions::from_mode(0o700)).map_err(|e| ApiError::new("LAUNCH_ERROR", e.to_string()))?;
+    std::fs::write(zdot.join(".zshrc"), PREFILL_ZSHRC).map_err(|e| ApiError::new("LAUNCH_ERROR", e.to_string()))?;
+    let real = std::env::var("ZDOTDIR").ok().filter(|value| !value.is_empty()).or_else(|| std::env::var("HOME").ok()).unwrap_or_default();
+    let script = dir.join(format!("{id}.command"));
+    let mut file = std::fs::OpenOptions::new()
+        .write(true)
+        .create_new(true)
+        .mode(0o700)
+        .open(&script)
+        .map_err(|e| ApiError::new("LAUNCH_ERROR", e.to_string()))?;
+    file.write_all(prefill_script(&zdot, &real, word).as_bytes()).map_err(|e| ApiError::new("LAUNCH_ERROR", e.to_string()))?;
+    drop(file);
+    // 이전에 열었던 임시 폴더 중 10분 지난 것을 지운다. 방금 만든 것은 건드리지 않는다.
+    if let Ok(entries) = std::fs::read_dir(&dir) {
+        for entry in entries.flatten() {
+            let name = entry.file_name().to_string_lossy().to_string();
+            let old = entry.metadata().and_then(|meta| meta.modified()).ok().and_then(|time| time.elapsed().ok()).is_some_and(|age| age.as_secs() > 600);
+            if name.starts_with("zdot-") && old {
+                let _ = std::fs::remove_dir_all(entry.path());
+            }
+        }
+    }
+    let status = Command::new("/usr/bin/open").args(["-a", "Terminal"]).arg(&script).status().map_err(|e| ApiError::new("LAUNCH_ERROR", e.to_string()))?;
+    if !status.success() {
+        let _ = std::fs::remove_file(&script);
+        let _ = std::fs::remove_dir_all(&zdot);
+        return Err(ApiError::new("LAUNCH_ERROR", "Terminal을 열지 못했습니다. 연결 화면에서 aam 경로를 확인하세요."));
+    }
+    Ok(json!({"opened": true, "prefilled": true}))
+}
+
+/// Windows: 명령 미리 채우기는 셸(PowerShell/cmd)마다 달라 믿을 수 없다. 열지 않고 화면이 복사 버튼을 보이게 한다.
+#[cfg(windows)]
+#[tauri::command]
+async fn open_prefilled_terminal(tool: String) -> Result<Value, ApiError> {
+    prefill_word(&tool).ok_or_else(|| ApiError::new("INVALID_PARAMS", "Claude Code나 Codex만 열 수 있어요."))?;
+    Ok(json!({"opened": false, "prefilled": false}))
+}
 #[tauri::command]
 async fn launch_session(intent: LaunchIntent) -> Result<Value, ApiError> {
     if !["claude", "codex"].contains(&intent.tool.as_str())
@@ -1352,6 +1452,83 @@ mod tests {
     }
 
     #[test]
+    fn prefill_only_accepts_the_two_official_cli_names() {
+        assert_eq!(prefill_word("claude"), Some("claude"));
+        assert_eq!(prefill_word("codex"), Some("codex"));
+        for bad in ["", "Claude", "claude --dangerously", "rm -rf ~", "claude; rm -rf ~", "$(id)", "omp", "../claude"] {
+            assert_eq!(prefill_word(bad), None, "{bad}");
+        }
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn prefill_script_quotes_every_path_and_never_runs_the_word() {
+        let script = prefill_script(std::path::Path::new("/tmp/with space/it's"), "/Users/a b/c'd", "claude");
+        // 사용자 경로의 공백·작은따옴표가 명령으로 해석되지 않는다.
+        assert!(script.contains("OJAK_REAL_ZDOTDIR='/Users/a b/c'\"'\"'d'"));
+        assert!(script.contains("ZDOTDIR='/tmp/with space/it'\"'\"'s'"));
+        assert!(script.contains("OJAK_PREFILL='claude'"));
+        // 단어는 환경변수로만 건넨다. 셸이 실행하는 줄에는 들어가지 않는다.
+        assert!(script.trim_end().ends_with("exec /bin/zsh -i"));
+        assert!(!script.lines().any(|line| line.trim() == "claude"));
+    }
+
+    /// 앱이 쓰는 .zshrc와 .command를 그대로 만들어 실제 zsh(pty)에서 돌린다. 사용자 설정은 적용되고, 단어는 입력줄에만
+    /// 채워지며, 실행되지 않아야 한다. 같은 조건으로 단어가 없으면(대조군) 채워지지 않아야 한다.
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn prefill_types_the_word_without_running_it_in_a_real_zsh() {
+        let root = std::env::temp_dir().join(format!("ojak-prefill-test-{}", aam_protocol::new_id()));
+        let user = root.join("user");
+        let zdot = root.join("zdot");
+        std::fs::create_dir_all(&user).unwrap();
+        std::fs::create_dir_all(&zdot).unwrap();
+        std::fs::write(user.join(".zshrc"), "export OJAK_USER_MARK=loaded\nPROMPT='USERPROMPT> '\n").unwrap();
+        std::fs::write(zdot.join(".zshrc"), PREFILL_ZSHRC).unwrap();
+        let script = root.join("run.command");
+        std::fs::write(&script, prefill_script(&zdot, &user.to_string_lossy(), "claude").replace("/bin/rm -- \"$0\"\n", "")).unwrap();
+        let run = |with_word: bool| -> String {
+            let program = format!(
+                r#"import os,pty,select,time,signal,sys
+pid,fd=pty.fork()
+if pid==0:
+    os.environ["TERM"]="xterm-256color"
+    if not {with_word}: os.environ["OJAK_SKIP"]="1"
+    os.execvp("/bin/zsh",["/bin/zsh",sys.argv[1]])
+out=b""; end=time.time()+3
+while time.time()<end:
+    r,_,_=select.select([fd],[],[],0.2)
+    if r:
+        try: c=os.read(fd,4096)
+        except OSError: break
+        if not c: break
+        out+=c
+try: os.write(fd,b"\x15")
+except OSError: pass
+time.sleep(0.2)
+try: os.kill(pid,signal.SIGKILL)
+except ProcessLookupError: pass
+os.waitpid(pid,0)
+sys.stdout.write(out.decode("utf-8","replace"))
+"#,
+                with_word = if with_word { "True" } else { "False" }
+            );
+            let output = Command::new("python3")
+                .args(["-c", &program])
+                .arg(&script)
+                .env_remove("OJAK_PREFILL")
+                .output()
+                .expect("python3 is required for this test");
+            String::from_utf8_lossy(&output.stdout).to_string()
+        };
+        let with = run(true);
+        assert!(with.contains("USERPROMPT>"), "사용자 프롬프트(.zshrc)가 적용돼야 한다: {with:?}");
+        assert!(with.contains("claude"), "단어가 입력줄에 채워져야 한다: {with:?}");
+        assert!(!with.contains("command not found"), "채워진 단어가 실행되면 안 된다: {with:?}");
+        std::fs::remove_dir_all(&root).ok();
+    }
+
+    #[test]
     fn updater_placeholder_disables_checks() {
         assert!(!updater_configured(UPDATER_PUBKEY_PLACEHOLDER));
         assert!(!updater_configured("  REPLACE_WITH_TAURI_UPDATER_PUBKEY  "));
@@ -2068,6 +2245,7 @@ fn main() {
         .invoke_handler(tauri::generate_handler![
             rpc,
             launch_session,
+            open_prefilled_terminal,
             login_account,
             choose_directory,
             settings_preview,

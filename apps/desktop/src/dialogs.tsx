@@ -285,13 +285,14 @@ export function SettingsDialog({ snapshot, onClose }: { snapshot: Snapshot | nul
   </Modal>;
 }
 
-export function QuitDialog({ onClose }: { onClose: () => void }) {
+export function QuitDialog({ snapshot, onClose }: { snapshot: Snapshot | null; onClose: () => void }) {
   const [step, setStep] = useState<"choose" | "deactivate">("choose");
   const [plan, setPlan] = useState<string | null>(null);
   const action = useAction();
   const { status } = useBridge(null);
   const now = Date.now();
   const ompSessions = status?.bridge?.sessions.filter(session => now - session.lastUsedAt < ACTIVE_BRIDGE_MS).length ?? 0;
+  const managed = snapshot ? updateInterruptCounts(snapshot.sessions, [], now).managed : null;
   useEffect(() => {
     if (step !== "deactivate") return;
     void action.run(deactivatePlan, text => { setPlan(text); });
@@ -304,12 +305,14 @@ export function QuitDialog({ onClose }: { onClose: () => void }) {
       <p className="field-label">{t("quit.planTitle")}</p>
       {plan ? <pre className="quit-plan">{plan}</pre> : action.pending ? <Busy label={t("quit.planLoading")} /> : null}
       {ompSessions > 0 && <p className="field-help warning-text">{t("quit.omp", { count: ompSessions })}</p>}
+      {(managed === null || managed > 0) && <p className="field-help warning-text" role="status">{managed === null ? t("quit.managedUnknown") : t("quit.managedBusy", { count: managed })}</p>}
     </div>}
     <ActionFeedback error={action.error} message={null} />
     <div className="modal-footer">
       {step === "choose" ? <button type="button" onClick={onClose} disabled={action.pending}>{t("common.cancel")}</button> : <>
         <button type="button" onClick={() => { setStep("choose"); setPlan(null); }} disabled={action.pending}>{t("quit.back")}</button>
-        <button type="button" className="danger-button" disabled={!plan || action.pending} onClick={() => { void action.run(() => quitApp("deactivate")); }}>{action.pending && plan ? <Busy label={t("quit.working")} /> : t("quit.confirmDeactivate")}</button>
+        <button type="button" disabled={action.pending} onClick={() => { void action.run(() => quitApp("keep")); }}>{t("quit.keep")}</button>
+        <button type="button" className="danger-button" disabled={!plan || action.pending || managed === null || managed > 0} onClick={() => { void action.run(() => quitApp("deactivate")); }}>{action.pending && plan ? <Busy label={t("quit.working")} /> : t("quit.confirmDeactivate")}</button>
       </>}
     </div>
   </Modal>;

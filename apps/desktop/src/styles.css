@@ -581,6 +581,27 @@ button.tiger-egg:hover:not(:disabled) { background: none; }
 .setup-body { display: grid; gap: 8px; margin-bottom: 12px; }
 .setup-actions { display: flex; gap: 8px; flex-wrap: wrap; }
 .setup-accounts { margin: 0; padding-left: 18px; color: var(--secondary); }
-.setup-command { margin: 0; padding: 10px 12px; border-radius: 8px; background: var(--strong-line); font-size: 14px; }
 .setup-details { margin-bottom: 8px; color: var(--secondary); font-size: 12px; }
 .setup-details summary { cursor: pointer; }
+.setup-value { margin: 0 0 14px; color: var(--text); line-height: 1.6; }
+.setup-why { margin: 0 0 0 28px; }
+code.command-chip { padding: 3px 9px; border-radius: 6px; background: var(--surface-hover); font-family: var(--mono); font-size: var(--fs-body); user-select: text; }
+.open-terminal { display: grid; gap: 6px; }
+.open-terminal-row { display: flex; align-items: center; gap: 9px; flex-wrap: wrap; }
+.open-terminal-row .field-help { margin-top: 0; }
+
+/* 시작하기 카드: 점 + 글자로 상태를 말하고, 끝나면 한 줄로 접힌다. */
+.getting-started { border: 1px solid var(--line); border-radius: 12px; margin-bottom: 14px; overflow: hidden; background: var(--surface); }
+.getting-started > header { display: flex; align-items: baseline; gap: 9px; padding: 11px 18px; border-bottom: 1px solid var(--line); }
+.getting-started > header h2 { font-size: var(--fs-heading); font-weight: 650; margin: 0; }
+.getting-started > header .aside { margin-left: auto; color: var(--tertiary); font-variant-numeric: tabular-nums; }
+.gs-steps { list-style: none; margin: 0; padding: 4px 18px 8px; }
+.gs-steps li { display: grid; grid-template-columns: 8px minmax(0, 1fr) auto; column-gap: 10px; row-gap: 6px; align-items: center; padding: 8px 0; border-top: 1px solid var(--line); }
+.gs-steps li:first-child { border-top: 0; }
+.gs-steps li.todo .gs-text { color: var(--text); font-weight: 560; }
+.gs-steps li.done .gs-text { color: var(--secondary); }
+.gs-actions { display: flex; gap: 8px; flex-wrap: wrap; justify-content: flex-end; }
+.gs-sub { grid-column: 2 / -1; margin: 0; }
+.getting-started.collapsed { display: flex; align-items: center; gap: 9px; padding: 6px 8px 6px 14px; color: var(--secondary); font-size: var(--fs-meta); }
+.getting-started.collapsed .icon-button { margin-left: auto; width: 24px; min-width: 24px; height: 24px; }
+.launch-notice > .icon-button { width: 22px; min-width: 22px; height: 22px; min-height: 22px; margin: -2px -4px 0 0; }

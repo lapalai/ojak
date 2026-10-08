@@ -4,6 +4,9 @@
 //! 브릿지는 계정마다 하나씩 띄운 `omp auth-gateway`(계정 풀 1개로 고정) 중 하나를 골라 전달한다.
 //! 계정 선택은 AAM이 관측한 사용량과 브릿지가 직접 본 한도 응답으로 결정하고, omp 세션 단위로 고정한다.
 
+#[path = "bridge_native.rs"]
+mod native;
+
 use crate::{scheduler, store::{accounts, policy}, Service};
 use aam_protocol::{now_ms, Account, ApiError, Paths, QuotaBucket};
 use serde::{Deserialize, Serialize};
@@ -142,11 +145,15 @@ fn broker_token() -> Option<String> {
 
 /// 브릿지 인증 토큰. omp는 `models.yml`의 `!cat` 명령으로 읽으므로 파일에 평문 복사하지 않는다.
 fn ensure_token(paths: &Paths) -> io::Result<String> {
-    let path = paths.bridge_token();
+    ensure_secret(&paths.bridge_token())
+}
+
+fn ensure_secret(path: &Path) -> io::Result<String> {
+    let path = path.to_path_buf();
     if let Some(token) = read_secret(path.clone()) {
         return Ok(token);
     }
-    fs::create_dir_all(&paths.home)?;
+    if let Some(parent) = path.parent() { fs::create_dir_all(parent)?; }
     let token = format!("{}{}", uuid::Uuid::new_v4().simple(), uuid::Uuid::new_v4().simple());
     let mut file = aam_protocol::secure::private_options(fs::OpenOptions::new().write(true).create_new(true)).open(&path)?;
     file.write_all(token.as_bytes())?;
@@ -408,6 +415,8 @@ struct Gateway {
     identity: String,
     email: String,
     org: String,
+    /// None: omp broker owns this credential. Some: native CLI owns refresh.
+    native_account: Option<String>,
     port: u16,
     child: Option<(Child, GatewayJob)>,
     spawned_at: i64,
@@ -442,6 +451,10 @@ struct State {
     sessions: HashMap<String, Sticky>,
     blocks: Vec<Block>,
     synced_at: i64,
+    /// 성공한 broker 조회의 인증 공급자. None은 아직 인증 상태를 확인하지 못했다는 뜻이다.
+    authenticated_providers: Option<BTreeSet<String>>,
+    broker_known: Option<BrokerIdentities>,
+    native_errors: BTreeMap<String, String>,
     /// 서비스가 마지막으로 broker를 띄운 시각과 그 프로세스(Windows 작업 스케줄러 대체 경로).
     #[cfg(windows)]
     broker_spawned_at: i64,
@@ -507,6 +520,7 @@ pub struct Bridge {
     enabled: AtomicBool,
     listening: AtomicBool,
     connections: std::sync::atomic::AtomicUsize,
+    native_sources: Mutex<HashMap<String, Arc<native::Source>>>,
 }
 
 impl Bridge {
@@ -518,6 +532,7 @@ impl Bridge {
             enabled: AtomicBool::new(false),
             listening: AtomicBool::new(false),
             connections: std::sync::atomic::AtomicUsize::new(0),
+            native_sources: Mutex::new(HashMap::new()),
         });
         let worker = Arc::clone(&bridge);
         std::thread::spawn(move || loop {
@@ -641,30 +656,95 @@ impl Bridge {
         }
     }
 
-    /// broker snapshot에 맞춰 계정별 gateway를 띄우거나 정리한다.
+    /// Combine broker accounts with native profiles without transferring refresh ownership.
     fn sync(&self, now: i64) {
+        let mut failures = Vec::new();
+        let mut native_errors = BTreeMap::new();
         let snapshot = match broker_identities() {
-            Ok(value) => value,
+            Ok(value) => {
+                self.state().broker_known = Some(value.clone());
+                value
+            }
             Err(message) => {
+                failures.push(message);
+                self.state().broker_known.clone().unwrap_or_default()
+            }
+        };
+        let registered = match self.service.lock().and_then(|store| accounts(&store.connection)) {
+            Ok(value) => value,
+            Err(_) => {
                 let mut state = self.state();
-                state.error = Some(message);
+                state.error = Some("Ojak 계정 목록을 읽지 못했어요. 기존 연결은 유지해요.".into());
                 state.synced_at = now;
                 return;
             }
         };
-        let desired: BTreeSet<(String, String)> =
-            snapshot.oauth.iter().filter(|(provider, _)| ALIASES.iter().any(|(_, original)| original == provider)).cloned().collect();
+        let mut desired: BTreeMap<(String, String), Option<String>> = snapshot.oauth.iter()
+            .filter(|(provider, _)| ALIASES.iter().any(|(_, original)| original == provider))
+            .cloned().map(|key| (key, None)).collect();
+        let mut native_ids = BTreeSet::new();
+        for account in registered {
+            let native_provider = match account.tool.as_str() {
+                "claude" => Some("anthropic"),
+                "codex" => Some("openai-codex"),
+                _ => None,
+            };
+            if let Some(provider) = native_provider {
+                let code = if !account.enabled { Some("ACCOUNT_DISABLED") }
+                    else if account.auth_status == "auth-required" { Some("AUTH_REQUIRED") }
+                    else if account.auth_status != "authenticated" { Some("NATIVE_AUTH_UNAVAILABLE") }
+                    else { None };
+                if let Some(code) = code {
+                    native_errors.entry(provider.to_owned()).or_insert_with(|| code.to_owned());
+                }
+            }
+            let Some((provider, identity)) = native::identity(&account) else {
+                if let Some(provider) = native_provider.filter(|_| account.enabled && account.auth_status == "authenticated") {
+                    native_errors.insert(provider.to_owned(), "PROFILE_UNVERIFIED".into());
+                    failures.push(format!("{provider}: {}", native::failure("PROFILE_UNVERIFIED").1));
+                }
+                continue;
+            };
+            let key = (provider.to_owned(), identity.clone());
+            if desired.contains_key(&key) { continue; }
+            let id = account.id.clone();
+            let source = {
+                let mut sources = self.native_sources.lock().unwrap_or_else(|e| e.into_inner());
+                if sources.get(&id).is_some_and(|old| old.account.identity_key != account.identity_key
+                    || old.account.profile_path != account.profile_path || old.account.binary_path != account.binary_path) {
+                    sources.remove(&id);
+                }
+                Arc::clone(sources.entry(id.clone()).or_insert_with(|| Arc::new(native::Source::new(account, provider, identity))))
+            };
+            native_ids.insert(id.clone());
+            match source.ready() {
+                Ok(()) => {
+                    desired.insert(key, Some(id));
+                }
+                Err(error) => {
+                    let (_, message) = native::failure(&error.code);
+                    failures.push(format!("{provider}: {message}"));
+                    native_errors.insert(provider.to_owned(), error.code);
+                }
+            }
+        }
+        self.native_sources.lock().unwrap_or_else(|e| e.into_inner()).retain(|id, _| native_ids.contains(id));
         let mut state = self.state();
-        state.synced_at = now;
+        state.synced_at = now_ms();
         state.error = None;
+        state.native_errors = native_errors;
+        let mut providers = snapshot.providers.clone();
+        providers.extend(desired.keys().map(|(provider, _)| provider.clone()));
+        state.authenticated_providers = (state.broker_known.is_some() || !native_ids.is_empty()).then(|| providers.clone());
         state.gateways.retain_mut(|gateway| {
-            let keep = desired.contains(&(gateway.provider.clone(), gateway.identity.clone()));
+            let keep = desired.get(&(gateway.provider.clone(), gateway.identity.clone()))
+                .is_some_and(|source| source == &gateway.native_account);
             if !keep {
                 gateway.stop();
             }
             keep
         });
-        for (provider, identity) in &desired {
+        for ((provider, identity), native_account) in &desired {
             if state.gateways.iter().any(|gateway| &gateway.provider == provider && &gateway.identity == identity) {
                 continue;
             }
@@ -679,14 +759,13 @@ impl Bridge {
                 identity: identity.clone(),
                 email,
                 org,
+                native_account: native_account.clone(),
                 port,
                 child: None,
                 spawned_at: 0,
                 unhealthy_until: 0,
             });
         }
-        let providers = snapshot.providers.clone();
-        let mut failures = Vec::new();
         for gateway in &mut state.gateways {
             if gateway.running() || now - gateway.spawned_at < RESPAWN_BACKOFF_MS {
                 continue;
@@ -794,6 +873,33 @@ impl Bridge {
         if !self.enabled.load(Ordering::SeqCst) {
             return respond(&mut client, 503, &json!({ "error": "Ojak 계정 연결이 꺼져 있어요." }));
         }
+        if let Some(native_path) = request.path.strip_prefix("/native/") {
+            let Some((id, suffix)) = native_path.split_once('/') else {
+                return respond(&mut client, 404, &json!({"error":"Unknown native profile."}));
+            };
+            if request.method == "GET" && suffix == "v1/healthz" {
+                return respond(&mut client, 200, &json!({"ok":true}));
+            }
+            let token = read_secret(self.paths.home.join("bridge-native.token"));
+            let presented = request.header("authorization").and_then(|s| s.strip_prefix("Bearer ")).unwrap_or("");
+            if token.as_deref().is_none_or(|secret| !constant_eq(presented, secret)) {
+                return respond(&mut client, 401, &json!({"error":"Native broker authentication failed."}));
+            }
+            let source = self.native_sources.lock().unwrap_or_else(|e| e.into_inner()).get(id).cloned();
+            let Some(source) = source else { return respond(&mut client, 404, &json!({"error":"Native profile is unavailable."})); };
+            // Enforce removal/disable immediately, not only at the next sync.
+            let valid = self.service.lock().and_then(|store| accounts(&store.connection)).is_ok_and(|accounts|
+                accounts.iter().any(|a| a.id == source.account.id && a.enabled
+                    && a.auth_status == "authenticated" && a.identity_key == source.account.identity_key
+                    && a.profile_path == source.account.profile_path && a.binary_path == source.account.binary_path));
+            if !valid { return respond(&mut client, 401, &json!({"error":"Native profile is no longer enabled."})); }
+            let route = format!("/{suffix}");
+            let request = match read_body(&mut client, request, rest) {
+                Ok(request) => request,
+                Err(_) => return respond(&mut client, 400, &json!({"error":"Invalid native broker request."})),
+            };
+            return source.handle(&mut client, &request, &route);
+        }
         let expected = read_secret(self.paths.bridge_token());
         let presented = request.header("authorization").and_then(|value| value.strip_prefix("Bearer ")).map(str::trim);
         if expected.is_none() || !constant_eq(presented.unwrap_or(""), expected.as_deref().unwrap_or("")) {
@@ -898,6 +1004,19 @@ impl Bridge {
         loop {
             let now = now_ms();
             let mut candidates = self.candidates(&provider, &accounts, &pins, paid, now);
+            if candidates.is_empty() {
+                let native_error = self.state().native_errors.get(&provider).cloned();
+                if let Some(code) = native_error {
+                    let (status, message) = native::failure(&code);
+                    return respond(client, status, &json!({"code":code,"error":format!("Ojak: {provider} · {message}")}));
+                }
+            }
+            if candidates.is_empty() && self.state().authenticated_providers.as_ref().is_some_and(|providers| !providers.contains(&provider)) {
+                return respond(client, 401, &json!({
+                    "error": format!("Ojak: {provider}에 사용할 수 있는 로그인이 없어요. Ojak의 공식 CLI 계정 또는 omp의 원래 공급자 로그인 상태를 확인해 주세요. 두 곳에 중복 로그인할 필요는 없어요."),
+                    "code": "UPSTREAM_AUTH_REQUIRED"
+                }));
+            }
             // 서비스 재시작 직후에는 계정 gateway가 아직 뜨는 중일 수 있다. 전부 준비될 때까지 최대 10초 기다린다.
             for _ in 0..20 {
                 if tried.is_empty() && candidates.iter().any(|(c, _)| !c.healthy) && self.starting_up(now) {
@@ -1139,7 +1258,12 @@ fn account_view(gateway: &Gateway, accounts: &[Account], pin: Option<&Account>, 
     let mut pinned = false;
     let mut paid_ok = false;
     for account in accounts {
-        if account.provider != provider || account.email.as_deref().map(str::to_ascii_lowercase).as_deref() != Some(gateway.email.as_str()) {
+        let same_account = if let Some(subject) = gateway.identity.split('|').find_map(|part| part.strip_prefix("account:")) {
+            account.identity_key.as_deref().and_then(|key| key.split('|').find_map(|part| part.strip_prefix("subject:"))) == Some(subject)
+        } else {
+            account.email.as_deref().is_some_and(|email| email.eq_ignore_ascii_case(&gateway.email))
+        };
+        if account.provider != provider || !same_account {
             continue;
         }
         let workspace = account
@@ -1168,6 +1292,7 @@ fn account_view(gateway: &Gateway, accounts: &[Account], pin: Option<&Account>, 
     (merged.into_values().collect(), enabled, pinned, paid_fallback)
 }
 
+#[derive(Clone, Default)]
 struct BrokerIdentities {
     oauth: Vec<(String, String)>,
     providers: BTreeSet<String>,
@@ -1177,33 +1302,28 @@ struct BrokerIdentities {
 fn broker_identities() -> Result<BrokerIdentities, String> {
     let token = broker_token().ok_or("omp 로그인 연결 토큰을 읽지 못했어요. `aam omp-broker connect`를 먼저 실행해 주세요.")?;
     let body = http_get(BROKER_PORT, "/v1/snapshot", &token).map_err(|_| "omp 로그인 연결에 닿지 못했어요.".to_owned())?;
+    parse_broker_identities(&body)
+}
+
+fn parse_broker_identities(body: &Value) -> Result<BrokerIdentities, String> {
+    let rows = body.get("credentials").and_then(Value::as_array)
+        .ok_or_else(|| "omp 로그인 연결의 계정 목록 형식을 확인하지 못했어요.".to_owned())?;
     let mut oauth = Vec::new();
     let mut providers = BTreeSet::new();
-    fn walk(value: &Value, oauth: &mut Vec<(String, String)>, providers: &mut BTreeSet<String>) {
-        match value {
-            Value::Object(map) => {
-                if let (Some(provider), Some(identity)) =
-                    (map.get("provider").and_then(Value::as_str), map.get("identityKey").and_then(Value::as_str))
-                {
-                    providers.insert(provider.to_owned());
-                    let oauth_row = map
-                        .get("type")
-                        .or_else(|| map.get("credential").and_then(|credential| credential.get("type")))
-                        .and_then(Value::as_str)
-                        .is_none_or(|kind| kind == "oauth");
-                    if oauth_row && !identity.is_empty() {
-                        oauth.push((provider.to_owned(), identity.to_owned()));
-                    }
-                }
-                for child in map.values() {
-                    walk(child, oauth, providers);
-                }
+    for row in rows {
+        let Some(provider) = row.get("provider").and_then(Value::as_str).filter(|value| !value.is_empty()) else {
+            continue;
+        };
+        // Ojak 로그인은 공급자 계정 identity가 없는 브릿지 자격 증명이다.
+        // identity 유무와 무관하게 기록해야 sync마다 같은 로그인을 추가하지 않는다.
+        providers.insert(provider.to_owned());
+        let kind = row.pointer("/credential/type").and_then(Value::as_str);
+        if kind == Some("oauth") {
+            if let Some(identity) = row.get("identityKey").and_then(Value::as_str).filter(|value| !value.is_empty()) {
+                oauth.push((provider.to_owned(), identity.to_owned()));
             }
-            Value::Array(items) => items.iter().for_each(|item| walk(item, oauth, providers)),
-            _ => {}
         }
     }
-    walk(&body, &mut oauth, &mut providers);
     oauth.sort();
     oauth.dedup();
     Ok(BrokerIdentities { oauth, providers })
@@ -1211,7 +1331,13 @@ fn broker_identities() -> Result<BrokerIdentities, String> {
 
 fn spawn_gateway(paths: &Paths, gateway: &Gateway, providers: &BTreeSet<String>) -> Result<(Child, GatewayJob), String> {
     let omp = native_omp().ok_or("원래 omp 실행 파일 경로를 확인하지 못했어요.")?;
-    let broker = broker_token().ok_or("omp 로그인 연결 토큰을 읽지 못했어요.")?;
+    let (broker_url, broker) = if let Some(id) = &gateway.native_account {
+        let token = ensure_secret(&paths.home.join("bridge-native.token"))
+            .map_err(|_| "공식 CLI 연결 토큰을 만들지 못했어요.")?;
+        (format!("http://127.0.0.1:{PORT}/native/{id}"), token)
+    } else {
+        (BROKER_URL.to_owned(), broker_token().ok_or("omp 로그인 연결 토큰을 읽지 못했어요.")?)
+    };
     let root = paths.home.join("bridge");
     let agent = root.join("agent");
     let pools = root.join("pools");
@@ -1243,7 +1369,7 @@ fn spawn_gateway(paths: &Paths, gateway: &Gateway, providers: &BTreeSet<String>)
         .args(["auth-gateway", "serve", &format!("--bind=127.0.0.1:{}", gateway.port)])
         // 사용자 models.yml을 읽으면 anthropic 요청이 다시 브릿지로 돌아오므로 전용 설정 폴더를 쓴다.
         .env("PI_CODING_AGENT_DIR", &agent)
-        .env("OMP_AUTH_BROKER_URL", BROKER_URL)
+        .env("OMP_AUTH_BROKER_URL", broker_url)
         .env("OMP_AUTH_BROKER_TOKEN", broker)
         .env("OMP_AUTH_BROKER_ACCOUNT_POOL_FILE", &pool_path)
         .stdin(Stdio::null())
@@ -1454,11 +1580,31 @@ fn read_body(stream: &mut TcpStream, request: Request, mut body: Vec<u8>) -> Res
 }
 
 fn respond(stream: &mut TcpStream, status: u16, body: &Value) {
-    let text = body.to_string();
+    // pi-native decodes error.message/type. A flat string makes omp print the
+    // entire JSON envelope instead of the actionable message.
+    let text = if let Some(message) = body.get("error").and_then(Value::as_str) {
+        let kind = match status {
+            401 => "authentication_error",
+            403 => "permission_error",
+            409 => "configuration_error",
+            429 => "rate_limit_error",
+            400..=499 => "invalid_request_error",
+            _ => "upstream_error",
+        };
+        let mut error = json!({"type":kind, "message":message});
+        if let Some(code) = body.get("code") { error["code"] = code.clone(); }
+        json!({"error":error}).to_string()
+    } else {
+        body.to_string()
+    };
     let reason = match status {
         200 => "OK",
         400 => "Bad Request",
         401 => "Unauthorized",
+        403 => "Forbidden",
+        409 => "Conflict",
+        429 => "Too Many Requests",
+        502 => "Bad Gateway",
         404 => "Not Found",
         _ => "Service Unavailable",
     };
@@ -1914,6 +2060,68 @@ mod tests {
     use super::*;
     #[cfg(unix)]
     use std::os::unix::fs::PermissionsExt;
+
+    #[test]
+    fn public_model_token_cannot_read_native_credentials() {
+        let home = std::env::temp_dir().join(format!("ojak-native-auth-{}", uuid::Uuid::new_v4()));
+        fs::create_dir_all(&home).unwrap();
+        let paths = Paths { socket: home.join("service.sock"), database: home.join("state.db"), profiles: home.join("profiles"), home: home.clone() };
+        let public_token = ensure_token(&paths).unwrap();
+        ensure_secret(&home.join("bridge-native.token")).unwrap();
+        let bridge = Arc::new(Bridge {
+            service: Service::open(paths.clone()).unwrap(), paths,
+            state: Mutex::new(State::default()), enabled: AtomicBool::new(true),
+            listening: AtomicBool::new(false), connections: std::sync::atomic::AtomicUsize::new(0),
+            native_sources: Mutex::new(HashMap::new()),
+        });
+        let listener = TcpListener::bind(("127.0.0.1", 0)).unwrap();
+        let address = listener.local_addr().unwrap();
+        let worker = std::thread::spawn(move || {
+            let (socket, _) = listener.accept().unwrap();
+            socket.set_read_timeout(Some(Duration::from_secs(2))).unwrap();
+            bridge.handle(socket);
+        });
+        let mut client = TcpStream::connect(address).unwrap();
+        client.set_read_timeout(Some(Duration::from_secs(2))).unwrap();
+        write!(client, "GET /native/account/v1/snapshot HTTP/1.1\r\nHost: localhost\r\nAuthorization: Bearer {public_token}\r\n\r\n").unwrap();
+        let mut response = String::new();
+        client.read_to_string(&mut response).unwrap();
+        assert!(response.starts_with("HTTP/1.1 401 "));
+        worker.join().unwrap();
+        fs::remove_dir_all(home).unwrap();
+    }
+
+    #[test]
+    fn broker_logins_without_identity_are_not_registered_again() {
+        for (alias, upstream) in ALIASES {
+            let snapshot = parse_broker_identities(&json!({"credentials": [
+                {"provider": alias, "identityKey": null, "credential": {"type": "oauth"}},
+                {"provider": upstream, "identityKey": "account-one", "credential": {"type": "oauth"}}
+            ]})).unwrap();
+            assert_eq!(snapshot.oauth, vec![(upstream.into(), "account-one".into())]);
+            let logged_in = snapshot.providers.into_iter().collect::<Vec<_>>();
+            assert!(missing_ojak_logins(&logged_in, &[upstream.into()]).is_empty());
+        }
+    }
+
+    #[test]
+    fn malformed_broker_snapshot_does_not_clear_accounts() {
+        assert!(parse_broker_identities(&json!({"error": "unavailable"})).is_err());
+        assert!(parse_broker_identities(&json!({"credentials": null})).is_err());
+        assert!(parse_broker_identities(&json!({"credentials": []})).unwrap().oauth.is_empty());
+    }
+
+    #[test]
+    fn upstream_login_enables_each_supported_provider_without_an_ojak_login() {
+        for (alias, upstream) in ALIASES {
+            let snapshot = parse_broker_identities(&json!({"credentials": [
+                {"provider": upstream, "identityKey": "account-one", "credential": {"type": "oauth"}}
+            ]})).unwrap();
+            let logged_in = snapshot.providers.into_iter().collect::<Vec<_>>();
+            assert!(missing_ojak_logins(&logged_in, &[]).is_empty());
+            assert_eq!(missing_ojak_logins(&logged_in, &[upstream.into()]), vec![alias]);
+        }
+    }
 
     fn bucket(id: &str, model: Option<&str>, used: f64, reset_in: i64, now: i64) -> QuotaBucket {
         QuotaBucket {
@@ -2432,6 +2640,29 @@ mod tests {
         assert!(missing_ojak_logins(&owned(&["anthropic"]), &[]).is_empty());
         // 이전 ID 로그인은 gateway가 없어도 새 ID로 맞춘다. 사용자 항목은 지우지 않는다.
         assert_eq!(missing_ojak_logins(&owned(&["aam-zai"]), &[]), vec!["ojak-zai"]);
+    }
+
+    #[test]
+    fn subject_scoped_grok_account_respects_exclusion_and_manual_pin() {
+        let gateway = Gateway {
+            provider: "xai-oauth".into(), identity: "account:subject-a".into(),
+            email: "account:subject-a".into(), org: String::new(), native_account: None,
+            port: 0, child: None, spawned_at: 0, unhealthy_until: 0,
+        };
+        let account = Account {
+            id: "grok-a".into(), tool: "omp".into(), provider: "xai".into(),
+            email: Some("person@example.test".into()),
+            identity_key: Some("xai-oauth|subject:subject-a|workspace:".into()),
+            enabled: false, ..Account::default()
+        };
+        let (_, enabled, pinned, _) = account_view(&gateway, std::slice::from_ref(&account), Some(&account), PaidPolicy::default(), 0);
+        assert!(!enabled);
+        assert!(pinned);
+        let mut other = account.clone();
+        other.identity_key = Some("xai-oauth|subject:subject-b|workspace:".into());
+        let (_, enabled, pinned, _) = account_view(&gateway, std::slice::from_ref(&other), Some(&other), PaidPolicy::default(), 0);
+        assert!(enabled);
+        assert!(!pinned);
     }
 
 

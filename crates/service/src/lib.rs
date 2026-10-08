@@ -478,13 +478,16 @@ impl Service {
             .transaction_with_behavior(TransactionBehavior::Immediate)
             .map_err(db_error)?;
         expire(&tx, now_ms())?;
-        if leases(&tx)?
-            .iter()
-            .any(|record| scheduler::holds_capacity(&record.session.state))
-        {
+        let (active, uncertain) = leases(&tx)?.iter()
+            .filter(|record| scheduler::holds_capacity(&record.session.state))
+            .fold((0usize, 0usize), |(active, uncertain), record| {
+                if record.session.state == "ACTIVE" { (active + 1, uncertain) }
+                else { (active, uncertain + 1) }
+            });
+        if active + uncertain > 0 {
             return Err(ApiError::new(
                 "SESSION_BUSY",
-                "실행 중이거나 시작 결과가 불확실한 대화가 남아 있어 서비스를 해제할 수 없어요.",
+                format!("Ojak이 관리하는 공식 CLI 대화가 남아 있어 사용을 중지할 수 없어요 (실행 중 {active}개, 시작·종료 확인 중 {uncertain}개). 해당 Claude·Codex 터미널에서 대화를 종료한 뒤 다시 시도해 주세요. 대화를 유지하려면 '앱만 닫기'를 선택해 주세요."),
             ));
         }
         let permit = metadata::<Option<String>>(&tx, "uninstallPermit")?
