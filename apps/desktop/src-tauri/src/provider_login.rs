@@ -89,9 +89,7 @@ pub fn start_provider_login(provider: String, account_id: Option<String>, label:
                     }
                 }
             } else if job.status.state == "failed" {
-                let code = event.get("error").and_then(|e| e.get("code")).and_then(Value::as_str)
-                    .filter(|s| s.len() <= 64 && !s.is_empty() && s.bytes().all(|c| c.is_ascii_uppercase() || c.is_ascii_digit() || c == b'_')).unwrap_or("LOGIN_FAILED");
-                job.status.error = Some(ApiError::new(code, "공식 로그인을 완료하거나 계정을 확인하지 못했어요."));
+                job.status.error = Some(login_error(&event));
             }
             job.status.updated_at = aam_protocol::now_ms();
             job.input.take();
@@ -116,4 +114,40 @@ pub fn cancel_provider_login(id: String) -> Result<Status, ApiError> {
         job.input.take();
     }
     Ok(job.status.clone())
+}
+
+fn login_error(event: &Value) -> ApiError {
+    let code = event.get("error").and_then(|e| e.get("code")).and_then(Value::as_str)
+        .filter(|s| s.len() <= 64 && !s.is_empty() && s.bytes().all(|c| c.is_ascii_uppercase() || c.is_ascii_digit() || c == b'_')).unwrap_or("LOGIN_FAILED");
+    ApiError {
+        code: code.into(),
+        message: "공식 로그인을 완료하거나 계정을 확인하지 못했어요.".into(),
+        retryable: event.get("error").and_then(|e| e.get("retryable")).and_then(Value::as_bool).unwrap_or(false),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn recoverable_login_failure_allows_retry_without_exposing_provider_secrets() {
+        let error = login_error(&json!({"error": {
+            "code": "LOGIN_TIMEOUT", "retryable": true,
+            "message": "https://auth.example/callback?code=SECRET"
+        }}));
+        assert!(error.retryable);
+        assert_eq!(error.code, "LOGIN_TIMEOUT");
+        assert!(!serde_json::to_string(&error).unwrap().contains("SECRET"));
+    }
+
+    #[test]
+    fn nonretryable_or_invalid_retry_hint_does_not_offer_retry() {
+        for hint in [json!(false), Value::Null, json!("true"), json!(1)] {
+            let error = login_error(&json!({"error": {"code": "AUTH_OVERRIDE_CONFLICT", "retryable": hint}}));
+            assert!(!error.retryable);
+            assert_eq!(error.code, "AUTH_OVERRIDE_CONFLICT");
+        }
+        assert!(!login_error(&json!({"error": {"code": "AUTH_OVERRIDE_CONFLICT"}})).retryable);
+    }
 }
