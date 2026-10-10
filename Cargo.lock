@@ -4,7 +4,7 @@ version = 4
 
 [[package]]
 name = "aam-adapters"
-version = "0.3.0"
+version = "0.5.5"
 dependencies = [
  "aam-protocol",
  "base64 0.22.1",
@@ -21,7 +21,7 @@ dependencies = [
 
 [[package]]
 name = "aam-launcher"
-version = "0.3.0"
+version = "0.5.5"
 dependencies = [
  "aam-adapters",
  "aam-protocol",
@@ -37,7 +37,7 @@ dependencies = [
 
 [[package]]
 name = "aam-protocol"
-version = "0.3.0"
+version = "0.5.5"
 dependencies = [
  "libc",
  "serde",
@@ -48,7 +48,7 @@ dependencies = [
 
 [[package]]
 name = "aam-service"
-version = "0.3.0"
+version = "0.5.5"
 dependencies = [
  "aam-adapters",
  "aam-protocol",
@@ -90,18 +90,21 @@ dependencies = [
 
 [[package]]
 name = "ai-account-manager"
-version = "0.3.0"
+version = "0.5.5"
 dependencies = [
  "aam-launcher",
  "aam-protocol",
  "libc",
+ "memchr",
  "rfd",
+ "rusqlite",
  "serde",
  "serde_json",
  "tauri",
  "tauri-build",
  "tauri-plugin-autostart",
  "tauri-plugin-notification",
+ "tauri-plugin-single-instance",
  "tauri-plugin-updater",
  "window-vibrancy 0.6.0",
  "windows-sys 0.59.0",
@@ -4350,6 +4353,22 @@ dependencies = [
  "thiserror 2.0.20",
  "time",
  "url",
+]
+
+[[package]]
+name = "tauri-plugin-single-instance"
+version = "2.5.2"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "ee2c8fe2d6b75caed0153f91eda30ea1dea3bfb6710d5adb80456d2c035a569d"
+dependencies = [
+ "serde",
+ "serde_json",
+ "tauri",
+ "thiserror 2.0.20",
+ "tokio",
+ "tracing",
+ "windows-sys 0.61.2",
+ "zbus",
 ]
 
 [[package]]

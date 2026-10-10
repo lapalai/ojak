@@ -9,6 +9,8 @@ pub(super) struct Source {
     pub provider: &'static str,
     pub identity: String,
     state: Mutex<SourceState>,
+    /// 상태(`generation`)가 바뀌면 깨운다. long-poll이 바쁘게 다시 확인하지 않고 변경·만료·마감까지 잠든다.
+    changed: std::sync::Condvar,
 }
 #[derive(Default)]
 struct SourceState {
@@ -61,6 +63,7 @@ impl Source {
             provider,
             identity,
             state: Mutex::new(SourceState::default()),
+            changed: std::sync::Condvar::new(),
         }
     }
     fn state(&self) -> MutexGuard<'_, SourceState> {
@@ -159,8 +162,9 @@ impl Source {
                 .header("if-none-match")
                 .and_then(|v| v.trim_matches('"').parse::<i64>().ok());
             let started = std::time::Instant::now();
+            let deadline = started + Duration::from_millis(wait);
+            let mut state = self.state();
             loop {
-                let mut state = self.state();
                 if let Err(error) = self.load(&mut state, false) {
                     return auth_error(client, error);
                 }
@@ -172,9 +176,8 @@ impl Source {
                 if state.blocks.len() != count {
                     state.generation += 1;
                 }
-                if previous != Some(state.generation)
-                    || started.elapsed() >= Duration::from_millis(wait)
-                {
+                let left = deadline.saturating_duration_since(std::time::Instant::now());
+                if previous != Some(state.generation) || left.is_zero() {
                     let entries: Vec<Value> = self
                         .entry(&state)
                         .into_iter()
@@ -185,17 +188,27 @@ impl Source {
                             entry
                         })
                         .collect();
-                    let body = json!({"generation":state.generation,"generatedAt":now,"serverNowMs":now,
+                    let generation = state.generation;
+                    let body = json!({"generation":generation,"generatedAt":now,"serverNowMs":now,
                         "refresher":{"enabled":false,"intervalMs":60_000,"skewMs":0,"nextSweepInMs":0},"credentials":entries});
+                    drop(state);
                     let text = body.to_string();
-                    let _ = write!(client,"HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nCache-Control: no-store\r\nETag: \"{}\"\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",state.generation,text.len(),text);
+                    let _ = write!(client,"HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nCache-Control: no-store\r\nETag: \"{}\"\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",generation,text.len(),text);
                     let _ = client.shutdown(Shutdown::Both);
                     return;
                 }
-                drop(state);
-                std::thread::sleep(Duration::from_millis(250));
+                // 바뀔 때까지 잠근 채 기다리지 않고 잠금을 풀고 잔다. 깨우는 시점: 상태 변경, 가장 이른 차단 만료,
+                // 접근 토큰 재확인 시점(30초), 요청 마감 중 가장 이른 것.
+                let next_block = state.blocks.iter().filter_map(|b| b["blockedUntilMs"].as_i64()).min()
+                    .map(|t| Duration::from_millis((t - now).max(1) as u64));
+                let recheck = Duration::from_millis((30_000 - (now - state.checked_at)).clamp(1, 30_000) as u64);
+                let sleep = [Some(left), next_block, Some(recheck)].into_iter().flatten().min().unwrap_or(left);
+                state = self.changed.wait_timeout(state, sleep).map(|(guard, _)| guard).unwrap_or_else(|e| e.into_inner().0);
             }
         }
+        // 선언 순서의 반대로 해제되므로 `_wake`가 `state` 잠금보다 나중에 해제된다(잠금을 다시 잡아도 교착이 없다).
+        let before = self.state().generation;
+        let _wake = WakeOnChange { source: self, before };
         let mut state = self.state();
         match (request.method.as_str(), route) {
             ("POST", "/v1/credential/1/refresh") => {
@@ -272,6 +285,19 @@ impl Source {
         }
     }
 }
+
+/// 변경 요청이 끝나면(잠금이 풀린 뒤) `generation`이 바뀌었는지 보고 long-poll을 깨운다.
+struct WakeOnChange<'a> {
+    source: &'a Source,
+    before: i64,
+}
+impl Drop for WakeOnChange<'_> {
+    fn drop(&mut self) {
+        if self.source.state().generation != self.before {
+            self.source.changed.notify_all();
+        }
+    }
+}
 fn auth_error(client: &mut TcpStream, error: ApiError) {
     // Never forward native CLI stderr or credential payloads.
     let (status, message) = failure(&error.code);
@@ -343,5 +369,58 @@ mod tests {
         let entry = source.entry(&state).unwrap();
         assert_eq!(entry["credential"]["refresh"], "__remote__");
         assert_eq!(entry["credential"]["access"], "new");
+    }
+
+    /// omp gateways re-request `/v1/snapshot?wait=…` with the generation they already have. If the server answers
+    /// at once, every gateway spins and the service burns a CPU core. The poll must hold until the deadline,
+    /// and a block added meanwhile must wake it promptly.
+    #[test]
+    fn snapshot_long_poll_waits_for_its_deadline_and_wakes_on_change() {
+        use std::net::TcpListener;
+        let source = Arc::new(Source::new(Account::default(), "anthropic", "email:a@example.test|org:a".into()));
+        {
+            let mut state = source.state();
+            // A fresh token keeps `load` from calling the native CLI during the test.
+            state.access = Some(NativeAccess { access: "token".into(), expires: i64::MAX, account_id: None });
+            state.checked_at = now_ms();
+            state.generation = 7;
+        }
+        let listener = TcpListener::bind(("127.0.0.1", 0)).unwrap();
+        let address = listener.local_addr().unwrap();
+        let server = Arc::clone(&source);
+        std::thread::spawn(move || {
+            for stream in listener.incoming().flatten() {
+                let source = Arc::clone(&server);
+                std::thread::spawn(move || {
+                    let mut stream = stream;
+                    let (request, _) = super::super::read_head(&mut stream).unwrap();
+                    let route = if request.query.is_empty() { request.path.clone() } else { format!("{}?{}", request.path, request.query) };
+                    let body_request = Request { body: Vec::new(), ..request };
+                    source.handle(&mut stream, &body_request, &route);
+                });
+            }
+        });
+        let poll = |wait_ms: u64| {
+            let mut stream = TcpStream::connect(address).unwrap();
+            write!(stream, "GET /v1/snapshot?wait={wait_ms} HTTP/1.1\r\nHost: x\r\nIf-None-Match: \"7\"\r\n\r\n").unwrap();
+            let started = std::time::Instant::now();
+            let mut response = String::new();
+            stream.read_to_string(&mut response).unwrap();
+            (started.elapsed(), response)
+        };
+        let (elapsed, response) = poll(400);
+        assert!(elapsed >= Duration::from_millis(350), "answered after {elapsed:?} instead of waiting");
+        assert!(response.contains("ETag: \"7\""));
+
+        let waker = Arc::clone(&source);
+        std::thread::spawn(move || {
+            std::thread::sleep(Duration::from_millis(150));
+            let before = waker.state().generation;
+            let _wake = WakeOnChange { source: &waker, before };
+            waker.state().generation += 1;
+        });
+        let (elapsed, response) = poll(5_000);
+        assert!(elapsed < Duration::from_secs(2), "change did not wake the poll ({elapsed:?})");
+        assert!(response.contains("ETag: \"8\""));
     }
 }

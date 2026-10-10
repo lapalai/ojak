@@ -1,7 +1,7 @@
 {
   "name": "ai-account-manager",
   "private": true,
-  "version": "0.3.0",
+  "version": "0.5.5",
   "description": "Local menu-bar and tray app that assigns your own Claude Code, Codex, and omp subscription accounts",
   "author": "lapal",
   "license": "MIT",

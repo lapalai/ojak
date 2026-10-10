@@ -1,9 +1,11 @@
 import { useContext, useEffect, useState } from "react";
 import { ArrowUpRight, FolderOpen, LockKeyhole, LogOut, PowerOff, Terminal } from "lucide-react";
-import { appInfo, assertOpened, getAutostart, getExpiringNotify, openHomepage, getLanguage, setAutostart, getTrayThreshold, setExpiringNotify, setLanguage, setTrayThreshold, chooseDirectory, contactAuthor, deactivatePlan, installUpdate, launchSession, loginAccount, native, ompBridgeAction, quitApp, restartAfterUpdate, rpc, settingsPreview, updatesStatus } from "./api";
+import { appInfo, assertOpened, getAutostart, getExpiringNotify, openHomepage, getLanguage, setAutostart, getTrayThreshold, setExpiringNotify, setLanguage, setTrayThreshold, chooseDirectory, contactAuthor, deactivatePlan, installUpdate, launchSession, native, ompBridgeAction, quitApp, restartAfterUpdate, rpc, settingsPreview, updatesStatus } from "./api";
 import type { AppInfo, SettingsPreview, UpdateStatus } from "./api";
 import ojakIcon from "./assets/ojak-icon.png";
 import { ActionFeedback, Badge, Busy, Modal, PrivacyContext, Switch } from "./components";
+import { LoginPanel, loginProviderNames } from "./LoginDialog";
+import type { LoginRequest } from "./login";
 import { privacyText, setCharactersEnabled, toolNames, useAction, useBridge, useCharacters } from "./state";
 import type { Account, Decision, LaunchIntent, Snapshot } from "./types";
 import { LANGUAGE_KEY, isWindows, locale, t } from "./i18n";
@@ -18,7 +20,8 @@ export function AddAccountDialog({ snapshot, initialTool, onClose, onReload, onC
   const [tool, setTool] = useState(initialTool || snapshot.tools.find(item => item.installed && item.isolation !== "observation-only" && item.isolation !== "unsupported")?.id || "claude");
   const [label, setLabel] = useState("");
   const [profilePath, setProfilePath] = useState("");
-  const [handedOff, setHandedOff] = useState(false);
+  const [started, setStarted] = useState<LoginRequest | null>(null);
+  const [loginPending, setLoginPending] = useState(false);
   const [preview, setPreview] = useState<SettingsPreview | null>(null);
   const [inheritSettings, setInheritSettings] = useState(false);
   const [acknowledged, setAcknowledged] = useState(false);
@@ -26,10 +29,14 @@ export function AddAccountDialog({ snapshot, initialTool, onClose, onReload, onC
   const selected = snapshot.tools.find(item => item.id === tool);
   const enrollmentSupported = Boolean(selected && selected.isolation !== "observation-only" && selected.isolation !== "unsupported");
   const loginReady = Boolean(preview && acknowledged && (!inheritSettings || preview.canImport));
+  // 로그인을 시작하면 폼 대신 진행 화면을 보인다. 이름과 설정 가져오기는 시작할 때 확정되어 바뀌지 않는다.
+  if (started) return <Modal title={t("login.title.new", { provider: loginProviderNames[started.provider] })} subtitle={privacyText(started.label, masked)} onClose={onClose} busy={loginPending}>
+    <LoginPanel request={started} autoStart accounts={snapshot.accounts} onReload={onReload} onClose={onClose} onPendingChange={setLoginPending} />
+  </Modal>;
   return <Modal title={t("add.title")} subtitle={t("add.subtitle")} onClose={onClose} busy={action.pending}>
     <div className="segmented" aria-label={t("add.modeAria")}>
-      <button type="button" aria-pressed={mode === "login"} disabled={action.pending} onClick={() => { setMode("login"); setHandedOff(false); action.clear(); }}>{t("add.mode.login")}</button>
-      <button type="button" aria-pressed={mode === "profile"} disabled={action.pending} onClick={() => { setMode("profile"); setHandedOff(false); action.clear(); }}>{t("add.mode.profile")}</button>
+      <button type="button" aria-pressed={mode === "login"} disabled={action.pending} onClick={() => { setMode("login"); action.clear(); }}>{t("add.mode.login")}</button>
+      <button type="button" aria-pressed={mode === "profile"} disabled={action.pending} onClick={() => { setMode("profile"); action.clear(); }}>{t("add.mode.profile")}</button>
     </div>
     <form onSubmit={event => {
       event.preventDefault();
@@ -39,13 +46,14 @@ export function AddAccountDialog({ snapshot, initialTool, onClose, onReload, onC
           const account = await rpc<Account>("account.register", { tool, label: label.trim(), profilePath: profilePath.trim() });
           await onReload(); onConnected(account); onClose();
         } else {
-          assertOpened(await loginAccount(tool, label.trim(), inheritSettings ? preview?.digest : null));
-          setHandedOff(true);
+          const provider = tool === "claude" ? "anthropic" : tool === "codex" ? "openai-codex" : null;
+          if (!provider) throw { code: "ADAPTER_UNVERIFIED", message: t("add.note.unsupported"), retryable: false };
+          setStarted({ provider, label: label.trim(), settingsDigest: inheritSettings ? preview?.digest : null });
         }
-      }, () => mode === "login" ? t("add.loginOpened") : undefined);
+      });
     }}>
       <fieldset disabled={action.pending} className="form-fields">
-        <label>{t("add.tool")}<select value={tool} onChange={event => { setTool(event.target.value); setHandedOff(false); setPreview(null); setAcknowledged(false); setInheritSettings(false); action.clear(); }} autoFocus>{snapshot.tools.map(item => <option key={item.id} value={item.id}>{item.name}{item.isolation === "observation-only" ? t("tool.observationOnly") : item.isolation === "unsupported" ? t("tool.unsupported") : item.installed ? "" : t("tool.installRequired")}</option>)}</select></label>
+        <label>{t("add.tool")}<select value={tool} onChange={event => { setTool(event.target.value); setPreview(null); setAcknowledged(false); setInheritSettings(false); action.clear(); }} autoFocus>{snapshot.tools.map(item => <option key={item.id} value={item.id}>{item.name}{item.isolation === "observation-only" ? t("tool.observationOnly") : item.isolation === "unsupported" ? t("tool.unsupported") : item.installed ? "" : t("tool.installRequired")}</option>)}</select></label>
         {enrollmentSupported && <label>{t("add.label")}<input required maxLength={80} value={label} onChange={event => setLabel(event.target.value)} placeholder={t("add.labelPlaceholder")} autoComplete="off" /></label>}
         {enrollmentSupported && mode === "profile" && <label>{t("add.profilePath")}<div className="input-with-button"><input required value={profilePath} onChange={event => setProfilePath(event.target.value)} placeholder={t("add.profilePlaceholder")} autoComplete="off" spellCheck={false} /><button type="button" onClick={() => { void action.run(async () => { const path = await chooseDirectory(); if (path) setProfilePath(path); }); }}><FolderOpen size={15} />{t("common.choose")}</button></div></label>}
       </fieldset>
@@ -67,7 +75,7 @@ export function AddAccountDialog({ snapshot, initialTool, onClose, onReload, onC
       {selected?.reason && <p className="gate-reason">{privacyText(selected.reason, masked)}</p>}
       {!selected?.installed && <p className="gate-reason">{t("add.notInstalled")}</p>}
       <ActionFeedback error={action.error} message={action.message} />
-      <div className="modal-footer"><button type="button" disabled={action.pending} onClick={onClose}>{t("common.close")}</button>{handedOff ? <button type="button" className="primary" disabled={action.pending} onClick={() => { void action.run(onReload, () => { onClose(); }); }}>{t("add.checkAccounts")}</button> : <button type="submit" className="primary" disabled={!enrollmentSupported || action.pending || !selected?.installed || !label.trim() || (mode === "profile" ? !profilePath.trim() : !loginReady)}>{action.pending ? <Busy /> : mode === "login" ? <><ArrowUpRight size={15} />{t("add.openLogin")}</> : t("add.connectProfile")}</button>}</div>
+      <div className="modal-footer"><button type="button" disabled={action.pending} onClick={onClose}>{t("common.close")}</button><button type="submit" className="primary" disabled={!enrollmentSupported || action.pending || !selected?.installed || !label.trim() || (mode === "profile" ? !profilePath.trim() : !loginReady)}>{action.pending ? <Busy /> : mode === "login" ? <><ArrowUpRight size={15} />{t("add.openLogin")}</> : t("add.connectProfile")}</button></div>
     </form>
   </Modal>;
 }

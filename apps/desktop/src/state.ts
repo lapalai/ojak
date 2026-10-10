@@ -1,10 +1,13 @@
 import { useCallback, useEffect, useRef, useState } from "react";
+import { getCurrentWindow } from "@tauri-apps/api/window";
+import { listen } from "@tauri-apps/api/event";
 import { bucketState } from "./limits";
 import { bridgeUsage, ompBridgeAction, rpc, toApiError } from "./api";
 import type { BridgeUsage, OmpBridgeStatus } from "./api";
 import { PROVIDER_ORDER } from "./types";
 import type { Account, ApiError, QuotaBucket, Snapshot } from "./types";
 import { accountLabel, intlLocale, lookup, t } from "./i18n";
+import { whenBand } from "./overview";
 
 /// 화면에서 쓰는 공급자 이름. 키는 계정 저장소의 provider 값(anthropic/openai/google/xai/other)이다.
 export const providerNames: Record<string, string> = { anthropic: "Anthropic", openai: "OpenAI Codex", google: "Google Antigravity", xai: "xAI", other: "Z.AI" };
@@ -66,6 +69,28 @@ const minutes = unitFormat("minute"), hours = unitFormat("hour"), days = unitFor
 export function absoluteTime(value: number | null | undefined): string {
   if (!value || !Number.isFinite(value)) return t("time.noRecord");
   return absoluteFormat.format(value);
+}
+
+const weekdayFormat = new Intl.DateTimeFormat(intlLocale, { weekday: "short", hour: "2-digit", minute: "2-digit" });
+const dateFormat = new Intl.DateTimeFormat(intlLocale, { month: "short", day: "numeric", hour: "2-digit", minute: "2-digit" });
+const fullFormat = new Intl.DateTimeFormat(intlLocale, { year: "numeric", month: "short", day: "numeric", weekday: "short", hour: "2-digit", minute: "2-digit" });
+
+/// 줄에 쓰는 짧은 시각: 하루 안이면 남은 시간, 일주일 안이면 요일·시각, 그 뒤는 날짜·시각. 시간대는 붙이지 않는다(화면 아래에 한 번만 적는다).
+export function shortTime(value: number, now = Date.now()): string {
+  const band = whenBand(value, now);
+  return band === "pending" ? t("time.resetPending") : band === "relative" ? relativeTime(value, true) : (band === "weekday" ? weekdayFormat : dateFormat).format(value);
+}
+
+/// 자세히 보기에 쓰는 전체 날짜·시각. 시간대는 붙이지 않는다.
+export function fullTime(value: number | null | undefined): string {
+  return !value || !Number.isFinite(value) ? t("time.noRecord") : fullFormat.format(value);
+}
+
+/// 화면의 시각이 따르는 시간대(예: `Asia/Seoul (GMT+9)`).
+export function timeZoneLabel(): string {
+  const zone = new Intl.DateTimeFormat(intlLocale).resolvedOptions().timeZone;
+  const short = new Intl.DateTimeFormat(intlLocale, { timeZoneName: "short" }).formatToParts(Date.now()).find(part => part.type === "timeZoneName")?.value;
+  return short && short !== zone ? `${zone} (${short})` : zone;
 }
 
 /// 지난 시간(또는 `future`면 남은 시간)을 "N분 전"/"in N min"처럼 현재 언어로 만든다. 한 시간 이상이면 분, 하루 이상이면 시간까지 붙인다.
@@ -212,6 +237,20 @@ export function useAction() {
   return { pending, error, message, run, clear: () => { setError(null); setMessage(null); } };
 }
 
+/// 이 창이 지금 보이는지. 앱이 창을 숨기거나 보일 때 보내는 `ojak://window-visible`을 따른다.
+/// WebKit·WebView2는 창을 숨겨도 `document.hidden`을 늘 바꾸지는 않으므로 이 값을 주기 조회의 기준으로 쓴다.
+/// 시작 값은 창의 실제 표시 상태다(자동 시작으로 숨겨 뜬 창, 숨겨 둔 팝오버는 처음부터 멈춘다).
+export function useWindowVisible(): boolean {
+  const [visible, setVisible] = useState(true);
+  useEffect(() => {
+    let active = true;
+    void getCurrentWindow().isVisible().then(value => { if (active) setVisible(value); }).catch(() => undefined);
+    const off = listen<boolean>("ojak://window-visible", event => { if (active) setVisible(event.payload); });
+    return () => { active = false; void off.then(stop => stop()); };
+  }, []);
+  return visible;
+}
+
 export function useSnapshot() {
   const [snapshot, setSnapshot] = useState<Snapshot | null>(null);
   const [error, setError] = useState<ApiError | null>(null);
@@ -230,7 +269,8 @@ export function useSnapshot() {
       if (!alive.current) return;
       const request = (async () => {
         try {
-          const result = await rpc<Snapshot>(refresh ? "quota.refresh" : "status.read");
+          // 새로고침 버튼만 공급자 캐시를 건너뛴다. 3초 주기 읽기는 서비스의 마지막 관측만 읽는다.
+          const result = await rpc<Snapshot>(refresh ? "quota.refresh" : "status.read", refresh ? { force: true } : {});
           if (result.version !== 1) throw { code: "PROTOCOL_MISMATCH", message: t("api.protocolMismatch"), retryable: false };
           // 라벨은 화면 표시용이라 서비스에 되돌려 보내지 않는다. 자동 발견 계정의 `기본 프로필`을 여기서 한 번만 옮긴다.
           const accounts = result.accounts.map(account => ({ ...account, label: accountLabel(account.label) }));
@@ -249,14 +289,20 @@ export function useSnapshot() {
     }
   }, []);
 
+  const visible = useWindowVisible();
   useEffect(() => {
     alive.current = true;
+    return () => { alive.current = false; };
+  }, []);
+  // 숨겨진 창은 3초 주기 조회를 하지 않는다. 다시 보이면 곧바로 한 번 읽고 주기를 재개한다.
+  useEffect(() => {
+    if (!visible) return;
     void load();
     const interval = window.setInterval(() => { if (!document.hidden && !refreshLock.current) void load(); }, 3000);
     const onVisible = () => { if (!document.hidden) void load(); };
     document.addEventListener("visibilitychange", onVisible);
-    return () => { alive.current = false; window.clearInterval(interval); document.removeEventListener("visibilitychange", onVisible); };
-  }, [load]);
+    return () => { window.clearInterval(interval); document.removeEventListener("visibilitychange", onVisible); };
+  }, [load, visible]);
   return { snapshot, error, connecting, refreshing, reload: load };
 }
 
@@ -270,7 +316,9 @@ export function useBridge(windowMinutes: number | null) {
   const [usageWindow, setUsageWindow] = useState(bridgeCache.usageWindow);
   const [error, setError] = useState<ApiError | null>(null);
   const [loaded, setLoaded] = useState(bridgeCache.status !== null);
+  const visible = useWindowVisible();
   useEffect(() => {
+    if (!visible) return;
     let active = true;
     let busy = false;
     setLoaded(false);
@@ -297,6 +345,6 @@ export function useBridge(windowMinutes: number | null) {
     const onVisible = () => { if (!document.hidden) void load(); };
     document.addEventListener("visibilitychange", onVisible);
     return () => { active = false; window.clearInterval(interval); document.removeEventListener("visibilitychange", onVisible); };
-  }, [windowMinutes]);
+  }, [windowMinutes, visible]);
   return { status, usage: usageWindow === windowMinutes ? usage : null, error, loaded: loaded && (windowMinutes === null || usageWindow === windowMinutes || Boolean(error)) };
 }

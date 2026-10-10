@@ -9,8 +9,11 @@ Tauri 2 + React 19/Vite 메뉴바 앱(제품명 Ojak, bundle id `ai.aam.desktop`
 | 지금 사용 현황 | `UsageView.tsx` (브릿지가 없으면 도구별 남은 한도·리셋 카드가 먼저. omp 요청 수는 브릿지 연결 후에만. 공급자별 자동/수동, 접힌 배정 설정 `AllocationSettings.tsx`) |
 | 세션 | `SessionsView.tsx` |
 | 연결 | `ConnectionsView.tsx` |
-연결 화면에서 '로그인 필요' 계정은 [다시 로그인]으로 그 프로필의 공식 로그인을 연다(`aam account login --account`). 새 프로필을 만들지 않는다.
+| 토큰·비용 | `TokenUsageView.tsx`, `local-usage.ts`(순수 규칙), 네이티브 `src-tauri/src/local_usage.rs`. 이 PC의 omp·Claude CLI·Codex JSONL을 `AAM_HOME/local-usage.sqlite3`에 증분 색인(숫자·시각·모델·해시 ID만). 처음 읽기는 낮은 우선순위 백그라운드 스레드가 창과 무관하게 끝까지 진행하고, 진행률은 읽은 바이트 기준. 오늘·이번 달·전체에 실제 날짜 범위 표시. 환산액은 API 가격 기준이며 청구액이 아니다. |
+로그인·다시 로그인은 모두 앱이 소유하는 작업이다(`LoginDialog.tsx`의 `LoginPanel`, `login.ts` 순수 규칙). 사용자가 [공식 로그인 열기]를 누르면 `start_provider_login({provider, accountId?, label?, settingsDigest?})`가 작업을 만들고, 화면은 `provider_login_status({id})`를 1초마다 읽어 시작 중→브라우저 대기→계정 확인→한도·omp 반영→성공/실패/취소를 구분해 보인다. 브라우저를 열었다는 사실은 성공이 아니며, 성공(`succeeded`)은 네이티브가 정확한 계정을 확인한 뒤에만 오고 그때에만 스냅샷을 다시 읽는다. 창을 닫아도 작업은 계속된다. 다시 열면 `list_provider_logins`에서 `findLoginJob`이 같은 공급자·대상 계정(`targetAccountId`, 새 계정은 `null`끼리)의 가장 최근 작업을 고른다: ① 진행 중인 작업이 있으면 그것 ② 없으면 끝난 작업 중 가장 최근 것의 결과(성공·실패·취소 그대로, 오래된 성공이 새 실패를 덮지 않고 그 반대도 같다). 그 최신 결과를 이미 화면에서 봤으면(`seenResults`, 앱 프로세스 동안 유지) 새 로그인 화면이며 더 오래된 못 본 결과는 되살리지 않는다. 못 본 결과는 시간 제한 없이 앱이 살아 있는 동안 복원된다. 결과 화면을 한 번 보여 주면 그 작업은 본 것으로 기록되므로, 같은 공급자의 새 계정을 일부러 추가할 때 예전 작업이 막지 않는다. 다른 공급자·다른 대상 계정의 작업은 섞이지 않는다(같은 공급자의 다른 계정 작업이 진행 중이면 시작이 네이티브 `LOGIN_BUSY`로 막힌다). 계정 추가 창(`autoStart`)과 [다시 시도]·[다시 시작]은 이어 붙지 않고 항상 새 작업을 시작한다(같은 대상의 진행 중 작업만 네이티브가 그대로 돌려준다). 취소(`cancel_provider_login`)는 창의 버튼으로만 한다. 진입점: 계정 행·연결 화면의 [다시 로그인](omp 전용 만료 계정 포함), 계정 추가 창의 새 Claude·Codex 로그인(이름·설정 가져오기 확정 뒤 같은 진행 화면), 연결 화면 omp 패널의 xAI·Google 로그인. 오래된 `/login` 안내 모달과 `login_account` 호출은 없다.
+공식 Claude 조회가 미로그인을 반환하면 등록된 identity는 보존한 채 `auth-required`로 갱신하므로 이 버튼을 사용할 수 있다. 같은 identity로 다시 로그인하면 복구되고, 다른 identity로 바뀌면 기존 바인딩을 자동 교체하지 않는다.
 공통: `App.tsx`, `state.ts`(`useSnapshot`, `useBridge`, `useAction`, 공급자 별칭), `api.ts`, `types.ts`, `dialogs.tsx`, `components.tsx`, `i18n.ts`.
+Windows는 `tauri-plugin-single-instance`를 다른 플러그인보다 먼저 등록한다. 두 번째 실행은 기존 `main` 창을 다시 표시·포커스하고 종료하며, 자동 시작 인수로 들어온 중복 실행은 창을 열지 않는다. macOS의 기존 `Reopen` 처리는 유지한다.
 
 ## 글꼴·조판 (`styles.css`)
 - 본문 글꼴은 앱에 넣은 Pretendard Variable(`src/assets/fonts`, SIL OFL 1.1, 약 2 MB)이다. macOS·Windows에서 한글·영문·인도네시아어를 같은 글꼴과 같은 굵기 단계로 그린다. 코드는 `--mono`(SF Mono/Menlo, Windows Cascadia Mono/Consolas).
@@ -20,14 +23,14 @@ Tauri 2 + React 19/Vite 메뉴바 앱(제품명 Ojak, bundle id `ai.aam.desktop`
 - **오류 표시** (`components.tsx` `ErrorMessage`, `errors.ts` `describeError`): `ApiError.code`에 `error.code.<CODE>`(en·ko·id) 문장이 있으면 그것을 주 문장으로 보이고, 서비스·CLI·앱이 보낸 원문(`ApiError.message`)은 접힌 `<details>`("자세히")에 바이트 그대로 둔다. 원문에는 변수·옵션 이름, 경로, 설정 파일 위치가 들어 있어 지원 문의와 진단에 쓴다. 주 문장에는 원문의 값을 옮기지 않는다(백엔드가 이름·경로를 기계가 읽는 형태로 주지 않기 때문에 `params`는 아직 없다). 사전에 없는 코드는 원문이 주 문장이고 "자세히"는 없다. 원문이 비었거나 주 문장과 같으면 "자세히"도 없다. 이메일 가림(`privacyText`)은 두 곳 모두 적용한다. 새 `ApiError::new("CODE", …)`를 화면까지 보내려면 `error.code.CODE`를 세 사전에 모두 추가한다(`errors.test.ts`가 en·ko·id 누락, 자리표시자 불일치, 한글 섞임(en·id), 앱 셸(`main.rs`)이 직접 내는 코드의 누락을 막는다). CLI·서비스 메시지 자체는 한국어뿐이다.
 - `main.rs` `run_management`는 `aam`이 stderr에 내는 `aam: <문장> (<CODE>)`에서 코드를 되살려 `ApiError`로 넘긴다(`management_error`). 이 모양이 아니면 `INSTALLATION_ERROR`와 원문이다. 이 코드가 없으면 연결·서비스·준비 작업의 실패가 모두 한 코드로 뭉쳐 화면이 안내를 고를 수 없다.
 - Windows 화면 확인용 `PrintWindow` 캡처는 DWM의 보이지 않는 테두리까지 담아 왼쪽·오른쪽·아래에 검은 띠가 생긴다. 실제 창 문제가 아니므로 `DWMWA_EXTENDED_FRAME_BOUNDS`로 잘라서 본다.
-- 캐릭터(깍이·호랑이)는 세 곳에만 나온다: 사용 현황의 호출 없음(낮잠, `tiger-nap.webp`, 회색 가는 선 + 주황 포인트 하나, 조회 완료·호출 0회일 때만, 순위 칸이 비면 한 줄 전체 사용), 공급자 전체 소진 띠, 정보 로고 7번(쌀가게). 그림은 장식(`alt=""`)이고 정보와 문구는 그대로 둔다(농담 문구 없음). 설정의 "캐릭터 표시"(`ojak.characters`, localStorage)를 끄면 낮잠 그림만 빠진다. 준비 완료·계정 카드·트레이 팝오버에는 넣지 않는다.
+- 캐릭터(깍이·호랑이)는 네 곳에만 나온다: 사용 현황의 호출 없음(낮잠, `tiger-nap.webp`, 회색 가는 선 + 주황 포인트 하나, 조회 완료·호출 0회일 때만, 순위 칸이 비면 한 줄 전체 사용), 공급자 전체 소진 띠, 정보 로고 7번(쌀가게), 토큰·비용의 산수도(읽는 동안 `yakgwa-*.png` 4칸 동작 그림으로 약과를 주워 먹고, 다 읽으면 `tiger-play.png` 정지 그림. 호랑이 크기는 읽기 진행률만 따르며 사용량과 무관). 그림은 장식(`alt=""`)이고 정보와 문구는 그대로 둔다(농담 문구 없음). 설정의 "캐릭터 표시"(`ojak.characters`, localStorage)를 끄면 낮잠 그림과 토큰·비용 장면이 빠진다. 준비 완료·계정 카드·트레이 팝오버에는 넣지 않는다. 동작 그림 원본은 `docs/design/yakgwa-art/`(Codex `gpt-image-2` 생성).
 
 ## 처음 설치·설정
 - `SetupGuide`는 서비스·shell PATH·계정 보유 도구의 shim 설치와 실제 명령 검증을 구분한다. 수동으로 다시 열거나 상태를 조회한 직후에는 ‘설정 적용됨 · 실제 명령은 아직 미확인’으로 표시한다. 실패한 단계 아래에는 `notices`의 이유와 다음 행동을 표시 언어로 보여 준다. 툴팁만 쓰지 않는다.
 - 상태 조회는 `aam setup --status`로 셸을 실행하지 않는다. ‘다시 점검’은 Unix에서 새 로그인 셸의 시작 파일을 실행하고, Windows에서는 PowerShell을 띄우지 않고 저장된 시스템·사용자 PATH를 직접 해석한다. ‘시작하기’는 누락된 설치와 명령 검사를 진행한다. 명령별 최대 5초이며 기존 터미널·IDE의 적용 여부를 보장하지 않는다.
 - 계정 추가 대화상자 등 다른 대화상자가 열리면 준비 안내를 숨기고, 닫힌 뒤 상태를 다시 확인한다. 계정 표시는 가림 설정을 따른다.
 - ‘나중에’로 닫아도 사이드바의 ‘Ojak 시작하기’로 다시 열 수 있다. 감지된 omp는 체크박스(기본 꺼짐)로 사용자가 직접 동의했을 때만 broker·bridge·observer를 함께 연결한다. README의 "omp 브릿지 기본 꺼짐" 고지와 같아야 한다. 연결 오류를 표시하며, omp 재실행/확장 재로드·기존 역할 모델 선택이 필요할 수 있음을 알린다. 설정 완료와 실요청 경유 관측은 별개다.
-- Windows에서 감지된 omp는 미지원 안내만 표시하며 준비 완료 조건이나 설치 요청에 포함하지 않는다(`ompSupported`). Windows·Unix 명령 확인의 범위를 각각의 언어로 안내한다.
+- Windows도 감지된 omp를 같은 동의·연결 흐름으로 지원한다(`ompSupported: true`). Windows·Unix 명령 확인의 범위는 각각의 언어로 안내한다.
 - **시작하기 카드** (`OnboardingCard.tsx`, 판정은 `onboarding.ts`, 테스트 `onboarding.test.ts`): 사용 현황 맨 위(`UsageView`)에 네 단계(서비스 켜짐 · 터미널 연결됨 · 계정 연결 · 첫 실행)를 상태 점 + 글자로 보여 준다. 서비스·터미널은 `setup_status`(읽기 전용, 창 포커스·계정 변화·준비 창 변경 때 다시 읽음)로, 계정은 실행 가능한 Claude·Codex 계정 수로, 첫 실행은 `snapshot.sessions.length > 0`으로 판정한다. 서비스·터미널 단계의 기준은 준비 창과 같다(`serviceReady`·`terminalReady`). 네 단계가 모두 끝나면 "시작하기 4/4 완료 ✓" 한 줄로 접히고 [×]로 닫으면 `localStorage` `ojak.onboardingDismissed`에 기억한다. 준비 창의 [나중에]는 카드를 숨기지 않고, 사이드바 'Ojak 시작하기'는 준비 창을 열면서 닫은 카드도 다시 펼친다.
 - **빈 상태**: 연결된 계정이 0이면 계정 단계에 설치된 도구별 [Claude 로그인]·[Codex 로그인]이 바로 붙는다(`onAdd(tool)` = 연결 화면과 같은 계정 추가 흐름). 설치된 도구가 없으면 설치 안내 문장이 나온다. 막다른 화면이 없다.
 - **터미널 열기** (`OpenTerminal`, `api.ts` `openPrefilledTerminal`): Tauri `open_prefilled_terminal(tool: "claude" | "codex")`가 Mac에서 사용자 zsh 환경 그대로 Terminal을 열고 입력줄에 단어 하나만 적어 둔다(실행하지 않음, 사용자가 Enter). 성공하면 "터미널에서 Enter만 누르세요". `{opened:false, prefilled:false}`(Windows, zsh 아님)이면 아무것도 열지 않고 명령을 코드 칩과 [복사] 버튼으로 보여 주며 "새 터미널에서 입력하세요"라고 안내한다(Windows는 처음부터 이 모양). 실패 오류는 `ErrorMessage`로 현지화해 보인다. 첫 실행 단계는 서비스와 터미널 연결이 끝난 뒤에만 이 동작을 낸다(연결 전에는 Ojak을 거치지 않으므로). 준비 완료 화면도 같은 컴포넌트를 쓴다. 도구는 실행 가능한 계정이 있는 것 중 claude 먼저(`preferredTool`).
@@ -38,14 +41,20 @@ Tauri 2 + React 19/Vite 메뉴바 앱(제품명 Ojak, bundle id `ai.aam.desktop`
 - omp 브릿지가 연결되지 않았으면 요청 수 순위·기간 선택·빈 '호출 없음' 칸을 띄우지 않는다. Claude·Codex 계정 카드(남은 한도·리셋)가 먼저 나오고, omp 연결 안내는 그 아래 한 줄이다.
 - `useBridge`는 기간이 바뀌면 이전 기간의 사용 내역을 표시하지 않는다. 조회 중·조회 실패·조회 성공 후 0회를 구분하며 실패한 사용 내역을 0회나 최신 집계로 표시하지 않는다.
 - 경로 확인 불가는 재시작만으로 해결된다고 약속하지 않는다. 새 기록에서도 지속되면 연결 화면의 진단 내보내기로 점검하도록 안내한다.
-- 주간 한도(모델별 주간 한도 포함) 아래에 공급자가 제공한 `resetsAt` 기준 남은 초기화 시간을 표시한다. 툴팁은 정확한 현지 날짜·시간이며, 시각이 없으면 생략하고 지난 시각은 ‘리셋 확인 대기’로 표시한다.
-- 사용 현황의 한도 배지는 `snapshot.quotaSummaries`를 그대로 사용한다. 화면에서 배정 결론을 재계산하지 않으며, 요약이 없는 구서비스에는 갱신 필요를 안내한다. 안전 잔여량 안쪽도 대안이 없으면 CLI·omp 모두 남은 한도를 사용한다. 이 배지는 모델·프로젝트·동시 슬롯이 정해지지 않은 현재 한도 요약이며 특정 실행 허용 여부는 아니다.
+- 계정 목록은 `AccountRow`의 접힌 요약 행이 기본이다. 별칭/이메일·상태·핵심 공용 한도·다음 시점을 보여 주고, `overview.ts`가 소진 시 가장 늦게 풀리는 공용 한도를 우선한다. 모델별 한도는 공용 잔여율에 섞지 않는다. 순서는 사용량 대신 이름 기준이며, 펼침은 구성원 ID로 유지한다.
+- 사용 현황의 한도 배지는 `snapshot.quotaSummaries`를 사용한다. 배정 정책은 변경하지 않으며, `available` 중 공용 잔여량이 30% 이하면 ‘사용 가능 · 잔여량 적음’으로 표현한다. 여유분 안쪽은 ‘다른 계정 우선’이다. 모델·프로젝트·동시 슬롯이 없는 한도 요약이므로 특정 실행을 보장하지 않는다.
+- 과거 한도·전체 리셋 날짜·관측 출처·계정별 요청 기록은 펼친 상세에 표시한다. 차단된 계정의 남은 한도는 회색으로 낮춘다. 요약에는 짧은 다음 시점, 상세에는 정확한 날짜를 쓰고 시간대는 공통 하단에 한 번 표시한다. 요청 순위와 연결 기록은 계정 아래 접힌 이력 영역에 둔다.
 - 서비스 `quota_summary.rs`와 `state.ts`는 공급자별 workspace/subject, OAuth pin, workspace 없는 이메일 근거로 그룹을 만든다. 신원 없는 관측은 동일 이메일의 확인된 그룹이 하나일 때만 붙인다. 요약은 모든 `accountIds`를 반환하고 화면은 대표 계정 ID로 찾는다. 같은 bucket ID는 최신 관측을 쓰며 소진·모델 제한·차단은 구분한다.
+- 오래된 한도는 `limits.ts::quotaReading`으로 마지막 확인값과 관측 시각을 분리해 회색으로 표시한다. `unknown` 배지는 확인 작업이 진행 중이거나 계정 사용이 허용·차단된다고 단정하지 않는다. 제한 시각은 ‘다시 사용’ 보장이 아닌 ‘재확인’으로 안내하고, 버킷 라벨이 없는 사용량 제한도 일반 사용량 제한 문구로 설명한다.
+- 명시적 인증 만료는 `login`으로 구분한다. identity 없는 오래된 omp 행은 같은 그룹의 확인된 인증 실패를 가리지 않는다. 공식 CLI 계정과 omp 전용 계정 모두 ‘다시 로그인’이 앱 로그인 창(`LoginPanel`)을 연다. 조회 실패만으로는 로그인 만료라고 단정하지 않는다. Mac 실제 만료 계정의 login 판정·버튼·안내 열기/닫기와 정상 native 계정 유지까지 확인했으며 실제 사용자 재로그인은 수행하지 않았다.
+- 일회성 회복 알림: `get_recovery_watches` / `set_recovery_watch({accountId, enabled})`가 `ui-settings.json`에 계정 ID·관측 기준을 저장한다. 권한 거부/미확인은 UI 오류로 표시한다. 인증·검증된 활성 계정에서 감시 이후의 신선한 한도가 회복되고 요약이 available/reserve여야 알린다. 시계 경과·stale·unknown만으로는 알리지 않는다. 앱 재시작 후 감시를 유지하고 취소할 수 있으며, 알림 본문에는 공급자만 표시한다.
+- 검증 범위: Mac 설치 앱에서 기본 접힘·차단 상세의 회색 잔여량·알림 설정·앱 재시작 후 유지·취소를 확인했다. 실제 공급자 리셋 후 OS 알림 도착은 아직 미관측이며, 회복/미확인/시계 경과/중복 방지는 결정적 단위 테스트로 검증했다.
 
 
 ## Tauri 명령 (`src-tauri/src/main.rs`)
 - `rpc` 허용 목록: `status.read`, `quota.refresh`, `route.explain`, `policy.update`, `account.register`, `account.update`. 그 외 `METHOD_DENIED` (`main.rs:35-51`).
 - 관리 작업(`integration_action`, `omp_bridge_action`, `omp_broker_action`, `install_service`, `stop_service` …)은 `run_management`(`main.rs:195`)가 같은 폴더의 `aam`을 `AAM_HOME`과 함께 실행한다.
+- 앱 시작 시 `refresh_integrations` → `aam integration refresh-extensions`로 현재 설치본이 소유한 기존 omp 확장을 맞춘다. 다른 앱 복사본은 전역 연결을 바꾸지 않으며, 실패는 화면의 `ActionFeedback`으로 안내한다. 인증을 추가하거나 서비스·사용자 대화를 재시작하지 않고 OS 알림도 추가하지 않는다.
 - `bridge_usage`(`main.rs:561`): `logs/bridge.log`를 최대 4 MiB 읽어 5분 단위로 모은다.
 - `launch_session`: 새 관리 세션을 Terminal에서 연다.
 - `service_version_status` / `service_restart`: 앱만 DMG로 덮어써 서비스가 예전 버전으로 남은 경우를 위한 명령. 상태는 읽기 전용 비교(`aam_launcher::service_version`), 재시작은 사용자가 [서비스 다시 시작]을 눌렀을 때만 `service_version::restart`(lease 검사 → 재시작 → 버전 확인)를 부른다. 화면은 `SetupGuide.tsx`의 `ServiceVersionNotice`(앱 시작·서비스 시작 시각이 바뀔 때 비교)가 대시보드 위에 버튼 하나짜리 안내를 띄운다. 최근 15분 안에 쓴 omp 브릿지 세션이 있으면 `update.warn` 문구로 먼저 경고하고 한 번 더 누르게 한다. 쓰는 중인 관리 세션은 서비스가 `SESSION_BUSY`로 거절하고 화면이 나중에 다시 누르라고 안내한다. 성공 뒤 서비스 버전이 앱과 같은지 다시 읽어 확인하며, 실패하면 기존 서비스를 그대로 두고 현지화한 오류를 보인다. 연결 화면의 서비스 표에도 서비스 버전이 나온다.
@@ -123,7 +132,7 @@ graph TD
   Policy -- Remove rule --> Policy
 
   Conn -- Add account --> AddDlg[[AddAccountDialog]]
-  AddDlg -- login mode --> LoginTerm[(Terminal: aam account login)]
+  AddDlg -- login mode --> LoginTerm[[LoginPanel: start_provider_login / provider_login_status]]
   AddDlg -- profile mode: account.register --> Conn
   Conn -- omp Connect/Disconnect --> Conn
   Conn -- Install shim --> InstDlg[[IntegrationDialog install]]

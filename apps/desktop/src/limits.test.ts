@@ -1,6 +1,6 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { allResting, bucketState, creditCount, limitsOf, remainingTone, tightestOf, usdLimit, usdUsed } from "./limits.ts";
+import { allResting, bucketState, creditCount, limitsOf, quotaReading, remainingTone, tightestOf, usdLimit, usdUsed } from "./limits.ts";
 import type { QuotaBucket } from "./types.ts";
 
 const bucket = (id: string, label: string, used: number, model: string | null = null): QuotaBucket =>
@@ -60,6 +60,21 @@ test("an exhausted bucket whose reset passed or whose observation is old is stal
   assert.equal(bucketState(exhausted(now - 60_000, now - 1), 900, now), "stale");
   assert.equal(bucketState(exhausted(now - 901_000, now + 60_000), 900, now), "stale");
   assert.equal(tightestOf(limitsOf([exhausted(now - 60_000, now - 1)], [], candidate => bucketState(candidate, 900, now))), null);
+});
+
+test("a 37-hour-old reading keeps its last value but is not confirmed as current room", () => {
+  const now = 200_000_000;
+  const seen = (observedAt: number, used: number): QuotaBucket => ({ ...bucket("s", "5시간", used), status: "known", observedAt });
+  const stale = seen(now - 37 * 3_600_000, 29);
+  assert.deepEqual(quotaReading(stale, bucketState(stale, 900, now)), { confirmed: false, left: 71, spent: false, observedAt: stale.observedAt });
+  const fresh = seen(now - 60_000, 29);
+  assert.deepEqual(quotaReading(fresh, bucketState(fresh, 900, now)), { confirmed: true, left: 71, spent: false, observedAt: fresh.observedAt });
+  // 오래된 소진 관측은 소진이었다는 기록으로 남되 확정은 아니다.
+  const old = { ...seen(now - 37 * 3_600_000, 100), status: "exhausted" } as QuotaBucket;
+  assert.deepEqual(quotaReading(old, bucketState(old, 900, now)), { confirmed: false, left: 0, spent: true, observedAt: old.observedAt });
+  // 값이 없으면 막대를 채우지 않는다.
+  const none = { ...bucket("n", "5시간", 0), usedPercent: null, status: "unknown", observedAt: 0 } as QuotaBucket;
+  assert.deepEqual(quotaReading(none, bucketState(none, 900, now)), { confirmed: false, left: null, spent: false, observedAt: null });
 });
 
 test("credit balance shows only when it parses as a number (rounded), and USD stays separate", () => {

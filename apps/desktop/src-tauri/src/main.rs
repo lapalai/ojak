@@ -32,6 +32,7 @@ fn request_quit(app: &tauri::AppHandle) {
 fn show_main(app: &tauri::AppHandle) {
     if let Some(popover) = app.get_webview_window(POPOVER) {
         let _ = popover.hide();
+        let _ = popover.emit(VISIBILITY_EVENT, false);
     }
     #[cfg(target_os = "macos")]
     let _ = app.set_activation_policy(tauri::ActivationPolicy::Regular);
@@ -39,10 +40,14 @@ fn show_main(app: &tauri::AppHandle) {
         let _ = window.show();
         let _ = window.unminimize();
         let _ = window.set_focus();
+        let _ = window.emit(VISIBILITY_EVENT, true);
     }
 }
 
 const POPOVER: &str = "popover";
+/// 창이 실제로 보이는지(`true`) 숨겨졌는지(`false`)를 그 창의 화면에 알린다. 화면은 숨겨진 동안 주기 조회를 멈춘다.
+/// WebKit·WebView2는 창을 숨겨도 `document.hidden`을 항상 바꾸지 않으므로 이 이벤트를 기준으로 삼는다.
+const VISIBILITY_EVENT: &str = "ojak://window-visible";
 const POPOVER_WIDTH: f64 = 340.0;
 
 /// 트레이(메뉴바) 아이콘 옆에 팝오버를 연다. 열려 있으면 닫는다.
@@ -52,6 +57,7 @@ fn toggle_popover(app: &tauri::AppHandle, rect: tauri::Rect) {
     let Some(popover) = app.get_webview_window(POPOVER) else { return };
     if popover.is_visible().unwrap_or(false) {
         let _ = popover.hide();
+        let _ = popover.emit(VISIBILITY_EVENT, false);
         return;
     }
     let fallback = popover.scale_factor().unwrap_or(1.0);
@@ -97,6 +103,7 @@ fn toggle_popover(app: &tauri::AppHandle, rect: tauri::Rect) {
     let _ = popover.show();
     let _ = popover.set_focus();
     let _ = popover.emit("ojak://popover-shown", ());
+    let _ = popover.emit(VISIBILITY_EVENT, true);
 }
 
 #[tauri::command]
@@ -108,6 +115,7 @@ fn open_dashboard(app: tauri::AppHandle) {
 fn hide_popover(app: tauri::AppHandle) {
     if let Some(popover) = app.get_webview_window(POPOVER) {
         let _ = popover.hide();
+        let _ = popover.emit(VISIBILITY_EVENT, false);
     }
 }
 
@@ -441,6 +449,11 @@ async fn quit_app(app: tauri::AppHandle, mode: String) -> Result<String, ApiErro
 }
 
 #[tauri::command]
+async fn refresh_integrations() -> Result<String, ApiError> {
+    run_management(vec!["integration", "refresh-extensions"]).await
+}
+
+#[tauri::command]
 async fn deactivate_plan(app: tauri::AppHandle) -> Result<String, ApiError> {
     let mut plan = run_management(vec!["deactivate", "--dry-run"]).await?;
     if get_autostart(app)? {
@@ -756,63 +769,8 @@ async fn launch_session(intent: LaunchIntent) -> Result<Value, ApiError> {
     }
     open_terminal(args)
 }
-#[tauri::command]
-async fn login_account(
-    tool: String,
-    label: String,
-    settings_digest: Option<String>,
-    account_id: Option<String>,
-) -> Result<Value, ApiError> {
-    if !["claude", "codex"].contains(&tool.as_str()) {
-        return Err(ApiError::new(
-            "ADAPTER_UNVERIFIED",
-            "지원되는 도구(Claude·Codex)와 계정 이름을 선택하세요.",
-        ));
-    }
-    let mut args = vec![
-        "account".into(),
-        "login".into(),
-        "--tool".into(),
-        tool,
-    ];
-    if let Some(id) = account_id {
-        if id.is_empty()
-            || id.len() > 128
-            || !id.bytes().all(|b| b.is_ascii_alphanumeric() || b == b'-' || b == b'_')
-        {
-            return Err(ApiError::new(
-                "INVALID_PARAMS",
-                "다시 로그인할 계정을 확인하지 못했습니다.",
-            ));
-        }
-        args.extend(["--account".into(), id]);
-    } else {
-        if label.trim().is_empty() || label.len() > 120 {
-            return Err(ApiError::new(
-                "ADAPTER_UNVERIFIED",
-                "지원되는 도구(Claude·Codex)와 계정 이름을 선택하세요.",
-            ));
-        }
-        args.extend(["--label".into(), label]);
-        if let Some(digest) = settings_digest {
-            if digest.is_empty()
-                || digest.len() > 256
-                || !digest
-                    .bytes()
-                    .all(|b| b.is_ascii_alphanumeric() || b == b'-' || b == b'_')
-            {
-                return Err(ApiError::new(
-                    "INVALID_SETTINGS_DIGEST",
-                    "설정 미리보기를 다시 확인해 주세요.",
-                ));
-            }
-            args.extend(["--settings-digest".into(), digest]);
-        } else {
-            args.push("--fresh-settings".into());
-        }
-    }
-    open_terminal(args)
-}
+mod provider_login;
+mod local_usage;
 #[tauri::command]
 async fn choose_directory() -> Option<String> {
     rfd::AsyncFileDialog::new()
@@ -1656,13 +1614,22 @@ fn read_ui_settings() -> serde_json::Map<String, Value> {
         .unwrap_or_default()
 }
 
-/// 화면 설정 한 항목만 바꾸고 나머지 항목은 보존한다.
+/// ui-settings.json을 읽고 고쳐 쓰는 동안 다른 스레드(트레이 폴링·명령)가 끼어들어 항목을 잃지 않게 한다.
+static UI_SETTINGS_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
+/// 화면 설정 한 항목만 바꾸고 나머지 항목은 보존한다. 임시 파일에 쓴 뒤 바꿔 치워 중간에 끊겨도 기존 설정이 남는다.
 fn write_ui_setting(key: &str, value: Value) -> Result<(), ApiError> {
     let path = ui_settings_path().ok_or_else(|| ApiError::new("PATH_ERROR", "설정 폴더를 찾지 못했습니다."))?;
+    let _guard = UI_SETTINGS_LOCK.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
     let mut settings = read_ui_settings();
     settings.insert(key.to_owned(), value);
-    std::fs::write(&path, Value::Object(settings).to_string())
-        .map_err(|_| ApiError::new("SETTINGS_WRITE_FAILED", "설정을 저장하지 못했습니다."))
+    let temporary = path.with_extension("json.tmp");
+    std::fs::write(&temporary, Value::Object(settings).to_string())
+        .and_then(|()| std::fs::rename(&temporary, &path))
+        .map_err(|_| {
+            let _ = std::fs::remove_file(&temporary);
+            ApiError::new("SETTINGS_WRITE_FAILED", "설정을 저장하지 못했습니다.")
+        })
 }
 
 /// 메뉴바 숫자를 띄우는 기준(남은 %). 지금 쓰는 계정의 가장 적은 잔여가 이 값 이하일 때만 숫자를 보인다.
@@ -1712,6 +1679,34 @@ fn set_expiring_notify(value: bool) -> Result<bool, ApiError> {
     Ok(value)
 }
 
+/// 한도 회복 알림이 걸린 계정 ID(같은 계정 묶음의 어느 구성원이든 될 수 있다). 앱을 다시 켜도 유지된다.
+#[tauri::command]
+fn get_recovery_watches() -> Vec<String> {
+    recovery_watch::ids()
+}
+
+/// 한도 회복을 한 번 알려 주는 감시를 켜거나 끈다. 켤 때는 알림 권한과 지금 실제로 제한 중인 상태를 확인하고,
+/// 조건을 만족하지 못하면 오류로 거절한다(가짜 구독 성공 없음). 성공하면 감시 중인 계정 ID 전체를 돌려준다.
+#[tauri::command]
+async fn set_recovery_watch(app: tauri::AppHandle, account_id: String, enabled: bool) -> Result<Vec<String>, ApiError> {
+    recovery_watch::validate_id(&account_id)?;
+    if !enabled {
+        // 서비스에 닿지 않아도 해제는 항상 된다. 닿으면 같은 묶음의 다른 ID까지 함께 지운다.
+        return tauri::async_runtime::spawn_blocking(move || {
+            recovery_watch::update(&account_id, false, tray_status().ok().as_ref(), aam_protocol::now_ms())
+        })
+        .await
+        .map_err(|_| ApiError::new("INTERNAL_ERROR", "알림 설정 처리 중 오류가 발생했습니다"))?;
+    }
+    recovery_watch::ensure_notification_permission(&app)?;
+    tauri::async_runtime::spawn_blocking(move || {
+        let snapshot = tray_status()?;
+        recovery_watch::update(&account_id, true, Some(&snapshot), aam_protocol::now_ms())
+    })
+    .await
+    .map_err(|_| ApiError::new("INTERNAL_ERROR", "알림 설정 처리 중 오류가 발생했습니다"))?
+}
+
 /// 터미널 안내가 앱과 같이 이메일을 가릴지. 없으면 가림(앱 기본값).
 #[tauri::command]
 fn set_privacy(masked: bool) -> Result<(), ApiError> {
@@ -1727,6 +1722,18 @@ fn notified_expiring() -> Vec<String> {
         .map(|items| items.iter().filter_map(|item| item.as_str().map(str::to_owned)).collect())
         .unwrap_or_default()
 }
+
+fn provider_notice_name(provider: &str) -> &'static str {
+    match provider {
+        "anthropic" => "Claude",
+        "openai" => "Codex",
+        "google" => "Gemini",
+        "xai" => "Grok",
+        _ => "Ojak",
+    }
+}
+
+mod recovery_watch;
 
 fn hours_text(ms: i64) -> String {
     let hours = (ms.max(0) as f64 / 3_600_000.0).round() as i64;
@@ -2092,13 +2099,7 @@ impl TrayStatus {
                 .find(|account| summary.account_ids.contains(&account.id))
                 .map(|account| aam_protocol::pin_provider(&account.provider))
                 .unwrap_or("");
-            let name = match provider {
-                "anthropic" => "Claude",
-                "openai" => "Codex",
-                "google" => "Gemini",
-                "xai" => "Grok",
-                _ => "Ojak",
-            };
+            let name = provider_notice_name(provider);
             let label = expiring.label.rsplit(" · ").next().unwrap_or(&expiring.label);
             let when = hours_text(expiring.resets_at - now);
             let percent = expiring.usable_percent.round();
@@ -2125,6 +2126,15 @@ impl TrayStatus {
         }
     }
 
+    /// 사용자가 켠 계정별 한도 회복 감시를 확인해 회복이 확인되면 한 번 알린다. 알림을 보냈을 때만 감시를 지운다.
+    fn notify_recovery(&self, snapshot: &Snapshot) {
+        use tauri_plugin_notification::NotificationExt;
+        recovery_watch::run_check(snapshot, aam_protocol::now_ms(), &mut |provider| {
+            let (title, body) = recovery_watch::message(provider);
+            self.app.notification().builder().title(title).body(body).show().is_ok()
+        });
+    }
+
     fn poll(self, receiver: mpsc::Receiver<()>) {
         loop {
             let _ = self.service.set_text(tr(
@@ -2136,6 +2146,7 @@ impl TrayStatus {
                     self.update(&snapshot);
                     self.update_now(&snapshot);
                     self.notify_expiring(&snapshot);
+                    self.notify_recovery(&snapshot);
                     Some(snapshot.policy)
                 }
                 Err(error) => {
@@ -2235,7 +2246,14 @@ impl TrayStatus {
     }
 }
 fn main() {
-    tauri::Builder::default()
+    let builder = tauri::Builder::default();
+    #[cfg(windows)]
+    let builder = builder.plugin(tauri_plugin_single_instance::init(|app, args, _cwd| {
+        if !args.iter().any(|argument| argument == AUTOSTART_ARG) {
+            show_main(app);
+        }
+    }));
+    builder
         .plugin(tauri_plugin_notification::init())
         .plugin(tauri_plugin_updater::Builder::new().build())
         .plugin(tauri_plugin_autostart::init(
@@ -2246,7 +2264,11 @@ fn main() {
             rpc,
             launch_session,
             open_prefilled_terminal,
-            login_account,
+            provider_login::start_provider_login,
+            provider_login::provider_login_status,
+            provider_login::cancel_provider_login,
+            provider_login::list_provider_logins,
+            local_usage::local_usage,
             choose_directory,
             settings_preview,
             export_diagnostics,
@@ -2267,12 +2289,15 @@ fn main() {
             app_info,
             quit_app,
             deactivate_plan,
+            refresh_integrations,
             open_dashboard,
             hide_popover,
             get_tray_threshold,
             set_tray_threshold,
             get_expiring_notify,
             set_expiring_notify,
+            get_recovery_watches,
+            set_recovery_watch,
             set_privacy,
             get_autostart,
             set_autostart,
@@ -2534,11 +2559,13 @@ fn main() {
             // 팝오버는 다른 곳을 누르면 닫힌다. 메뉴바 팝오버 관례다.
             tauri::WindowEvent::Focused(false) if window.label() == POPOVER => {
                 let _ = window.hide();
+                let _ = window.emit(VISIBILITY_EVENT, false);
             }
             // 창을 닫으면 앱은 트레이로만 남는다. Dock 아이콘도 숨겨 메뉴바 앱처럼 동작한다.
             tauri::WindowEvent::CloseRequested { api, .. } => {
                 api.prevent_close();
                 let _ = window.hide();
+                let _ = window.emit(VISIBILITY_EVENT, false);
                 #[cfg(target_os = "macos")]
                 if window.label() == "main" {
                     let _ = window.app_handle().set_activation_policy(tauri::ActivationPolicy::Accessory);
@@ -2547,7 +2574,7 @@ fn main() {
             _ => {}
         })
         .build(tauri::generate_context!())
-        .expect("macOS 앱을 실행하지 못했습니다")
+        .expect("Ojak 앱을 실행하지 못했습니다")
         .run(|app, event| match event {
             // 사용자가 시작한 종료(⌘Q·Dock)는 code가 없다. 확인 전이면 막고 확인 창을 띄운다.
             tauri::RunEvent::ExitRequested { code: None, api, .. } if !QUIT_CONFIRMED.load(Ordering::SeqCst) => {

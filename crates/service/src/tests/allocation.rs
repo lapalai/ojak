@@ -523,6 +523,50 @@ fn expiring_weekly_quota_is_reported_and_preferred_only_when_enabled() {
 }
 
 #[test]
+fn confirmed_login_failure_is_not_hidden_by_an_identityless_placeholder() {
+    let now = now_ms();
+    let policy = Policy::default();
+    let mut expired = account_fixture("expired", now);
+    expired.tool = "omp".into();
+    expired.email = Some("account@example.test".into());
+    expired.auth_status = "auth-required".into();
+    expired.can_launch = false;
+    expired.identity_key = Some("anthropic|subject:a|workspace:w".into());
+    for bucket in &mut expired.buckets {
+        bucket.status = "stale".into();
+        bucket.observed_at = now - 3_600_000;
+    }
+    let mut placeholder = expired.clone();
+    placeholder.id = "placeholder".into();
+    placeholder.identity_key = None;
+    placeholder.omp_credential_pins.clear();
+    placeholder.auth_status = "unverified".into();
+    placeholder.buckets.clear();
+    let summary = crate::quota_summary::summaries(&[expired.clone(), placeholder.clone()], &policy, &[], now);
+    assert_eq!(summary.len(), 1);
+    assert_eq!(summary[0].kind, "login");
+
+    let mut native = account_fixture("native", now);
+    native.email = expired.email.clone();
+    native.identity_key = expired.identity_key.clone();
+    native.auth_status = "authenticated".into();
+    native.can_launch = true;
+    for observed_at in [now - 3_600_000, now] {
+        expired.buckets[0].observed_at = observed_at;
+        let summary = crate::quota_summary::summaries(&[expired.clone(), placeholder.clone(), native.clone()], &policy, &[], now);
+        assert_eq!(summary.len(), 1);
+        assert_eq!(summary[0].kind, "available");
+    }
+    native.auth_status = "error".into();
+    native.can_launch = false;
+    let summary = crate::quota_summary::summaries(&[expired.clone(), placeholder.clone(), native.clone()], &policy, &[], now);
+    assert_eq!(summary[0].kind, "login");
+    native.auth_status = "unverified".into();
+    let summary = crate::quota_summary::summaries(&[expired, placeholder, native], &policy, &[], now);
+    assert_eq!(summary[0].kind, "login");
+}
+
+#[test]
 fn service_quota_summary_distinguishes_reserve_exhaustion_and_stale_evidence() {
     let now = now_ms();
     let policy = Policy { safety_reserve_percent: 10.0, ..Policy::default() };
@@ -576,7 +620,7 @@ fn quota_summary_preserves_model_only_quota_and_live_scoped_blocks() {
     let result = crate::quota_summary::summaries(&[account.clone()], &policy, &[], now);
     assert_eq!(result[0].kind, "partial");
     assert_eq!(result[0].models, ["Claude·GPT"]);
-    let block = crate::bridge::BlockStatus { provider: account.provider.clone(), email: account.email.clone().unwrap(), scope: None, until: now + 60_000, reason: "rate-limit".into() };
+    let block = crate::bridge::BlockStatus { provider: account.provider.clone(), email: account.email.clone().unwrap(), scope: None, until: now + 60_000, reason: "rate-limit".into(), quota: false };
     let result = crate::quota_summary::summaries(std::slice::from_ref(&account), &policy, std::slice::from_ref(&block), now);
     assert_eq!(result[0].kind, "resting");
     assert!(result[0].rate);
@@ -613,7 +657,7 @@ fn summary_global_rate_block_wins_over_reserve_but_not_shared_exhaustion() {
     let mut account = account_fixture("rate", now);
     account.email = Some("rate@example.test".into());
     account.buckets[0].used_percent = Some(95.0);
-    let block = crate::bridge::BlockStatus { provider: account.provider.clone(), email: account.email.clone().unwrap(), scope: None, until: now + 60_000, reason: "rate-limit".into() };
+    let block = crate::bridge::BlockStatus { provider: account.provider.clone(), email: account.email.clone().unwrap(), scope: None, until: now + 60_000, reason: "rate-limit".into(), quota: false };
     let summary = crate::quota_summary::summaries(std::slice::from_ref(&account), &policy, std::slice::from_ref(&block), now);
     assert_eq!(summary[0].kind, "resting");
     assert!(summary[0].rate);
@@ -632,8 +676,43 @@ fn ambiguous_email_block_does_not_contaminate_distinct_workspaces() {
     let mut two = one.clone();
     two.id = "two".into();
     two.identity_key = Some("claude|workspace:two".into());
-    let block = crate::bridge::BlockStatus { provider: one.provider.clone(), email: one.email.clone().unwrap(), scope: None, until: now + 60_000, reason: "rate-limit".into() };
+    let block = crate::bridge::BlockStatus { provider: one.provider.clone(), email: one.email.clone().unwrap(), scope: None, until: now + 60_000, reason: "rate-limit".into(), quota: false };
     let summaries = crate::quota_summary::summaries(&[one, two], &Policy::default(), &[block], now);
     assert_eq!(summaries.len(), 2);
     assert!(summaries.iter().all(|summary| summary.kind == "available"));
+}
+
+#[test]
+fn quota_block_with_stale_usage_is_not_mislabeled_as_rate_limiting() {
+    let now = 1_800_000_000_000;
+    let mut account = account_fixture("stale-quota", now);
+    account.email = Some("quota@example.test".into());
+    account.buckets[0].status = "stale".into();
+    account.buckets[0].observed_at = now - 37 * 3_600_000;
+    account.buckets[0].used_percent = Some(4.0);
+    let quota = crate::bridge::BlockStatus {
+        provider: account.provider.clone(),
+        email: account.email.clone().unwrap(),
+        scope: None,
+        until: now + 12 * 3_600_000,
+        reason: "usage limit".into(),
+        quota: true,
+    };
+    let rate = crate::bridge::BlockStatus {
+        provider: account.provider.clone(),
+        email: account.email.clone().unwrap(),
+        scope: None,
+        until: now + 60_000,
+        reason: "rate limit".into(),
+        quota: false,
+    };
+    let mut blocks = [quota, rate];
+    for _ in 0..2 {
+        let summary = crate::quota_summary::summaries(std::slice::from_ref(&account), &Policy::default(), &blocks, now);
+        assert_eq!(summary[0].kind, "resting");
+        assert!(!summary[0].rate);
+        assert_eq!(summary[0].until, Some(now + 12 * 3_600_000));
+        assert_eq!(summary[0].label, None);
+        blocks.reverse();
+    }
 }
