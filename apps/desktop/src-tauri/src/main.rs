@@ -2322,9 +2322,13 @@ fn main() {
             // 메뉴바에만 두고, 직접 연 경우에만 보인다. 만든 뒤 show()로 바꾸면 Windows에서 반영되지 않는다.
             let autostart = std::env::args().any(|arg| arg == AUTOSTART_ARG);
             if let Some(config) = app.config().app.windows.iter().find(|w| w.label == "main").cloned() {
-                tauri::WebviewWindowBuilder::from_config(app.handle(), &config)?
+                let main = tauri::WebviewWindowBuilder::from_config(app.handle(), &config)?
                     .visible(!autostart)
                     .build()?;
+                // 창을 숨긴 채 만들어도 웹뷰는 보이는 상태로 시작한다(WebView2는 계속 그린다). 창과 맞춘다.
+                if autostart {
+                    set_shown(&main, false);
+                }
             }
             // 언어를 바꿀 때 다시 쓸 고정 메뉴 문구.
             let mut labels: Vec<(MenuItem<tauri::Wry>, &'static str, &'static str, &'static str)> = Vec::new();
@@ -2528,7 +2532,8 @@ fn main() {
                 .shadow(true)
                 .visible(false)
                 .focused(false)
-                .build()?;
+                .build()
+                .map(|popover| set_shown(&popover, false))?;
             #[cfg(target_os = "macos")]
             if let Some(popover) = app.get_webview_window(POPOVER) {
                 let _ = window_vibrancy::apply_vibrancy(&popover, window_vibrancy::NSVisualEffectMaterial::Popover, None, Some(12.0));
