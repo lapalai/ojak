@@ -97,7 +97,7 @@ const UPSTREAM: [(&str, &str); 5] = [
 /// 연결 해제 때 바꾼 역할 모델 기록. 다시 연결하면 사용자가 그 사이 바꾸지 않은 역할만 원래대로 돌린다.
 const ROLE_BACKUP: &str = "omp-model-roles.json";
 
-fn omp() -> Result<PathBuf, ApiError> {
+pub(crate) fn omp() -> Result<PathBuf, ApiError> {
     #[cfg(windows)]
     let fallback = std::env::var_os("LOCALAPPDATA").map(PathBuf::from)
         .map(|path| path.join("omp/omp.exe"))
@@ -271,6 +271,11 @@ fn extension_state() -> Result<(PathBuf, bool), ApiError> {
     let directory = omp_extension::extension_directory(&ACCOUNTS).map_err(extension_error)?;
     let current = omp_extension::inspect(&ACCOUNTS, &directory).map_err(extension_error)?.is_some_and(|installed| installed.current);
     Ok((directory, current))
+}
+
+pub fn refresh_installed() -> Result<bool, ApiError> {
+    let directory = omp_extension::extension_directory(&ACCOUNTS).map_err(extension_error)?;
+    omp_extension::refresh_installed(&ACCOUNTS, &directory).map_err(extension_error)
 }
 
 pub fn status(paths: &Paths) -> Result<Status, ApiError> {

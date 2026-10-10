@@ -35,3 +35,28 @@ test("service restart warns for omp bridge use or unknown state, while busy mana
   assert.equal(restartNeedsWarning({ managed: 2, bridge: 0, warn: true }, false), false);
   assert.equal(restartNeedsWarning({ managed: 0, bridge: 0, warn: false }, true), true);
 });
+
+test("every pending or uncertain managed state remains protected until it becomes terminal", () => {
+  const now = 1_000_000_000_000;
+  const sessions = [
+    "PREPARED", "STARTING", "ACTIVE", "SUSPECT", "ORPHANED",
+    "EXITED", "ABORTED", "FAILED",
+  ].map(state => ({ state }));
+  assert.deepEqual(updateInterruptCounts(sessions, [], now), {
+    managed: 5, bridge: 0, warn: true,
+  });
+  assert.deepEqual(updateInterruptCounts(sessions.map(() => ({ state: "EXITED" })), [], now), {
+    managed: 0, bridge: 0, warn: false,
+  });
+});
+
+test("recent bridge warnings expire at the fifteen-minute boundary", () => {
+  const now = 1_000_000_000_000;
+  const lastUsedAt = now - 15 * 60_000 + 1;
+  assert.deepEqual(updateInterruptCounts([], [{ lastUsedAt }], now), {
+    managed: 0, bridge: 1, warn: true,
+  });
+  assert.deepEqual(updateInterruptCounts([], [{ lastUsedAt }], now + 1), {
+    managed: 0, bridge: 0, warn: false,
+  });
+});

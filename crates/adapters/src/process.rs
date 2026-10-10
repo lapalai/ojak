@@ -499,6 +499,31 @@ pub(crate) fn run_json(
     Probe::spawn(program, args, env, cwd)?.output()
 }
 
+/// 줄마다 JSON 이벤트를 내는 조회(`claude -p ... --output-format stream-json`). 해석되지 않는 줄은 건너뛰고,
+/// 이벤트가 하나도 없으면 오류다. 시간·크기 제한은 다른 조회와 같다.
+pub(crate) fn run_ndjson(
+    program: &Path,
+    args: &[&str],
+    env: &BTreeMap<String, String>,
+    cwd: &Path,
+) -> Result<Vec<Value>, ApiError> {
+    let mut probe = Probe::spawn(program, args, env, cwd)?;
+    probe.child.stdin.take();
+    while probe.pump()? {}
+    let events: Vec<Value> = probe
+        .buffer
+        .split(|byte| *byte == b'\n')
+        .filter_map(|line| serde_json::from_slice(line).ok())
+        .collect();
+    if events.is_empty() {
+        return Err(ApiError::new(
+            "PROBE_SCHEMA",
+            "공식 CLI가 예상한 JSON 이벤트를 제공하지 않았습니다. CLI 버전을 확인해 주세요.",
+        ));
+    }
+    Ok(events)
+}
+
 /// `omp usage --json`처럼 여러 원격 API를 순회하는 느린 조회. 시간 제한만 `USAGE_PROBE_TIMEOUT`으로 늘린다.
 pub(crate) fn run_json_slow(
     program: &Path,

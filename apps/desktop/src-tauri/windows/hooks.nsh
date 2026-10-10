@@ -74,7 +74,17 @@ FunctionEnd
 
 !macro NSIS_HOOK_PREUNINSTALL
   ${If} ${FileExists} "$INSTDIR\aam.exe"
-    nsExec::ExecToLog '"$INSTDIR\aam.exe" installer remove --directory "$INSTDIR"'
+    InitPluginsDir
+    ClearErrors
+    CreateDirectory "$PLUGINSDIR\ojak-uninstall"
+    CopyFiles /SILENT "$INSTDIR\aam.exe" "$PLUGINSDIR\ojak-uninstall\aam.exe"
+    ${If} ${Errors}
+      SetErrorLevel 1
+      StrCpy $2 "제거 도우미를 준비하지 못했어요. 앱 파일은 지우지 않았어요. / Could not prepare the uninstall helper. Application files were not removed."
+      Call un.OjakFail
+      Abort
+    ${EndIf}
+    nsExec::ExecToLog '"$PLUGINSDIR\ojak-uninstall\aam.exe" installer remove --directory "$INSTDIR"'
     Pop $0
     ${If} $0 != 0
       SetErrorLevel 1

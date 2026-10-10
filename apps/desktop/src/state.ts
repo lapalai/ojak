@@ -5,6 +5,7 @@ import type { BridgeUsage, OmpBridgeStatus } from "./api";
 import { PROVIDER_ORDER } from "./types";
 import type { Account, ApiError, QuotaBucket, Snapshot } from "./types";
 import { accountLabel, intlLocale, lookup, t } from "./i18n";
+import { whenBand } from "./overview";
 
 /// 화면에서 쓰는 공급자 이름. 키는 계정 저장소의 provider 값(anthropic/openai/google/xai/other)이다.
 export const providerNames: Record<string, string> = { anthropic: "Anthropic", openai: "OpenAI Codex", google: "Google Antigravity", xai: "xAI", other: "Z.AI" };
@@ -66,6 +67,28 @@ const minutes = unitFormat("minute"), hours = unitFormat("hour"), days = unitFor
 export function absoluteTime(value: number | null | undefined): string {
   if (!value || !Number.isFinite(value)) return t("time.noRecord");
   return absoluteFormat.format(value);
+}
+
+const weekdayFormat = new Intl.DateTimeFormat(intlLocale, { weekday: "short", hour: "2-digit", minute: "2-digit" });
+const dateFormat = new Intl.DateTimeFormat(intlLocale, { month: "short", day: "numeric", hour: "2-digit", minute: "2-digit" });
+const fullFormat = new Intl.DateTimeFormat(intlLocale, { year: "numeric", month: "short", day: "numeric", weekday: "short", hour: "2-digit", minute: "2-digit" });
+
+/// 줄에 쓰는 짧은 시각: 하루 안이면 남은 시간, 일주일 안이면 요일·시각, 그 뒤는 날짜·시각. 시간대는 붙이지 않는다(화면 아래에 한 번만 적는다).
+export function shortTime(value: number, now = Date.now()): string {
+  const band = whenBand(value, now);
+  return band === "pending" ? t("time.resetPending") : band === "relative" ? relativeTime(value, true) : (band === "weekday" ? weekdayFormat : dateFormat).format(value);
+}
+
+/// 자세히 보기에 쓰는 전체 날짜·시각. 시간대는 붙이지 않는다.
+export function fullTime(value: number | null | undefined): string {
+  return !value || !Number.isFinite(value) ? t("time.noRecord") : fullFormat.format(value);
+}
+
+/// 화면의 시각이 따르는 시간대(예: `Asia/Seoul (GMT+9)`).
+export function timeZoneLabel(): string {
+  const zone = new Intl.DateTimeFormat(intlLocale).resolvedOptions().timeZone;
+  const short = new Intl.DateTimeFormat(intlLocale, { timeZoneName: "short" }).formatToParts(Date.now()).find(part => part.type === "timeZoneName")?.value;
+  return short && short !== zone ? `${zone} (${short})` : zone;
 }
 
 /// 지난 시간(또는 `future`면 남은 시간)을 "N분 전"/"in N min"처럼 현재 언어로 만든다. 한 시간 이상이면 분, 하루 이상이면 시간까지 붙인다.

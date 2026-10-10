@@ -5,6 +5,7 @@ mod omp_observer_writer;
 mod omp_bridge;
 mod omp_broker;
 mod omp_extension;
+mod provider_login;
 
 use aam_launcher::{arguments, current_cwd, install, read_snapshot, supervisor};
 use aam_protocol::{call, ApiError, LaunchIntent, Paths, Snapshot, NATIVE_DEFAULT_MODEL};
@@ -92,6 +93,20 @@ enum Action {
     Takeover {
         #[command(subcommand)]
         action: TakeoverAction,
+    },
+    #[command(
+        about = "앱이 쓰는 공식 로그인 작업 하나를 실행하고 상태를 JSON 줄로 알려요. stdin을 닫으면 취소돼요.",
+        hide = true
+    )]
+    ProviderLogin {
+        #[arg(long)]
+        provider: String,
+        #[arg(long, conflicts_with_all = ["label", "settings_digest"])]
+        account: Option<String>,
+        #[arg(long)]
+        label: Option<String>,
+        #[arg(long)]
+        settings_digest: Option<String>,
     },
     #[command(about = "처음 쓰는 데 빠진 것만 설치하고, 준비 상태를 JSON으로 보여 줘요.")]
     Setup {
@@ -189,6 +204,8 @@ enum ServiceAction {
 enum IntegrationAction {
     Install,
     Uninstall,
+    /// 이미 연결한 omp 확장만 현재 설치본에 맞춘다. 계정·로그인·모델 설정은 바꾸지 않는다.
+    RefreshExtensions,
     /// 연결을 이미 설치했으면 새로 실행 가능해진 도구의 shim만 더한다. 설치한 적이 없으면 아무것도 하지 않는다.
     Extend {
         #[arg(long)]
@@ -494,6 +511,13 @@ fn execute(paths: &Paths, action: Action) -> Result<(), ApiError> {
                 match action {
                     IntegrationAction::Install => install::integration_install(paths)?,
                     IntegrationAction::Uninstall => install::integration_uninstall(paths)?,
+                    IntegrationAction::RefreshExtensions => {
+                        if install::is_current_launcher(paths)? {
+                            omp_bridge::refresh_installed()?;
+                            omp_observer::run("refresh").map_err(|failure| ApiError::new("EXTENSION_FAILED", failure.to_string()))?;
+                        }
+                        String::new()
+                    }
                     IntegrationAction::Extend { tool } => {
                         if aam_launcher::extend_integration(paths, &tool)? {
                             format!("새 터미널의 `{tool}` 명령이 Ojak으로 연결됐어요.")
@@ -554,6 +578,10 @@ fn execute(paths: &Paths, action: Action) -> Result<(), ApiError> {
             let result = omp_observer::run(action)
                 .map_err(|error| ApiError::new("OMP_OBSERVER_INSTALLATION", error.to_string()))?;
             println!("{result}");
+        }
+        Action::ProviderLogin { provider, account, label, settings_digest } => {
+            let code = provider_login::run(paths, provider_login::Request { provider, account, label, settings_digest });
+            std::process::exit(code);
         }
         Action::Takeover { action } => match action {
             TakeoverAction::List => {

@@ -1,8 +1,8 @@
 import assert from 'node:assert/strict';
 import { createHash } from 'node:crypto';
-import { mkdtemp, readFile, readdir, rm, stat, symlink, writeFile } from 'node:fs/promises';
+import { copyFile, mkdir, mkdtemp, readFile, readdir, rename, rm, stat, symlink, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
-import { join } from 'node:path';
+import { dirname, join } from 'node:path';
 import test from 'node:test';
 import { execFileSync } from 'node:child_process';
 import { fileURLToPath } from 'node:url';
@@ -33,7 +33,7 @@ async function environment(t) {
   return root;
 }
 
-function session(id, entries = [], accounts = []) {
+function session(id, entries = [], accounts = [], factory = observer) {
   const handlers = new Map();
   let tick;
   let leaf = entries.at(-1)?.id ?? null;
@@ -66,7 +66,7 @@ function session(id, entries = [], accounts = []) {
     setInterval(callback) { tick = callback; return {}; },
     clearTimer() { tick = undefined; },
   };
-  observer({
+  factory({
     on: (name, handler) => handlers.set(name, handler),
     appendEntry: (customType, data) => {
       const entry = { type: 'custom', customType, data, id: `custom-${entries.length}`, parentId: leaf, timestamp: new Date().toISOString() };
@@ -239,4 +239,41 @@ test('응답 hook이 없는 WebSocket도 요청 hook으로 경로를 보존하�
   assert.equal(call.model, 'gpt-6-astra');
   assert.equal(call.stopReason, undefined);
   assert.equal(fixture.persisted()[0].data.route, 'direct');
+});
+
+test('설치된 확장을 제거하면 관측을 멈추고 Windows 실행 파일 잠금을 풀어요', async t => {
+  let fixture;
+  t.after(() => fixture?.emit('session_shutdown'));
+  const root = await environment(t);
+  const directory = join(dirname(root), 'installed-observer');
+  const entry = join(directory, 'index.js');
+  const helper = join(dirname(root), 'aam-writer.exe');
+  await mkdir(directory);
+  await writeFile(entry, source);
+  if (windows) await copyFile(writer, helper);
+  const configured = source
+    .replace('const INSTALLED_AAM_ENTRY = undefined;', `const INSTALLED_AAM_ENTRY = ${JSON.stringify(entry)};`)
+    .replace('const INSTALLED_AAM_WRITER = undefined;', `const INSTALLED_AAM_WRITER = ${JSON.stringify(helper)};`);
+  const { default: installedObserver } = await import(`data:text/javascript;base64,${Buffer.from(configured).toString('base64')}`);
+  fixture = session('removed-extension', [], [], installedObserver);
+  let stopped;
+  const stoppedTimer = new Promise(resolve => { stopped = resolve; });
+  const clearTimer = fixture.context.clearTimer;
+  fixture.context.clearTimer = (...args) => { clearTimer(...args); stopped(); };
+  fixture.emit('session_start');
+  await fixture.tick();
+  const before = await snapshot(root, 'removed-extension');
+  const staging = join(dirname(root), 'removed-observer');
+  let timeout;
+  try {
+    const deadline = new Promise((_, reject) => { timeout = setTimeout(() => reject(new Error('observer-did-not-stop')), 5_000); });
+    await rename(directory, staging);
+    await rm(join(staging, 'index.js'));
+    await Promise.race([stoppedTimer, deadline]);
+    await fixture.emit('session_shutdown');
+    fixture.emit('message_end', { message: { role: 'assistant', provider: 'openai-codex', model: 'after-uninstall', stopReason: 'stop' } });
+    await fixture.tick();
+    assert.deepEqual(await snapshot(root, 'removed-extension'), before);
+    if (windows) await rm(helper);
+  } finally { clearTimeout(timeout); }
 });

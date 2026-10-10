@@ -1,104 +1,28 @@
-import { useMemo, useState } from "react";
+import { useEffect, useMemo, useState } from "react";
 import { isTauri } from "@tauri-apps/api/core";
 import type { CSSProperties } from "react";
 import { ActionFeedback, Badge, Dot, ErrorMessage, Sparkline } from "./components";
+import { AccountRow, accountText } from "./AccountRow";
 import { AllocationSettings } from "./AllocationSettings";
 import { FirstSuccessNotice, OnboardingCard } from "./OnboardingCard";
-import { rpc } from "./api";
-import { absoluteTime, bucketState, canonicalProvider, groupAccounts, isCurrentGroup, projectName, providerColor, providerNames, relativeTime, toolNames, useAction, useBridge, useCharacters } from "./state";
+import { getRecoveryWatches, rpc, setRecoveryWatch, toApiError } from "./api";
+import { canonicalProvider, fullTime, groupAccounts, isCurrentGroup, projectName, providerNames, relativeTime, timeZoneLabel, useAction, useBridge, useCharacters } from "./state";
 import type { AccountGroup } from "./state";
 import { PROVIDER_ORDER } from "./types";
-import type { Account, AccountQuotaSummary as Verdict, Policy, QuotaBucket, Snapshot } from "./types";
-import { limitLabel, t } from "./i18n";
+import type { Account, ApiError, Policy, Snapshot } from "./types";
+import { t } from "./i18n";
 import { observedRouteModels } from "./usage-routes";
-import { allResting, creditCount, remainingTone, usdLimit, usdUsed } from "./limits";
+import { allResting } from "./limits";
+import { compareRows, groupAlias, isExpanded, quotaRows, toggleExpanded } from "./overview";
+import type { UsageRow } from "./overview";
 import tigerStrip from "./assets/tiger-strip.webp";
 import tigerNap from "./assets/tiger-nap.webp";
 
 type Period = "15" | "60" | "today";
 const periods: Period[] = ["15", "60", "today"];
-/// 서비스가 5시간 한도 버킷 라벨 끝에 붙이는 표시(crates/adapters/src/quota.rs). 서버 문자열과 맞추는 용도라 번역하지 않는다.
-
-interface ModelCell { key: string; name: string; series: number[]; total: number; now: number; projects: string[]; route: "bridge" | "direct" | "unknown"; roles: string[] }
-interface Quota { label: string; value: number | null; state: string; bucket: QuotaBucket }
-interface UsageRow { key: string; provider: string; account: string | null; group: AccountGroup | null; cells: ModelCell[]; quotas: Quota[]; verdict: Verdict | null; detail: string[]; notes: string[]; off: boolean; unknown: boolean }
-
-const verdictTone: Record<Verdict["kind"], string> = { available: "good", partial: "warning", reserve: "warning", resting: "danger", excluded: "neutral", login: "danger", unknown: "neutral", credits: "warning", extra: "warning" };
-
-/// 카드 맨 위 배지 문구: 결론과, 풀리는 때가 있으면 그 시각.
-function verdictText(verdict: Verdict): string {
-  const head = verdict.kind === "partial" ? t("usage.verdict.partial", { models: verdict.models.join(", ") }) : t(`usage.verdict.${verdict.kind}`);
-  return verdict.until ? `${head} · ${t("usage.verdict.back", { time: relativeTime(verdict.until, true) })}` : head;
-}
-
-/// 크레딧(Codex)·추가 사용량(Claude, USD) 한 줄. 두 표기는 단위가 달라 섞지 않는다. 쓰는 중이 아니면 옵션이 있다는 중립 안내만 한다.
-function paidLine(verdict: Verdict): string | null {
-  const { credits, extraUsage: extra } = verdict;
-  if (extra) {
-    if (extra.active) return extra.limitUsd !== null ? t("usage.extra.amount", { used: usdUsed(extra.usedUsd), limit: usdLimit(extra.limitUsd) }) : t("usage.extra.amountOpen", { used: usdUsed(extra.usedUsd) });
-    return extra.limitReached ? t("usage.extra.capped") : t("usage.extra.hint");
-  }
-  if (credits) {
-    if (credits.active) {
-      const count = creditCount(credits.balance);
-      return credits.unlimited ? t("usage.credits.unlimited") : count !== null ? t("usage.credits.balance", { count }) : null;
-    }
-    return t("usage.credits.hint");
-  }
-  return null;
-}
-function paidTitle(verdict: Verdict): string | null {
-  if (verdict.extraUsage && !verdict.extraUsage.active && !verdict.extraUsage.limitReached) return t("usage.extra.hintTitle");
-  if (!verdict.extraUsage && verdict.credits && !verdict.credits.active) return t("usage.credits.hintTitle");
-  return null;
-}
-
-/// 배지 아래 한 줄 이유. 사용 가능이면 없다.
-function verdictReason(verdict: Verdict, reserve: number): string | null {
-  const label = verdict.label ? limitLabel(verdict.label.split(" · ").pop() ?? verdict.label) : "";
-  if (verdict.kind === "credits") return t("usage.reason.credits");
-  if (verdict.kind === "extra") return t("usage.reason.extra");
-  if (verdict.kind === "resting") return verdict.rate ? t("usage.reason.rate") : t("usage.reason.resting", { label });
-  if (verdict.kind === "reserve") return t("usage.reason.reserve", { label, reserve });
-  if (verdict.kind === "partial") return t("usage.reason.partial", { models: verdict.models.join(", ") });
-  if (verdict.kind === "login") return t("usage.reason.login");
-  if (verdict.kind === "unknown") return t("usage.reason.unknown");
-  return null;
-}
 
 function roleLabel(role: string): string {
   return role === "main" ? t("usage.role.main") : role === "subagent" ? t("usage.role.subagent") : role === "auxiliary" ? t("usage.role.auxiliary") : t("usage.role.unknown");
-}
-
-/// 이메일이나 `account:<id>` 형태의 계정 문자열. 가림 모드에서는 종류만 남긴다.
-function accountText(account: string | null, masked: boolean): string {
-  if (!account) return t("account.unknown");
-  if (masked) return account.includes("@") ? t("privacy.emailHidden") : t("privacy.accountHidden");
-  return account;
-}
-
-/// 공급자 버킷 라벨(`Claude 5 Hour · 5시간`, `Gemini · 주간`, `Fable 주간`)을 짧은 표시 이름으로 줄인다.
-/// 같은 계정 안에서 짧은 이름이 겹치는데 값까지 같으면 같은 한도를 두 도구가 본 것이므로 하나로 합치고,
-/// 값이 다르면(Antigravity의 Gemini·Claude & GPT처럼) 앞부분을 붙여 구분한다.
-function quotaRows(buckets: QuotaBucket[], staleAfter: number): Quota[] {
-  const parts = buckets.map(bucket => bucket.label.split(" · "));
-  const shorts = parts.map(segments => segments[segments.length - 1]);
-  const rows = new Map<string, Quota>();
-  buckets.forEach((bucket, index) => {
-    const siblings = buckets.filter((_, otherIndex) => otherIndex !== index && shorts[otherIndex] === shorts[index]);
-    const sameValue = siblings.every(other => other.usedPercent !== null && bucket.usedPercent !== null && Math.abs(other.usedPercent - bucket.usedPercent) < 0.5);
-    const duplicate = siblings.length > 0 && !sameValue && parts[index].length > 1;
-    const label = duplicate ? `${parts[index][0]} ${shorts[index]}` : shorts[index];
-    const state = bucketState(bucket, staleAfter);
-    const value = bucket.usedPercent !== null && Number.isFinite(bucket.usedPercent) ? bucket.usedPercent : null;
-    const existing = rows.get(label);
-    if (!existing || (value ?? -1) > (existing.value ?? -1)) rows.set(label, { label, value, state, bucket });
-  });
-  return [...rows.values()];
-}
-
-function formatPercent(value: number): string {
-  return value >= 10 ? String(Math.round(value)) : String(Math.round(value * 10) / 10);
 }
 
 /// 수동 배정 키는 화면의 공급자 묶음 이름(서비스 `pin_provider`와 같은 규칙)이다.
@@ -107,7 +31,10 @@ function pinMember(group: AccountGroup, provider: string): Account | undefined {
   return group.members.find(member => canonicalProvider(member.provider) === provider) ?? undefined;
 }
 
-export function UsageView({ snapshot, masked, online, onReload, onConnect, onSessions, onAdd, onSetup, setupRequest, setupRevision }: { snapshot: Snapshot; masked: boolean; online: boolean; onReload: () => Promise<void>; onConnect: () => void; onSessions: () => void; onAdd: (tool: string) => void; onSetup: () => void; setupRequest: number; setupRevision: number }) {
+/// 펼침을 기억하는 ID. 계정 묶음은 구성원 ID, 묶음이 없는 줄은 줄 키다.
+const rowIds = (row: UsageRow): string[] => row.group ? row.group.members.map(member => member.id) : [row.key];
+
+export function UsageView({ snapshot, masked, online, refreshing, onReload, onRefresh, onConnect, onSessions, onAdd, onSetup, setupRequest, setupRevision }: { snapshot: Snapshot; masked: boolean; online: boolean; refreshing: boolean; onReload: () => Promise<void>; onRefresh: () => void; onConnect: () => void; onSessions: () => void; onAdd: (tool: string) => void; onSetup: () => void; setupRequest: number; setupRevision: number }) {
   const pinAction = useAction();
   const characters = useCharacters();
   const pins = snapshot.policy.providerPins ?? {};
@@ -121,6 +48,25 @@ export function UsageView({ snapshot, masked, online, onReload, onConnect, onSes
       () => accountId ? t("usage.pin.saved", { provider: providerNames[provider] }) : t("usage.pin.auto", { provider: providerNames[provider] }));
   }
   const pinnedGroup = (provider: string, row: UsageRow) => Boolean(row.group && pins[provider] && row.group.members.some(member => member.id === pins[provider]));
+  const [open, setOpen] = useState<ReadonlySet<string>>(() => new Set());
+  const [watched, setWatched] = useState<string[] | null>(null);
+  const [watchError, setWatchError] = useState<ApiError | null>(null);
+  const watchAvailable = isTauri();
+  // 알림 감시는 서비스가 한도 회복을 확인하면 스스로 사라지므로 주기적으로 다시 읽는다.
+  useEffect(() => {
+    if (!watchAvailable) return;
+    let active = true;
+    const load = () => { if (document.hidden) return; getRecoveryWatches().then(ids => { if (active) { setWatched(ids); setWatchError(null); } }).catch(failure => { if (active) setWatchError(toApiError(failure)); }); };
+    load();
+    const interval = window.setInterval(load, 5000);
+    return () => { active = false; window.clearInterval(interval); };
+  }, [watchAvailable]);
+  const watch = useMemo(() => ({
+    available: watchAvailable, watched,
+    set: async (accountId: string, enabled: boolean) => { const next = await setRecoveryWatch(accountId, enabled); setWatched(next); setWatchError(null); return next; },
+  }), [watchAvailable, watched]);
+  const [now, setNow] = useState(() => Date.now());
+  useEffect(() => { const timer = window.setInterval(() => setNow(Date.now()), 30_000); return () => window.clearInterval(timer); }, []);
   const [period, setPeriod] = useState<Period>("60");
   // 오늘은 0시부터 지금까지를 5분 단위로 올림한다. 5분마다 한 구간씩 늘어난다.
   const midnight = new Date(); midnight.setHours(0, 0, 0, 0);
@@ -135,11 +81,12 @@ export function UsageView({ snapshot, masked, online, onReload, onConnect, onSes
     const sessionCwd: Record<string, string> = {};
     for (const session of bridge?.sessions ?? []) if (session.cwd) sessionCwd[session.session] = session.cwd;
     const rows: UsageRow[] = groupAccounts(snapshot.accounts).filter(isCurrentGroup).map(group => ({
-      key: group.key, provider: canonicalProvider(group.primary.provider), account: group.email, group, cells: [], quotas: quotaRows(group.buckets, staleAfter), verdict: null, detail: [], notes: [], off: group.members.every(member => !member.enabled), unknown: false,
+      key: group.key, provider: canonicalProvider(group.primary.provider), account: group.email, group, cells: [], quotas: quotaRows(group.buckets, staleAfter, now), verdict: null, detail: [], notes: [], off: group.members.every(member => !member.enabled), unknown: false,
+      alias: groupAlias(group.members), sortKey: "",
     }));
     const find = (provider: string, account: string) => rows.find(row => row.provider === provider && (row.group ? row.group.keys.includes(account.toLowerCase()) : row.account?.toLowerCase() === account.toLowerCase()));
     const synthesize = (provider: string, account: string): UsageRow => {
-      const row: UsageRow = { key: `${provider}:${account}`, provider, account, group: null, cells: [], quotas: [], verdict: null, detail: [], notes: [t("usage.note.unregisteredBridgeAccount")], off: false, unknown: false };
+      const row: UsageRow = { key: `${provider}:${account}`, provider, account, group: null, cells: [], quotas: [], verdict: null, detail: [], notes: [t("usage.note.unregisteredBridgeAccount")], off: false, unknown: false, alias: null, sortKey: "" };
       rows.push(row);
       return row;
     };
@@ -164,7 +111,7 @@ export function UsageView({ snapshot, masked, online, onReload, onConnect, onSes
     for (const model of observed) {
       const key = `${model.provider}:${model.route}`;
       const row = rows.find(item => item.key === key) ?? (() => {
-        const created: UsageRow = { key, provider: model.provider, account: null, group: null, cells: [], quotas: [], verdict: null, detail: [], notes: [t(model.route === "direct" ? "usage.note.directCall" : "usage.note.routeUnknown")], off: false, unknown: true };
+        const created: UsageRow = { key, provider: model.provider, account: null, group: null, cells: [], quotas: [], verdict: null, detail: [], notes: [t(model.route === "direct" ? "usage.note.directCall" : "usage.note.routeUnknown")], off: false, unknown: true, alias: null, sortKey: "" };
         rows.push(created);
         return created;
       })();
@@ -178,20 +125,22 @@ export function UsageView({ snapshot, masked, online, onReload, onConnect, onSes
       row.quotas.sort((a, b) => Number(Boolean(a.bucket.model)) - Number(Boolean(b.bucket.model)));
       const blocks = (bridge?.blocks ?? []).filter(block => canonicalProvider(block.provider) === row.provider && row.account && block.email.toLowerCase() === row.account.toLowerCase());
       // 원인 해석 없는 차단 원문(범위·사유·시각)은 배지 툴팁으로만 보여 준다.
-      row.detail = blocks.map(block => `${block.scope ?? "*"} · ${block.reason} · ${absoluteTime(block.until)}`);
+      row.detail = blocks.map(block => `${block.scope ?? "*"} · ${block.reason} · ${fullTime(block.until)}`);
       if (row.group && !row.unknown) {
         row.verdict = snapshot.quotaSummaries?.find(summary => summary.accountIds.includes(row.group!.primary.id))
           ?? { accountIds: row.group.members.map(member => member.id), kind: "unknown", until: null, models: [], label: null, rate: false };
         if (!snapshot.quotaSummaries) row.notes.push(t("api.protocolMismatch"));
       }
     }
-    rows.sort((a, b) => Number(a.unknown) - Number(b.unknown) || b.cells.reduce((sum, cell) => sum + cell.total, 0) - a.cells.reduce((sum, cell) => sum + cell.total, 0) || (a.account ?? "").localeCompare(b.account ?? ""));
+    // 순서는 이름으로만 정한다. 사용량으로 정렬하면 값이 바뀔 때마다 줄이 뛴다.
+    for (const row of rows) row.sortKey = (row.alias ?? row.account ?? "").toLowerCase();
+    rows.sort(compareRows);
     const peak = Math.max(1, ...rows.flatMap(row => row.cells.flatMap(cell => cell.series)));
     const routeDetails = observed.flatMap(model => model.observations.map(observation => ({
       ...observation, key: JSON.stringify([model.key, observation.project]), provider: model.provider, model: model.model, route: model.route,
     }))).sort((a, b) => b.lastRecordedAt - a.lastRecordedAt || a.key.localeCompare(b.key));
     return { rows, peak, directCount: observed.filter(model => model.route === "direct").length, unknownCount: observed.filter(model => model.route === "unknown").length, routeDetails };
-  }, [snapshot.accounts, snapshot.quotaSummaries, snapshot.observedSessions, bridge, usage, windowMinutes, reserve, staleAfter]);
+  }, [snapshot.accounts, snapshot.quotaSummaries, snapshot.observedSessions, bridge, usage, windowMinutes, reserve, staleAfter, now]);
 
   const lines = rows.flatMap(row => row.cells.filter(cell => cell.route === "bridge").map(cell => ({ row, cell }))).sort((a, b) => b.cell.now - a.cell.now || b.cell.total - a.cell.total);
   const lead = lines[0];
@@ -212,41 +161,10 @@ export function UsageView({ snapshot, masked, online, onReload, onConnect, onSes
       <AllocationSettings snapshot={snapshot} masked={masked} online={online} onReload={onReload} />
     </details>
     <ActionFeedback error={pinAction.error} message={pinAction.message} />
+    <ErrorMessage error={watchError} />
     {error && bridgeOn && <ErrorMessage error={error} />}
     {bridgeOn && directCount > 0 && <div className="notice" style={{ "--tone": "var(--warning)" } as CSSProperties}><p><b>{t("usage.direct.title", { count: directCount })}</b> {t("usage.direct.bodyBefore")}<code>/model</code>{t("usage.direct.bodyAfter")}</p></div>}
     {bridgeOn && unknownCount > 0 && <div className="notice"><p><b>{t("usage.routeUnknown.title", { count: unknownCount })}</b> {t("usage.routeUnknown.body")} <button type="button" className="text-button" onClick={onConnect}>{t("nav.connect")}</button></p></div>}
-    {bridgeOn && routeDetails.length > 0 && <section className="panel route-details" aria-label={t("usage.routes.title")}>
-      <header><h2>{t("usage.routes.title")}</h2><span className="aside">{periodLabel} · omp</span></header>
-      <div className="route-table-scroll"><table>
-        <thead><tr><th scope="col">{t("usage.routes.project")}</th><th scope="col">{t("usage.routes.model")}</th><th scope="col">{t("usage.routes.status")}</th><th scope="col">{t("usage.routes.lastRecorded")}</th></tr></thead>
-        <tbody>{routeDetails.map(detail => <tr key={detail.key}>
-          <td title={!masked && detail.project ? detail.project : undefined}>{detail.project ? projectName(detail.project, masked) : t("usage.routes.projectUnknown")}</td>
-          <td><strong>{detail.model}</strong><div className="muted">{providerNames[detail.provider] ?? detail.provider}</div></td>
-          <td><Badge tone={detail.route === "direct" ? "direct" : "neutral"}>{t(detail.route === "direct" ? "usage.routes.direct" : "usage.routes.unknown")}</Badge></td>
-          <td><time dateTime={new Date(detail.lastRecordedAt).toISOString()}>{absoluteTime(detail.lastRecordedAt)}</time></td>
-        </tr>)}</tbody>
-      </table></div>
-    </section>}
-    {bridgeOn && <section className={`now${!usageUnavailable && !lead && loaded ? " quiet" : ""}`} aria-label={t("usage.busiestAria")}>
-      <div className="busiest">
-        <div className="who"><span className={!usageUnavailable && lead && lead.cell.now ? "live" : "dot idle"} />{t("usage.busiest")}</div>
-        {usageUnavailable ? <><div className="model muted">{t(error ? "usage.readFailed" : "common.checking")}</div><div className="rate">{t(error ? "usage.readFailedHelp" : "usage.loadingHelp")}</div></> : lead ? <>
-          <div className="model">{lead.cell.name}</div>
-          <div className="who"><Dot provider={lead.row.provider} />{providerNames[lead.row.provider]}, {accountText(lead.row.account, masked)}</div>
-          <div className="rate">{t("usage.last5min")}<b>{t("usage.requestCount", { count: lead.cell.now })}</b>, {t("usage.periodTotal", { period: periodLabel, count: t("usage.requestCount", { count: lead.cell.total }) })}</div>
-          <Sparkline series={lead.cell.series} peak={peak} provider={lead.row.provider} width={300} height={44} />
-        </> : loaded ? <div className={characters ? "idle-scene" : undefined}>
-          {characters && <img className="idle-art" src={tigerNap} alt="" width={140} height={68} />}
-          <div><div className="model muted">{t("usage.noRecentCalls")}</div><div className="rate">{t("usage.noRequests", { period: periodLabel })}</div></div>
-        </div> : <><div className="model muted">{t("common.checking")}</div><div className="rate">{t("usage.noRequests", { period: periodLabel })}</div></>}
-      </div>
-      <ol className="ranking">{lines.slice(1, 7).map((line, index) => <li key={`${line.row.key}:${line.cell.key}`}>
-        <span className="rank">{index + 2}</span>
-        <span className="line">{line.cell.now > 0 && <span className="live inline" />}{line.cell.name} <span>{providerNames[line.row.provider]}, {accountText(line.row.account, masked)}</span></span>
-        <Sparkline series={line.cell.series} peak={peak} provider={line.row.provider} />
-        <span className="count">{t("usage.countShort", { count: line.cell.total })}</span>
-      </li>)}</ol>
-    </section>}
     {PROVIDER_ORDER.map(provider => {
       const providerRows = rows.filter(row => row.provider === provider);
       if (providerRows.length === 0) return null;
@@ -273,49 +191,52 @@ export function UsageView({ snapshot, masked, online, onReload, onConnect, onSes
           <div><strong>{t("usage.tigerOut.title", { provider: providerNames[provider] })}</strong><p>{resting.until ? t("usage.tigerOut.until", { time: relativeTime(resting.until, true) }) : t("usage.tigerOut.unknown")}</p></div>
         </div>}
 
-        {providerRows.map(row => <div className={`acct ${row.off ? "off" : ""} ${bridgeOn ? "" : "quota-only"}`} key={row.key}>
-          <div className="acct-info">
-            <div className="who">
-              {manual && row.group && pinMember(row.group, provider) && <input type="radio" name={`pin-${provider}`} className="pin-radio" checked={pinnedGroup(provider, row)} disabled={!online || pinAction.pending} aria-label={t("usage.pin.choose", { account: accountText(row.account, masked) })} onChange={() => { const member = row.group && pinMember(row.group, provider); if (member) setPin(provider, member.id); }} />}
-              {row.unknown ? <Badge tone={row.cells.some(cell => cell.route === "direct") ? "direct" : "neutral"}>{t("account.unknown")}</Badge> : accountText(row.account, masked)}
-              {row.group && row.group.members.map(member => member.tool).filter((tool, index, list) => tool !== "omp" && list.indexOf(tool) === index).map(tool => <span className="tag" key={tool}>{toolNames[tool] || tool}</span>)}
-              {manual && pinnedGroup(provider, row) && <Badge tone="good">{t("usage.pin.current")}</Badge>}
-              {!manual && row.group && pinMember(row.group, provider) && <button type="button" className="text-button pin-button" disabled={!online || pinAction.pending} onClick={() => { const member = row.group && pinMember(row.group, provider); if (member) setPin(provider, member.id); }}>{t("usage.pin.fix")}</button>}
-            </div>
-            {row.verdict && <div className={`verdict ${verdictTone[row.verdict.kind]}`} title={row.detail.join("\n") || undefined}><span className="dot" />{verdictText(row.verdict)}</div>}
-            {row.verdict && paidLine(row.verdict) && <div className="paid-hint" title={paidTitle(row.verdict) ?? undefined}>{paidLine(row.verdict)}</div>}
-            {row.verdict?.expiring && <div className="expiring-hint" title={t("usage.expiring.title", { label: limitLabel(row.verdict.expiring.label), reset: absoluteTime(row.verdict.expiring.resetsAt) })}>
-              <span className="dot" />{t("usage.expiring.line", { reset: relativeTime(row.verdict.expiring.resetsAt, true), percent: formatPercent(row.verdict.expiring.usablePercent) })}
-              {snapshot.policy.expiringBoost && (snapshot.policy.allocationMode ?? "smart") === "smart" && <small>{t("usage.expiring.boosted")}</small>}
-            </div>}
-            {row.verdict && verdictReason(row.verdict, reserve) && <div className="reason">{verdictReason(row.verdict, reserve)}</div>}
-            {row.notes.filter(note => !(row.verdict?.kind === "excluded" && note === t("allocation.excluded"))).map(note => <div className="note" key={note}>{note}</div>)}
-            {row.quotas.length > 0 && <div className="quota">{row.quotas.map(quota => {
-              // 메뉴바와 같게 남은 양으로 보여 준다. 소진은 막대 대신 다시 쓸 수 있는 때를 적는다.
-              const spent = quota.state === "exhausted" || (quota.value !== null && quota.value >= 100);
-              const left = quota.value === null ? null : Math.max(0, 100 - quota.value);
-              // 색은 남은 양만 뜻한다(메뉴바와 같은 기준). 막대에 공급자 색을 쓰면 100%도 공급자마다 달라 보인다.
-              const tone = spent ? "bad" : remainingTone(left, reserve);
-              const weeklyReset = quota.bucket.label.includes("주간") && quota.bucket.resetsAt !== null
-                && Number.isFinite(quota.bucket.resetsAt) && quota.bucket.resetsAt > 0 ? quota.bucket.resetsAt : null;
-              return <div className={`q ${tone} ${quota.bucket.model ? "sub" : ""} ${quota.state === "stale" || quota.state === "unknown" ? "stale" : ""}`} key={quota.label} title={t("usage.quotaTitle", { label: limitLabel(quota.bucket.label), observed: absoluteTime(quota.bucket.observedAt), reset: absoluteTime(quota.bucket.resetsAt) })}>
-                <span>{limitLabel(quota.label)}</span>
-                <div className="bar"><i style={{ width: `${left ?? 0}%` }} /></div>
-                <b>{spent ? (weeklyReset === null && quota.bucket.resetsAt ? `${t("usage.quota.spent")} · ${relativeTime(quota.bucket.resetsAt, true)}` : t("usage.quota.spent")) : left === null ? "—" : t("usage.quota.left", { value: formatPercent(left) })}</b>
-                {weeklyReset !== null && <small className="quota-reset" title={absoluteTime(weeklyReset)}>
-                  {weeklyReset <= Date.now() ? t("time.resetPending") : t("usage.quota.reset", { time: relativeTime(weeklyReset, true) })}
-                </small>}
-              </div>;
-            })}</div>}
-          </div>
-          {bridgeOn && (row.cells.length ? <div className="models">{row.cells.map(cell => <div className="cell" key={cell.key} style={{ "--c": providerColor[provider], "--heat": Math.min(1, cell.total / peak).toFixed(2) } as CSSProperties}>
-            <div className="head">{cell.now > 0 && <span className="live" />}<span className="name">{cell.name}</span><span className="n">{cell.route !== "bridge" ? <small>{t("usage.countUnknown")}</small> : <>{cell.total}<small>{t("usage.countUnit")}</small></>}</span></div>
-            {cell.route !== "bridge" ? <div className="cell-gap" /> : <Sparkline series={cell.series} peak={peak} provider={provider} width={220} height={26} />}
-            <div className="where">{masked ? cell.projects.length > 0 && <span className="tag">{t("usage.projectsHidden", { count: cell.projects.length })}</span> : cell.projects.map(cwd => <span className="tag" key={cwd} title={cwd}>{projectName(cwd, masked)}</span>)}{cell.route !== "bridge" && <span className={`tag ${cell.route === "direct" ? "direct" : "neutral"}`}>{t(cell.route === "direct" ? "usage.direct.tag" : "usage.routeUnknown.tag")}</span>}{cell.roles.map(role => <span className="tag" key={role}>{role}</span>)}</div>
-          </div>)}</div> : <div className="empty">{usageUnavailable ? t(error ? "usage.readFailed" : "common.checking") : t("usage.noCalls", { period: periodLabel })}</div>)}
-        </div>)}
+        <div className="acc-list">{providerRows.map(row => {
+          const member = row.group && pinMember(row.group, provider);
+          return <AccountRow key={row.key} row={row} provider={provider} masked={masked} online={online} now={now} reserve={reserve} open={isExpanded(open, rowIds(row))}
+            onToggle={() => setOpen(current => toggleExpanded(current, rowIds(row)))} tools={snapshot.tools} bridgeOn={bridgeOn} usageUnavailable={usageUnavailable} usageError={error}
+            periodLabel={periodLabel} peak={peak} manual={manual} pinned={pinnedGroup(provider, row)} canPin={Boolean(member) && !row.unknown} pinPending={pinAction.pending}
+            onPin={() => { if (member) setPin(provider, member.id); }} expiringBoosted={Boolean(snapshot.policy.expiringBoost) && (snapshot.policy.allocationMode ?? "smart") === "smart"}
+            refreshing={refreshing} onRefresh={onRefresh} onConnect={onConnect} accounts={snapshot.accounts} onReload={onReload} watch={watch} />;
+        })}</div>
       </section>;
     })}
+    {bridgeOn && <details className="panel history">
+      <summary><h2>{t("usage.history.title")}</h2><span className="aside">{t("usage.history.summary", { period: periodLabel })}</span></summary>
+    {bridgeOn && <section className={`now${!usageUnavailable && !lead && loaded ? " quiet" : ""}`} aria-label={t("usage.busiestAria")}>
+      <div className="busiest">
+        <div className="who"><span className={!usageUnavailable && lead && lead.cell.now ? "live" : "dot idle"} />{t("usage.busiest")}</div>
+        {usageUnavailable ? <><div className="model muted">{t(error ? "usage.readFailed" : "common.checking")}</div><div className="rate">{t(error ? "usage.readFailedHelp" : "usage.loadingHelp")}</div></> : lead ? <>
+          <div className="model">{lead.cell.name}</div>
+          <div className="who"><Dot provider={lead.row.provider} />{providerNames[lead.row.provider]}, {accountText(lead.row.account, masked)}</div>
+          <div className="rate">{t("usage.last5min")}<b>{t("usage.requestCount", { count: lead.cell.now })}</b>, {t("usage.periodTotal", { period: periodLabel, count: t("usage.requestCount", { count: lead.cell.total }) })}</div>
+          <Sparkline series={lead.cell.series} peak={peak} provider={lead.row.provider} width={300} height={44} />
+        </> : loaded ? <div className={characters ? "idle-scene" : undefined}>
+          {characters && <img className="idle-art" src={tigerNap} alt="" width={140} height={68} />}
+          <div><div className="model muted">{t("usage.noRecentCalls")}</div><div className="rate">{t("usage.noRequests", { period: periodLabel })}</div></div>
+        </div> : <><div className="model muted">{t("common.checking")}</div><div className="rate">{t("usage.noRequests", { period: periodLabel })}</div></>}
+      </div>
+      <ol className="ranking">{lines.slice(1, 7).map((line, index) => <li key={`${line.row.key}:${line.cell.key}`}>
+        <span className="rank">{index + 2}</span>
+        <span className="line">{line.cell.now > 0 && <span className="live inline" />}{line.cell.name} <span>{providerNames[line.row.provider]}, {accountText(line.row.account, masked)}</span></span>
+        <Sparkline series={line.cell.series} peak={peak} provider={line.row.provider} />
+        <span className="count">{t("usage.countShort", { count: line.cell.total })}</span>
+      </li>)}</ol>
+    </section>}
+    {bridgeOn && routeDetails.length > 0 && <section className="panel route-details" aria-label={t("usage.routes.title")}>
+      <header><h2>{t("usage.routes.title")}</h2><span className="aside">{periodLabel} · omp</span></header>
+      <div className="route-table-scroll"><table>
+        <thead><tr><th scope="col">{t("usage.routes.project")}</th><th scope="col">{t("usage.routes.model")}</th><th scope="col">{t("usage.routes.status")}</th><th scope="col">{t("usage.routes.lastRecorded")}</th></tr></thead>
+        <tbody>{routeDetails.map(detail => <tr key={detail.key}>
+          <td title={!masked && detail.project ? detail.project : undefined}>{detail.project ? projectName(detail.project, masked) : t("usage.routes.projectUnknown")}</td>
+          <td><strong>{detail.model}</strong><div className="muted">{providerNames[detail.provider] ?? detail.provider}</div></td>
+          <td><Badge tone={detail.route === "direct" ? "direct" : "neutral"}>{t(detail.route === "direct" ? "usage.routes.direct" : "usage.routes.unknown")}</Badge></td>
+          <td><time dateTime={new Date(detail.lastRecordedAt).toISOString()}>{fullTime(detail.lastRecordedAt)}</time></td>
+        </tr>)}</tbody>
+      </table></div>
+    </section>}
+    </details>}
+    <p className="timezone-note">{t("usage.timezone", { zone: timeZoneLabel() })}</p>
     {!bridgeOn && <div className="notice"><p><b>{t("usage.bridgeDisconnected.title")}</b> {t("usage.bridgeDisconnected.body")} <button type="button" className="text-button" onClick={onConnect}>{t("nav.connect")}</button></p></div>}
   </section>;
 }

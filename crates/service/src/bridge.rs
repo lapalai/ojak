@@ -495,6 +495,7 @@ pub struct BlockStatus {
     pub scope: Option<String>,
     pub until: i64,
     pub reason: String,
+    pub quota: bool,
 }
 #[derive(Debug, Serialize)]
 #[serde(rename_all = "camelCase")]
@@ -845,7 +846,7 @@ impl Bridge {
             .filter(|block| block.until > now)
             .map(|block| {
                 let (provider, email) = owner(&state.gateways, &block.key);
-                BlockStatus { provider, email, scope: block.scope.clone(), until: block.until, reason: block.reason.clone() }
+                BlockStatus { provider, email, scope: block.scope.clone(), until: block.until, reason: block.reason.clone(), quota: block.quota }
             })
             .collect();
         Status {

@@ -1,7 +1,7 @@
 // AI Account Manager 소유 확장. OMP 공개 ExtensionAPI의 요청별 model을 관측합니다.
 import { createHash, randomBytes } from 'node:crypto';
 import { spawn } from 'node:child_process';
-import { constants } from 'node:fs';
+import { constants, watch } from 'node:fs';
 import { lstat, mkdir, open, rename, unlink } from 'node:fs/promises';
 import { homedir } from 'node:os';
 import { isAbsolute, join, resolve } from 'node:path';
@@ -9,6 +9,7 @@ import { isAbsolute, join, resolve } from 'node:path';
 // native installer가 manager 경로와 ACL-aware writer의 진입 경로를 치환합니다.
 const INSTALLED_AAM_HOME = undefined;
 const INSTALLED_AAM_WRITER = undefined;
+const INSTALLED_AAM_ENTRY = undefined;
 const WRITE_INTERVAL = 1_000;
 const HEARTBEAT_INTERVAL = 15_000;
 const BRANCH_LIMIT = 4_096;
@@ -71,6 +72,7 @@ function identityHash(provider, identity) {
 function nativeWriter(root) {
   let child;
   let pending;
+  let closing;
   function fail() {
     const current = child;
     child = undefined;
@@ -84,6 +86,7 @@ function nativeWriter(root) {
   }
   return {
     write(data) {
+      if (closing) return Promise.reject(new Error('native-writer-closed'));
       if (pending) return Promise.reject(new Error('native-writer-busy'));
       if (!child) {
         const executable = INSTALLED_AAM_WRITER || join(process.env.LOCALAPPDATA || join(homedir(), 'AppData/Local'), 'Ojak/aam.exe');
@@ -122,8 +125,13 @@ function nativeWriter(root) {
       });
     },
     close() {
+      if (!child) return closing;
+      const current = child;
+      current.ref();
+      closing = new Promise(resolve => current.once('close', resolve));
       if (pending) fail();
-      else { child?.stdin.end(); child = undefined; }
+      else { current.stdin.end(); child = undefined; }
+      return closing;
     },
   };
 }
@@ -263,6 +271,26 @@ export default function aamObserver(pi) {
   const calls = new Map();
   let writing;
   let failedWrite = false;
+  let installationWatch;
+
+  async function installationRemoved() {
+    if (stopped) return;
+    stopped = true;
+    installationWatch?.close();
+    installationWatch = undefined;
+    if (timer) context?.clearTimer(timer);
+    timer = undefined;
+    await writing;
+    await writer?.close();
+  }
+  if (INSTALLED_AAM_ENTRY) {
+    try {
+      installationWatch = watch(INSTALLED_AAM_ENTRY, { persistent: false }, event => {
+        if (event === 'rename') void installationRemoved();
+      });
+      installationWatch.on('error', () => { void installationRemoved(); });
+    } catch { void installationRemoved(); }
+  }
 
   function adopt(ctx) {
     const nextId = text(ctx.sessionManager.getSessionId());
@@ -339,6 +367,7 @@ export default function aamObserver(pi) {
   }
 
   function flush(force = false) {
+    if (stopped && !force) return;
     if (writing) return writing;
     if (!force && (!context || (!dirty && Date.now() - lastWrite < HEARTBEAT_INTERVAL))) return;
     if (!force && Date.now() - lastWrite < WRITE_INTERVAL) return;
@@ -417,6 +446,6 @@ export default function aamObserver(pi) {
       await writing;
       await flush(true);
     } catch { /* 종료/오프라인/권한 오류로 OMP를 방해하지 않습니다. */ }
-    finally { writer?.close(); }
+    finally { installationWatch?.close(); await writer?.close(); }
   });
 }

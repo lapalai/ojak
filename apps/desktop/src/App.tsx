@@ -8,7 +8,7 @@ import { UsageView } from "./UsageView";
 import { SetupGuide, ServiceVersionNotice } from "./SetupGuide";
 import { SettingsDialog, AddAccountDialog, IntegrationDialog, LaunchDialog, QuitDialog, ServiceDialog } from "./dialogs";
 import { ActionFeedback, ErrorMessage, PrivacyContext, Switch } from "./components";
-import { appInfo, getLanguage, rpc, setPrivacy, updatesStatus } from "./api";
+import { appInfo, getLanguage, refreshIntegrations, rpc, setPrivacy, updatesStatus } from "./api";
 import ojakIcon from "./assets/ojak-icon.png";
 import { groupAccounts, isCurrentGroup, occupiedStates, relativeTime, useAction, useSnapshot } from "./state";
 import type { Policy, Session } from "./types";
@@ -33,6 +33,7 @@ export default function App() {
   const [version, setVersion] = useState<string | null>(null);
   const [masked, setMasked] = useState(() => { try { return localStorage.getItem("aam.privacy") !== "visible"; } catch { return true; } });
   const policyAction = useAction();
+  const integrationAction = useAction();
   const online = Boolean(snapshot && !error);
   const accountCount = snapshot ? groupAccounts(snapshot.accounts).filter(isCurrentGroup).length : null;
   const sessionCount = snapshot ? snapshot.sessions.filter(session => occupiedStates[session.state]).length + (snapshot.observedSessions?.length ?? 0) : null;
@@ -49,6 +50,7 @@ export default function App() {
   useEffect(() => {
     if (!isTauri()) return;
     void appInfo().then(info => setVersion(info.version)).catch(() => setVersion(null));
+    void integrationAction.run(refreshIntegrations);
     const updateTimer = window.setInterval(() => { void updatesStatus(false).catch(() => undefined); }, UPDATE_CHECK_INTERVAL_MS);
     void updatesStatus(false).catch(() => undefined);
     // 네이티브 언어 설정이 기준이다. 화면이 다른 언어로 시작했으면(저장소 초기화 등) 맞춰 다시 불러온다.
@@ -98,9 +100,10 @@ export default function App() {
       {!snapshot ? <ServiceUnavailable error={error} connecting={connecting} onRetry={() => { void reload(); }} onInstall={() => setDialog({ kind: "service" })} /> : <div className="workspace-scroll" key={view}><div className="main-content">
         {error && <div className="offline-notice"><ErrorMessage error={error} /><p>{t("offline.notice")}</p><button type="button" className="button" onClick={() => { void reload(); }}>{t("offline.retry")}</button></div>}
         <ActionFeedback error={policyAction.error} message={policyAction.message} />
+        <ActionFeedback error={integrationAction.error} message={integrationAction.message} />
         {isTauri() && <ServiceVersionNotice snapshot={snapshot} onReload={onReload} />}
         {launchMessage && <div className="launch-notice" role="status"><Terminal size={16} /><span>{launchMessage}</span><button type="button" className="text-button" onClick={() => { setView("sessions"); setLaunchMessage(null); }}>{t("launch.viewSessions")}<ChevronRight size={13} /></button></div>}
-        {view === "usage" && <UsageView snapshot={snapshot} masked={masked} online={online} onReload={onReload} onConnect={() => setView("connect")} onSessions={() => setView("sessions")} onAdd={onAdd} onSetup={() => setSetupRequest(value => value + 1)} setupRequest={setupRequest} setupRevision={setupRevision} />}
+        {view === "usage" && <UsageView snapshot={snapshot} masked={masked} online={online} refreshing={busy} onRefresh={refresh} onReload={onReload} onConnect={() => setView("connect")} onSessions={() => setView("sessions")} onAdd={onAdd} onSetup={() => setSetupRequest(value => value + 1)} setupRequest={setupRequest} setupRevision={setupRevision} />}
         {view === "sessions" && <SessionsView snapshot={snapshot} masked={masked} online={online} onNewSession={onNewSession} onResume={onResume} />}
         {view === "connect" && <ConnectionsView snapshot={snapshot} masked={masked} online={online} refreshing={busy} onRefresh={refresh} onReload={onReload} onAdd={onAdd} onService={() => setDialog({ kind: "service" })} onIntegration={action => setDialog({ kind: "integration", action })} />}
       </div></div>}

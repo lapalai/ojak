@@ -21,6 +21,18 @@ export function remainingOf(bucket: QuotaBucket, state: string): number | null {
   return Math.max(0, Math.min(100, 100 - bucket.usedPercent));
 }
 
+/// 사용량 화면의 한도 한 줄이 보일 값. `confirmed`는 서비스가 신선하다고 본 관측일 때만 true다.
+/// 오래된(stale) 관측도 마지막으로 본 값은 `left`/`spent`로 남겨 두되, 지금 남은 양처럼 보이지 않게 호출하는 쪽이 구분해 그린다.
+/// 소진 여부는 신선한 소진 상태이거나 마지막 관측이 100% 이상 쓴 것이다.
+export interface QuotaReading { confirmed: boolean; left: number | null; spent: boolean; observedAt: number | null }
+export function quotaReading(bucket: QuotaBucket, state: string): QuotaReading {
+  const used = bucket.usedPercent !== null && Number.isFinite(bucket.usedPercent) ? bucket.usedPercent : null;
+  const confirmed = state === "known" || state === "exhausted";
+  const spent = state === "exhausted" || (used !== null && used >= 100) || (!confirmed && bucket.status === "exhausted");
+  const left = spent ? 0 : used === null ? null : Math.max(0, 100 - used);
+  return { confirmed, left, spent, observedAt: bucket.observedAt > 0 ? bucket.observedAt : null };
+}
+
 /// 이 값 이하로 남으면 주의 색으로 바꾼다. 공급자와 관계없이 모든 한도에 같은 기준을 쓴다.
 export const WARN_REMAINING_PERCENT = 30;
 

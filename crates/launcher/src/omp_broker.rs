@@ -186,6 +186,40 @@ pub(crate) fn logged_in_providers() -> Result<Vec<String>, ApiError> {
     authenticated_snapshot().map(|snapshot| snapshot.providers)
 }
 
+/// 로그인 직후 새 항목을 계정으로 확인하기 위한 비밀 없는 항목 정보. access·refresh 값은 읽지 않는다.
+pub(crate) struct Credential {
+    pub provider: String,
+    pub identity_key: Option<String>,
+    pub email: Option<String>,
+    pub account_id: Option<String>,
+    pub org_id: Option<String>,
+    pub project_id: Option<String>,
+    pub authorized_at: i64,
+}
+
+pub(crate) fn credentials() -> Result<Vec<Credential>, ApiError> {
+    let body = broker_request("GET", "/v1/snapshot", None)?;
+    let parsed: serde_json::Value = serde_json::from_slice(&body).map_err(|_| ApiError::new("BROKER_PROTOCOL_MISMATCH", "OMP broker snapshot을 해석하지 못했습니다."))?;
+    let rows = parsed.get("credentials").and_then(|value| value.as_array()).ok_or_else(|| ApiError::new("BROKER_PROTOCOL_MISMATCH", "OMP broker snapshot 응답이 올바르지 않습니다."))?;
+    let text = |value: &serde_json::Value, key: &str| value.get(key).and_then(|item| item.as_str()).filter(|item| !item.is_empty() && item.len() <= 512 && !item.chars().any(char::is_control)).map(str::to_owned);
+    Ok(rows
+        .iter()
+        .filter(|row| row.pointer("/credential/type").and_then(|kind| kind.as_str()) == Some("oauth"))
+        .filter_map(|row| {
+            let credential = row.get("credential")?;
+            Some(Credential {
+                provider: row.get("provider")?.as_str()?.to_owned(),
+                identity_key: text(row, "identityKey"),
+                email: text(credential, "email"),
+                account_id: text(credential, "accountId"),
+                org_id: text(credential, "orgId"),
+                project_id: text(credential, "projectId"),
+                authorized_at: credential.get("authorizedAt").and_then(|value| value.as_i64()).unwrap_or(0),
+            })
+        })
+        .collect())
+}
+
 
 /// HTTP chunked 전송을 바이트 단위로 해제한다. 결합이 끝난 뒤에만 UTF-8로 해석한다.
 fn decode_body(body: &[u8], chunked: bool) -> Result<Vec<u8>, ApiError> {
