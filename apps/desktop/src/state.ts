@@ -1,6 +1,6 @@
 import { useCallback, useEffect, useRef, useState } from "react";
 import { getCurrentWindow } from "@tauri-apps/api/window";
-import { listen } from "@tauri-apps/api/event";
+import { getCurrentWebviewWindow } from "@tauri-apps/api/webviewWindow";
 import { bucketState } from "./limits";
 import { bridgeUsage, ompBridgeAction, rpc, toApiError } from "./api";
 import type { BridgeUsage, OmpBridgeStatus } from "./api";
@@ -245,7 +245,8 @@ export function useWindowVisible(): boolean {
   useEffect(() => {
     let active = true;
     void getCurrentWindow().isVisible().then(value => { if (active) setVisible(value); }).catch(() => undefined);
-    const off = listen<boolean>("ojak://window-visible", event => { if (active) setVisible(event.payload); });
+    // 이 창 대상으로만 듣는다. 전역 `listen`은 다른 창(팝오버)이 숨겨질 때 보낸 값까지 받는다.
+    const off = getCurrentWebviewWindow().listen<boolean>("ojak://window-visible", event => { if (active) setVisible(event.payload); });
     return () => { active = false; void off.then(stop => stop()); };
   }, []);
   return visible;

@@ -115,15 +115,35 @@ pub(super) fn scan(binary: &Path, orca_paths: &[PathBuf], paths: &Paths, account
     entry.dwSize = size_of::<PROCESSENTRY32W>() as u32;
     if unsafe { Process32FirstW(snapshot.as_raw_handle(), &mut entry) } == 0 { result.incomplete(); return result; }
     let boot = winutil::boot_id_candidate();
-    let deadline = Instant::now() + Duration::from_millis(750);
-    let mut records = BTreeMap::new();
+    // 프로세스마다 열어 토큰·실행 파일을 확인하면 Windows에서 수백 번의 커널 호출이 된다. 스냅샷의 이름과
+    // 부모만으로 omp와 이름이 같은 프로세스와 그 조상을 고르고, 그것만 연다. 이름은 거르기에만 쓰고,
+    // 관측 여부는 아래 `record`가 읽은 정확한 실행 파일 경로로 판정한다.
+    let Some(name) = binary.file_name() else { result.incomplete(); return result; };
+    let mut parents = BTreeMap::new();
+    let mut candidates = Vec::new();
     let mut partial = false;
     loop {
-        if Instant::now() >= deadline || records.len() >= 8192 { partial = true; break; }
+        if parents.len() >= 8192 { partial = true; break; }
         let pid = entry.th32ProcessID;
+        parents.insert(pid, entry.th32ParentProcessID);
+        let length = entry.szExeFile.iter().position(|&unit| unit == 0).unwrap_or(entry.szExeFile.len());
+        if OsString::from_wide(&entry.szExeFile[..length]).eq_ignore_ascii_case(name) { candidates.push(pid); }
+        if unsafe { Process32NextW(snapshot.as_raw_handle(), &mut entry) } == 0 { break; }
+    }
+    let mut wanted = BTreeSet::new();
+    for pid in candidates {
+        let mut current = pid;
+        for _ in 0..=MAX_ANCESTORS {
+            if current == 0 || !wanted.insert(current) { break; }
+            match parents.get(&current) { Some(&parent) => current = parent, None => break }
+        }
+    }
+    let deadline = Instant::now() + Duration::from_millis(750);
+    let mut records = BTreeMap::new();
+    for pid in wanted {
+        if Instant::now() >= deadline { partial = true; break; }
         // Foreign/system processes are outside our observation scope, not failed sessions.
         if let Ok(item) = record(pid, &boot) { records.insert(pid, item); }
-        if unsafe { Process32NextW(snapshot.as_raw_handle(), &mut entry) } == 0 { break; }
     }
     result = project(&records, binary, orca_paths, uid(), |old| {
         record(old.pid, &boot).is_ok_and(|fresh| fresh.identity == old.identity && fresh.parent_pid == old.parent_pid && fresh.executable == old.executable)

@@ -275,6 +275,11 @@ impl Service {
         };
         self.snapshot_with_observations(aam_adapters::discover_sessions(&self.paths, &catalog))
     }
+    /// 관측 세션 없이 저장된 상태만 읽는다. 트레이처럼 관측 세션을 쓰지 않는 주기 조회용이다. 프로세스 관측은
+    /// Windows에서 조회 한 번에 수십~수백 ms의 커널 호출이라, 쓰지 않는 쪽까지 돌리면 서비스가 쉬지 못한다.
+    fn stored_snapshot(&self) -> Result<Snapshot, ApiError> {
+        self.snapshot_with_observations(aam_adapters::ObservedScan::default())
+    }
     fn snapshot_with_observations(
         &self,
         mut observed: aam_adapters::ObservedScan,
@@ -365,6 +370,8 @@ impl Service {
     }
     pub fn dispatch(self: &Arc<Self>, method: &str, params: Value) -> Result<Value, ApiError> {
         match method {
+            // `observe: false`는 관측 세션을 건너뛴다(응답의 observedSessions가 비고 관측 알림도 없다).
+            "status.read" if params.get("observe").and_then(Value::as_bool) == Some(false) => value(self.stored_snapshot()?),
             "status.read" => value(self.snapshot()?),
             "quota.refresh" => {
                 // 사용자가 직접 누른 새로고침만 omp의 5분 보고 캐시를 건너뛴다. 정기 조회는 캐시를 존중한다.

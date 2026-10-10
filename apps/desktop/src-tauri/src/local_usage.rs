@@ -26,6 +26,9 @@ use std::{
 };
 
 const INDEX_VERSION: i32 = 2;
+/// 기록 파일을 여는 규칙의 판. 바꾸면 이전 규칙으로 '읽을 수 없음' 표시된 파일을 한 번 다시 읽는다.
+/// 2: Windows에서 하드 링크(링크 수 2 이상) 기록도 연다.
+const OPEN_RULES: i64 = 2;
 /// 호출 한 번이 읽는 최대 바이트와 최대 시간. 먼저 닿는 쪽에서 멈춘다.
 const PASS_BYTES: u64 = 64 << 20;
 const PASS_TIME: Duration = Duration::from_millis(600);
@@ -1029,6 +1032,12 @@ fn init_db(conn: &Connection) -> rusqlite::Result<()> {
     } else {
         conn.execute_batch(DDL)?;
     }
+    // 파일을 여는 규칙이 바뀌면(예: 0.5.5에서 하드 링크 허용) 예전 규칙으로 실패 표시한 파일도 다시 읽어 본다.
+    // 실패 표시는 파일이 바뀌어야만 풀리므로, 규칙 판이 다르면 표시만 지운다. 이미 읽은 기록은 그대로 둔다.
+    if get_meta(conn, "open_rules") != OPEN_RULES {
+        conn.execute("UPDATE files SET state=0, fail_size=-1, fail_mtime=-1 WHERE state=1", [])?;
+        set_meta(conn, "open_rules", OPEN_RULES)?;
+    }
     Ok(())
 }
 
@@ -1785,7 +1794,8 @@ fn registered_profiles(paths: &Paths) -> Vec<(String, PathBuf)> {
     let call_paths = paths.clone();
     let (tx, rx) = mpsc::channel();
     std::thread::spawn(move || {
-        let _ = tx.send(aam_protocol::call(&call_paths, "status.read", serde_json::json!({})));
+        // 계정 목록만 쓴다. 프로세스 관측은 서비스에 시키지 않는다.
+        let _ = tx.send(aam_protocol::call(&call_paths, "status.read", serde_json::json!({"observe": false})));
     });
     // 서비스가 바쁘면 오래 기다리지 않는다. 읽기 전용 호출이며 서비스 DB는 건드리지 않는다.
     if let Ok(Ok(status)) = rx.recv_timeout(Duration::from_secs(3)) {
@@ -2623,6 +2633,41 @@ mod tests {
         drain(&mut index, &set);
         let r = report(&index, None, now());
         assert_eq!(r.totals.output_tokens, 5 + 10 + 1);
+        assert!(!r.warnings.iter().any(|w| w == "SOURCE_UNREADABLE"));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn files_failed_under_older_open_rules_are_retried_once_without_changing() {
+        use std::os::unix::fs::PermissionsExt;
+        let dir = Temp::new();
+        let root = dir.join("projects");
+        let file = root.join("p/linked.jsonl");
+        write_lines(&file, &[claude_msg("m1", "2026-08-04T00:00:01Z", (1, 10, 0, 0), 0)]);
+        fs::set_permissions(&file, fs::Permissions::from_mode(0o000)).unwrap();
+        if fs::File::open(&file).is_ok() {
+            fs::set_permissions(&file, fs::Permissions::from_mode(0o644)).unwrap();
+            return;
+        }
+        let set = set_of(TOOL_CLAUDE, &root);
+        {
+            let mut index = open(&dir);
+            drain(&mut index, &set);
+            assert!(report(&index, None, now()).warnings.iter().any(|w| w == "SOURCE_UNREADABLE"));
+        }
+        // 같은 규칙 판으로 다시 열면 실패 표시를 지우지 않는다(바뀌지 않은 파일을 매번 다시 읽지 않는다).
+        {
+            let mut index = open(&dir);
+            assert_eq!(index.refresh(&set, now(), big(), Duration::ZERO).unwrap().pending, 0);
+            // 예전 규칙 판으로 표시된 실패라고 가정한다.
+            set_meta(&index.conn, "open_rules", OPEN_RULES - 1).unwrap();
+        }
+        // 새 규칙에서는 열 수 있는 파일. 크기·시각은 그대로다(접근 권한만 바뀜).
+        fs::set_permissions(&file, fs::Permissions::from_mode(0o644)).unwrap();
+        let mut index = open(&dir);
+        drain(&mut index, &set);
+        let r = report(&index, None, now());
+        assert_eq!(r.totals.output_tokens, 10);
         assert!(!r.warnings.iter().any(|w| w == "SOURCE_UNREADABLE"));
     }
 

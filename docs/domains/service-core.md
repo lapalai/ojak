@@ -11,6 +11,7 @@
 
 ## RPC 메서드 (`lib.rs:346-452`)
 `status.read`의 Snapshot은 `serviceVersion`(서비스 실행 파일의 `CARGO_PKG_VERSION`)을 담는다. 앱·`aam`이 자기 버전과 비교해 덮어쓴 앱 뒤에 남은 예전 서비스를 찾는 데 쓴다. 이 필드가 없던 서비스는 응답에 빠져 있고, 받는 쪽은 '알 수 없음'(재시작 필요)으로 본다. `service.prepareUninstall`은 `aam service restart`도 쓰는 lease 검사 창구다.
+`status.read`에 `{"observe": false}`를 주면 omp 프로세스 관측(`discover_sessions`)을 건너뛰고 저장된 상태만 돌려준다(`observedSessions`가 비고 관측 알림도 없다). 관측은 Windows에서 조회 한 번에 수십~수백 ms라, 관측 세션을 쓰지 않는 트레이·회복 감시의 5초 조회는 이 옵션을 쓴다. 이 매개변수를 모르는 예전 서비스는 무시하고 전체 스냅샷을 돌려준다.
 `status.read`, `quota.refresh`, `service.prepareUninstall`, `service.cancelUninstall`, `service.resumeAdmission`, `route.resolve`, `route.explain`, `takeover.adopt`, `takeover.release`, `lease.validate-child`, `policy.update`, `bridge.status`, `diagnostics.export`, `account.register`, `account.update`, `lease.acquire`, `lease.starting`, `lease.started`, `lease.heartbeat`, `lease.release`, `lease.abort`. 나머지는 `METHOD_NOT_FOUND`.
 
 ## 저장소 (`store.rs:62-104`)

@@ -31,17 +31,29 @@ fn request_quit(app: &tauri::AppHandle) {
 /// 대시보드를 앞으로 가져온다. 창을 닫아 트레이로만 있던 동안 숨겼던 Dock 아이콘도 되살린다.
 fn show_main(app: &tauri::AppHandle) {
     if let Some(popover) = app.get_webview_window(POPOVER) {
-        let _ = popover.hide();
-        let _ = popover.emit(VISIBILITY_EVENT, false);
+        set_shown(&popover, false);
     }
     #[cfg(target_os = "macos")]
     let _ = app.set_activation_policy(tauri::ActivationPolicy::Regular);
     if let Some(window) = app.get_webview_window("main") {
-        let _ = window.show();
+        set_shown(&window, true);
         let _ = window.unminimize();
         let _ = window.set_focus();
-        let _ = window.emit(VISIBILITY_EVENT, true);
     }
+}
+
+/// 창을 보이거나 숨기고, 그 창의 화면에만 알린다. `emit`은 모든 창에 가므로 팝오버를 닫을 때 대시보드까지
+/// 멈추지 않도록 `emit_to`로 이 창만 겨눈다. WebView2는 창을 숨겨도 웹뷰를 계속 그리므로 웹뷰도 함께 숨긴다.
+fn set_shown(window: &tauri::WebviewWindow, shown: bool) {
+    let webview: &tauri::Webview = window.as_ref();
+    if shown {
+        let _ = window.show();
+        let _ = webview.show();
+    } else {
+        let _ = webview.hide();
+        let _ = window.hide();
+    }
+    let _ = window.emit_to(tauri::EventTarget::webview_window(window.label()), VISIBILITY_EVENT, shown);
 }
 
 const POPOVER: &str = "popover";
@@ -56,8 +68,7 @@ const POPOVER_WIDTH: f64 = 340.0;
 fn toggle_popover(app: &tauri::AppHandle, rect: tauri::Rect) {
     let Some(popover) = app.get_webview_window(POPOVER) else { return };
     if popover.is_visible().unwrap_or(false) {
-        let _ = popover.hide();
-        let _ = popover.emit(VISIBILITY_EVENT, false);
+        set_shown(&popover, false);
         return;
     }
     let fallback = popover.scale_factor().unwrap_or(1.0);
@@ -100,10 +111,9 @@ fn toggle_popover(app: &tauri::AppHandle, rect: tauri::Rect) {
     let x = x.min(right - width - margin).max(left + margin);
     let y = y.min(bottom - height - margin).max(top + margin);
     let _ = popover.set_position(tauri::PhysicalPosition::new(x, y));
-    let _ = popover.show();
+    set_shown(&popover, true);
     let _ = popover.set_focus();
-    let _ = popover.emit("ojak://popover-shown", ());
-    let _ = popover.emit(VISIBILITY_EVENT, true);
+    let _ = popover.emit_to(tauri::EventTarget::webview_window(POPOVER), "ojak://popover-shown", ());
 }
 
 #[tauri::command]
@@ -114,8 +124,7 @@ fn open_dashboard(app: tauri::AppHandle) {
 #[tauri::command]
 fn hide_popover(app: tauri::AppHandle) {
     if let Some(popover) = app.get_webview_window(POPOVER) {
-        let _ = popover.hide();
-        let _ = popover.emit(VISIBILITY_EVENT, false);
+        set_shown(&popover, false);
     }
 }
 
@@ -1515,7 +1524,8 @@ fn tray_image() -> tauri::image::Image<'static> {
 }
 
 fn tray_status() -> Result<Snapshot, ApiError> {
-    let value = aam_protocol::call(&paths()?, "status.read", json!({}))?;
+    // 트레이·회복 감시는 관측 세션(프로세스 관측)을 쓰지 않는다. 5초마다 도는 조회라 서비스에 관측을 시키지 않는다.
+    let value = aam_protocol::call(&paths()?, "status.read", json!({"observe": false}))?;
     let snapshot: Snapshot = serde_json::from_value(value)
         .map_err(|_| ApiError::new("INVALID_STATUS", "서비스 상태 응답을 확인하지 못했습니다."))?;
     if snapshot.version != aam_protocol::PROTOCOL_VERSION {
@@ -2558,14 +2568,18 @@ fn main() {
         .on_window_event(|window, event| match event {
             // 팝오버는 다른 곳을 누르면 닫힌다. 메뉴바 팝오버 관례다.
             tauri::WindowEvent::Focused(false) if window.label() == POPOVER => {
-                let _ = window.hide();
-                let _ = window.emit(VISIBILITY_EVENT, false);
+                if let Some(popover) = window.app_handle().get_webview_window(POPOVER) {
+                    set_shown(&popover, false);
+                }
             }
             // 창을 닫으면 앱은 트레이로만 남는다. Dock 아이콘도 숨겨 메뉴바 앱처럼 동작한다.
             tauri::WindowEvent::CloseRequested { api, .. } => {
                 api.prevent_close();
-                let _ = window.hide();
-                let _ = window.emit(VISIBILITY_EVENT, false);
+                if let Some(webview_window) = window.app_handle().get_webview_window(window.label()) {
+                    set_shown(&webview_window, false);
+                } else {
+                    let _ = window.hide();
+                }
                 #[cfg(target_os = "macos")]
                 if window.label() == "main" {
                     let _ = window.app_handle().set_activation_policy(tauri::ActivationPolicy::Accessory);
