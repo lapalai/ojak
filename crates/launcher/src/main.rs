@@ -407,7 +407,7 @@ fn execute(paths: &Paths, action: Action) -> Result<(), ApiError> {
             println!("Ojak 명령을 거치지 않는 절대 경로, 다른 앱, 다른 기기의 실행은 관리하지 않아요.");
         }
         Action::Refresh => {
-            print_json(&call(paths, "quota.refresh", json!({}))?)?;
+            print_json(&call(paths, "quota.refresh", json!({"force": true}))?)?;
         }
         Action::Explain(args) => {
             let intent = LaunchIntent {

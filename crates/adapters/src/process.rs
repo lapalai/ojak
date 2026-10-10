@@ -536,6 +536,14 @@ pub(crate) fn run_json_slow(
     probe.output()
 }
 
+/// 출력이 필요 없는 짧은 조회(`omp usage invalidate`). 출력은 버리고 종료만 기다린다. 시간 제한은 일반 조회와 같다.
+pub(crate) fn run_quiet(program: &Path, args: &[&str], env: &BTreeMap<String, String>, cwd: &Path) -> Result<(), ApiError> {
+    let mut probe = Probe::spawn(program, args, env, cwd)?;
+    probe.child.stdin.take();
+    while probe.pump()? {}
+    Ok(())
+}
+
 pub(crate) fn version(program: &Path, cwd: &Path) -> Option<String> {
     Probe::spawn(program, &["--version"], &base_env(), cwd)
         .and_then(Probe::version)

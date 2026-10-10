@@ -695,15 +695,16 @@ fn wait_synced(ctx: &mut Ctx, expected: &dyn Fn(&Account) -> bool, gateway: Opti
     }
     let since = now_ms();
     let end = Instant::now() + SYNC_TIMEOUT;
-    let mut refreshed = Instant::now() - Duration::from_secs(60);
+    // 새 로그인은 omp 캐시에 없으므로 한 번만 강제 조회한다. 15초마다 다시 부르면 공급자 `/usage`가 반복 호출된다.
+    // 진행 중인 조회가 있어 무시됐다면, 그것이 끝난 뒤 한 번 더 요청한다.
+    let mut requested = false;
     loop {
         ctx.cancelled()?;
         if Instant::now() >= end {
             return Err(fail("LOGIN_SYNC_TIMEOUT", "로그인은 저장됐지만 omp 모델 연결을 아직 확인하지 못했어요. 잠시 뒤 계정 화면에서 확인해 주세요.", true));
         }
-        if refreshed.elapsed() >= Duration::from_secs(15) {
-            let _ = call(paths, "quota.refresh", json!({}));
-            refreshed = Instant::now();
+        if !requested {
+            requested = call(paths, "quota.refresh", json!({"force": true})).is_ok_and(|snapshot| snapshot["refreshing"] == true);
         }
         if let Ok(snapshot) = read_snapshot(paths) {
             let fresh = snapshot.last_refresh_at.is_some_and(|at| at >= since) && !snapshot.refreshing;

@@ -1,6 +1,6 @@
 {
   "name": "@aam/desktop",
-  "version": "0.4.1",
+  "version": "0.5.0",
   "private": true,
   "description": "Local menu-bar and tray app that assigns your own Claude Code, Codex, and omp subscription accounts",
   "author": "lapal",

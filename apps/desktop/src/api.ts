@@ -2,6 +2,8 @@ import { invoke, isTauri } from "@tauri-apps/api/core";
 import type { ApiError, HostConnections, LaunchIntent } from "./types";
 import { t } from "./i18n";
 import { parseLoginStatus, startArgs } from "./login";
+import { parseLocalUsageReport } from "./local-usage";
+import type { LocalUsageReport, UsageRange } from "./local-usage";
 import type { LoginRequest, LoginStatus } from "./login";
 
 export function toApiError(value: unknown): ApiError {
@@ -139,6 +141,8 @@ export interface ServiceVersionReport { appVersion: string; serviceVersion: stri
 export const serviceVersionStatus = () => native<ServiceVersionReport>("service_version_status");
 /// 사용자가 눌렀을 때만 부른다. 쓰는 중인 세션이 있으면 서비스가 `SESSION_BUSY`로 거절하고 아무것도 바꾸지 않는다.
 export const serviceRestart = () => native<string>("service_restart");
+/// PC에 남은 omp·Claude CLI·Codex 사용 기록의 토큰·API 환산 비용. 네이티브가 색인한 기록을 기간으로 조회하며, 읽는 중이면 `scanning`이 true인 부분 결과를 준다.
+export const localUsage = async (range: UsageRange): Promise<LocalUsageReport> => parseLocalUsageReport(await native<unknown>("local_usage", { sinceMs: range.sinceMs, untilMs: range.untilMs }));
 
 export function assertOpened(result: { opened: boolean }): void {
   if (!result.opened) throw { code: "TERMINAL_NOT_OPENED", message: t("api.terminalNotOpened"), retryable: true } satisfies ApiError;

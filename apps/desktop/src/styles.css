@@ -554,6 +554,66 @@ button.tiger-egg:hover:not(:disabled) { background: none; }
 @media (prefers-color-scheme: dark) { .idle-art { filter: brightness(1.35); } }
 @media (max-width: 1100px) { .idle-art { width: 112px; } }
 
+/* 토큰·비용: 산수도 두루마리. 위는 장식 풍경과 호랑이·깍이(사용량과 무관), 아래는 장부 면이다.
+   그림은 앱 색 토큰을 쓰지 않는 한 폭의 그림이라 밝은/어두운 두 벌의 지필 색만 따로 둔다. 숫자와 글자는 항상 앱 토큰을 쓴다. */
+.token-view { --paper: #eee8d4; --paper-deep: #e4e3cd; --roller: #506356; --ridge-far: #93aa98; --ridge-mid: #678a7c; --ridge-near: #486e69; --mist: #93a9a0; }
+@media (prefers-color-scheme: dark) {
+  .token-view { --paper: #2b2c27; --paper-deep: #26302c; --roller: #3c4a42; --ridge-far: #46584d; --ridge-mid: #38504a; --ridge-near: #2c423f; --mist: #53665d; }
+}
+.token-scroll { border: 1px solid var(--line); border-left: 10px solid var(--roller); border-right: 10px solid var(--roller); border-radius: 6px; background: var(--paper); overflow: hidden; margin-bottom: 14px; }
+.token-landscape { position: relative; height: 196px; overflow: hidden; background: var(--paper-deep); border-bottom: 1px solid var(--line); }
+.token-landscape.plain { height: 120px; }
+.token-ridge { position: absolute; bottom: -60px; display: block; clip-path: polygon(0 100%, 15% 53%, 25% 62%, 42% 5%, 51% 31%, 61% 18%, 75% 67%, 86% 47%, 100% 100%); }
+.token-ridge.far { right: 22%; width: 330px; height: 250px; background: var(--ridge-far); opacity: .55; }
+.token-ridge.mid { right: 36%; width: 350px; height: 270px; background: var(--ridge-mid); opacity: .4; }
+.token-ridge.near { right: -50px; width: 340px; height: 215px; background: var(--ridge-near); opacity: .6; }
+.token-cloud { position: absolute; top: 24px; right: 300px; width: 94px; height: 12px; border: 3px solid var(--mist); border-left: 0; border-right: 0; border-radius: 15px; }
+.token-caption { position: absolute; z-index: 2; left: 22px; top: 26px; max-width: min(42%, 340px); display: grid; gap: 6px; color: var(--text); }
+.token-caption strong { font-size: 16px; font-weight: 650; line-height: 1.5; }
+.token-caption small { color: var(--secondary); line-height: 1.55; }
+/* 승인된 산수도 시안의 호랑이·깍이 장면(투명 배경)을 같은 선·색으로 픽셀화한 그림. 비율을 지켜 풍경 아래쪽에 앉히고, 왼쪽만 풍경에 번지게 한다. */
+.token-art { position: absolute; z-index: 1; right: 8px; bottom: 0; width: 470px; max-width: 62%; height: auto; image-rendering: pixelated; pointer-events: none; -webkit-mask-image: linear-gradient(to right, transparent 0, #000 12%); mask-image: linear-gradient(to right, transparent 0, #000 12%); }
+@media (prefers-color-scheme: dark) { .token-art { filter: brightness(.8) saturate(.9); } }
+.token-ledger { padding: 20px 26px 18px; background: var(--paper); }
+.token-reading, .token-empty { padding: 18px 0; color: var(--secondary); }
+.token-empty strong { display: block; font-size: var(--fs-heading); color: var(--text); margin-bottom: 4px; }
+.token-empty p { color: var(--secondary); max-width: 60ch; }
+.token-figures { display: grid; grid-template-columns: minmax(0, 1.4fr) minmax(0, 1fr); gap: 28px; align-items: start; }
+.token-label { color: var(--secondary); font-size: var(--fs-meta); font-weight: 560; margin-bottom: 2px; }
+.token-number { font-size: 40px; line-height: 1.2; font-weight: 700; letter-spacing: -.02em; font-variant-numeric: tabular-nums; overflow-wrap: anywhere; }
+.token-number small { margin-left: 8px; font-size: 14px; font-weight: 500; color: var(--secondary); letter-spacing: 0; }
+.token-main .tools { margin-top: 8px; }
+.token-cost { border-left: 1px solid var(--line); padding-left: 26px; }
+.token-money { font-size: 28px; line-height: 1.3; font-weight: 680; letter-spacing: -.01em; font-variant-numeric: tabular-nums; }
+.token-money small { margin-left: 8px; font-size: var(--fs-meta); font-weight: 560; color: var(--warning); letter-spacing: 0; }
+.token-money.unpriced { font-size: 20px; color: var(--warning); }
+.token-note { margin-top: 6px; color: var(--secondary); font-size: var(--fs-meta); line-height: 1.6; }
+.token-parts { margin-top: 20px; padding-top: 16px; border-top: 1px solid var(--line); }
+.token-bar { display: flex; gap: 2px; height: 8px; border-radius: 4px; overflow: hidden; background: var(--surface-hover); }
+.token-bar i { display: block; min-width: 3px; background: var(--c); }
+.token-legend { list-style: none; margin: 10px 0 0; padding: 0; display: flex; flex-wrap: wrap; gap: 6px 22px; }
+.token-legend li { display: inline-flex; align-items: baseline; gap: 6px; color: var(--secondary); font-size: var(--fs-meta); }
+.token-legend li .dot { align-self: center; }
+.token-legend b { color: var(--text); font-weight: 600; }
+.token-legend small { color: var(--tertiary); }
+.token-status { margin-top: 14px; color: var(--tertiary); font-size: var(--fs-meta); line-height: 1.6; }
+.token-notes ul { list-style: none; margin: 0; padding: 4px 18px 10px; display: grid; }
+.token-notes li { display: flex; align-items: flex-start; gap: 9px; padding: 8px 0; border-top: 1px solid var(--line); color: var(--secondary); font-size: var(--fs-meta); line-height: 1.6; }
+.token-notes li:first-child { border-top: 0; }
+.token-notes li svg { flex-shrink: 0; margin-top: 3px; color: var(--tertiary); }
+.token-method > summary { cursor: pointer; padding: 11px 18px; font-size: var(--fs-heading); font-weight: 650; list-style: none; }
+.token-method > summary::before { content: "›"; display: inline-block; margin-right: 8px; color: var(--tertiary); transition: transform .15s; }
+.token-method[open] > summary::before { transform: rotate(90deg); }
+.token-method[open] > summary { border-bottom: 1px solid var(--line); }
+.token-method ul { margin: 0; padding: 12px 18px 14px 36px; display: grid; gap: 6px; color: var(--secondary); font-size: var(--fs-meta); line-height: 1.6; }
+@media (max-width: 1100px) {
+  .token-figures { grid-template-columns: 1fr; gap: 16px; }
+  .token-cost { border-left: 0; border-top: 1px solid var(--line); padding: 14px 0 0; }
+  .token-landscape { height: 168px; }
+}
+@media (max-width: 960px) { .token-caption { max-width: 52%; } .token-art { max-width: 50%; } }
+@media (forced-colors: active) { .token-scroll { border-color: CanvasText; } .token-bar i { background: Highlight; } }
+
 /* Windows: vibrancy가 없으므로 본 창은 불투명 배경, 사이드바는 블러 대신 보조 표면색을 쓴다. */
 .is-windows:not(.is-popover), .is-windows:not(.is-popover) body, .is-windows:not(.is-popover) #root { background: var(--surface); }
 .is-windows .sidebar { background: var(--surface-secondary); -webkit-backdrop-filter: none; backdrop-filter: none; }

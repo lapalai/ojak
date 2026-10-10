@@ -253,7 +253,8 @@ export function useSnapshot() {
       if (!alive.current) return;
       const request = (async () => {
         try {
-          const result = await rpc<Snapshot>(refresh ? "quota.refresh" : "status.read");
+          // 새로고침 버튼만 공급자 캐시를 건너뛴다. 3초 주기 읽기는 서비스의 마지막 관측만 읽는다.
+          const result = await rpc<Snapshot>(refresh ? "quota.refresh" : "status.read", refresh ? { force: true } : {});
           if (result.version !== 1) throw { code: "PROTOCOL_MISMATCH", message: t("api.protocolMismatch"), retryable: false };
           // 라벨은 화면 표시용이라 서비스에 되돌려 보내지 않는다. 자동 발견 계정의 `기본 프로필`을 여기서 한 번만 옮긴다.
           const accounts = result.accounts.map(account => ({ ...account, label: accountLabel(account.label) }));

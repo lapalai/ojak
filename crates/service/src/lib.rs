@@ -367,7 +367,8 @@ impl Service {
         match method {
             "status.read" => value(self.snapshot()?),
             "quota.refresh" => {
-                self.start_refresh();
+                // 사용자가 직접 누른 새로고침만 omp의 5분 보고 캐시를 건너뛴다. 정기 조회는 캐시를 존중한다.
+                self.start_refresh_with(params.get("force").and_then(Value::as_bool).unwrap_or(false));
                 value(self.snapshot()?)
             }
             "service.prepareUninstall" => self.prepare_uninstall(),
@@ -1442,6 +1443,9 @@ impl Service {
         Ok(record.session)
     }
     pub fn start_refresh(self: &Arc<Self>) {
+        self.start_refresh_with(false);
+    }
+    fn start_refresh_with(self: &Arc<Self>, force: bool) {
         if self
             .refreshing
             .compare_exchange(false, true, Ordering::AcqRel, Ordering::Acquire)
@@ -1451,7 +1455,7 @@ impl Service {
         }
         let service = Arc::clone(self);
         std::thread::spawn(move || {
-            let result = service.refresh_inner();
+            let result = service.refresh_inner(force);
             if result.is_err() {
                 if let Ok(store) = service.lock() {
                     let _ = set_metadata(&store.connection, "notices", &vec![Notice { id: "refresh-failed".into(), level: "warning".into(), title: "사용량 조회 실패".into(), message: "마지막 실제 관측을 유지합니다. 조회 실패를 새 관측으로 표시하지 않습니다.".into() }]);
@@ -1460,12 +1464,12 @@ impl Service {
             service.refreshing.store(false, Ordering::Release);
         });
     }
-    fn refresh_inner(&self) -> Result<(), ApiError> {
+    fn refresh_inner(&self, force: bool) -> Result<(), ApiError> {
         let before = {
             let store = self.lock()?;
             accounts(&store.connection)?
         };
-        let scan = aam_adapters::scan(&self.paths, &before)?;
+        let scan = aam_adapters::scan(&self.paths, &before, force)?;
         self.apply_scan(before, scan)
     }
 

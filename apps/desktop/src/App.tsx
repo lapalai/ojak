@@ -5,6 +5,7 @@ import { ChevronRight, Eye, EyeOff, RefreshCw, Settings, Terminal } from "lucide
 import { ConnectionsView, ServiceUnavailable } from "./ConnectionsView";
 import { SessionsView } from "./SessionsView";
 import { UsageView } from "./UsageView";
+import { TokenUsageView } from "./TokenUsageView";
 import { SetupGuide, ServiceVersionNotice } from "./SetupGuide";
 import { SettingsDialog, AddAccountDialog, IntegrationDialog, LaunchDialog, QuitDialog, ServiceDialog } from "./dialogs";
 import { ActionFeedback, ErrorMessage, PrivacyContext, Switch } from "./components";
@@ -15,12 +16,13 @@ import type { Policy, Session } from "./types";
 import { LANGUAGE_KEY, locale, modKey, t } from "./i18n";
 import { UPDATE_CHECK_INTERVAL_MS } from "./updates";
 
-type View = "usage" | "sessions" | "connect";
+type View = "usage" | "tokens" | "sessions" | "connect";
 type Dialog = { kind: "add"; tool?: string } | { kind: "launch"; accountId?: string; tool?: string; model?: string; cwd?: string; resumeSessionId?: string } | { kind: "service" } | { kind: "integration"; action: "install" | "uninstall" } | { kind: "settings" } | { kind: "quit" };
 const navigation: { id: View; label: string }[] = [
   { id: "usage", label: t("nav.usage") },
   { id: "sessions", label: t("nav.sessions") },
   { id: "connect", label: t("nav.connect") },
+  { id: "tokens", label: t("nav.tokens") },
 ];
 
 export default function App() {
@@ -69,7 +71,7 @@ export default function App() {
       const primary = modKey === "Ctrl" ? event.ctrlKey && !event.metaKey : event.metaKey && !event.ctrlKey;
       if (!primary || event.altKey) return;
       const key = event.key.toLowerCase();
-      if (!["1", "2", "3", "r"].includes(key)) return;
+      if (!["1", "2", "3", "4", "r"].includes(key)) return;
       event.preventDefault();
       if (document.querySelector("dialog[open]")) return;
       if (key === "r") { refresh(); return; }
@@ -104,6 +106,7 @@ export default function App() {
         {isTauri() && <ServiceVersionNotice snapshot={snapshot} onReload={onReload} />}
         {launchMessage && <div className="launch-notice" role="status"><Terminal size={16} /><span>{launchMessage}</span><button type="button" className="text-button" onClick={() => { setView("sessions"); setLaunchMessage(null); }}>{t("launch.viewSessions")}<ChevronRight size={13} /></button></div>}
         {view === "usage" && <UsageView snapshot={snapshot} masked={masked} online={online} refreshing={busy} onRefresh={refresh} onReload={onReload} onConnect={() => setView("connect")} onSessions={() => setView("sessions")} onAdd={onAdd} onSetup={() => setSetupRequest(value => value + 1)} setupRequest={setupRequest} setupRevision={setupRevision} />}
+        {view === "tokens" && <TokenUsageView />}
         {view === "sessions" && <SessionsView snapshot={snapshot} masked={masked} online={online} onNewSession={onNewSession} onResume={onResume} />}
         {view === "connect" && <ConnectionsView snapshot={snapshot} masked={masked} online={online} refreshing={busy} onRefresh={refresh} onReload={onReload} onAdd={onAdd} onService={() => setDialog({ kind: "service" })} onIntegration={action => setDialog({ kind: "integration", action })} />}
       </div></div>}

@@ -185,6 +185,21 @@ fn omp_fresh(account: &Account) -> bool {
         })
 }
 
+/// 정기 조회에서 공식 Claude `/usage`를 다시 부를 때인지. 계정마다 CLI 프로세스를 띄우므로(실측 4–5초)
+/// 마지막 공식 관측이 아직 신선하고 리셋 시각이 지나지 않았으면 다시 묻지 않는다.
+/// 리셋이 지난 한도는 회복을 바로 확인하도록 즉시 다시 묻는다.
+const NATIVE_USAGE_EVERY_MS: i64 = 10 * 60_000;
+fn native_due(account: &Account) -> bool {
+    let now = now_ms();
+    let official: Vec<_> = account.buckets.iter().filter(|bucket| bucket.source == quota::CLAUDE_USAGE_SOURCE).collect();
+    official.is_empty()
+        || official.iter().any(|bucket| {
+            bucket.observed_at <= 0
+                || now.saturating_sub(bucket.observed_at) >= NATIVE_USAGE_EVERY_MS
+                || bucket.resets_at.is_some_and(|reset| reset <= now)
+        })
+}
+
 /// Ojak에 연결된 공식 Claude 로그인으로 직접 한도를 조회한다. omp 로그인이 없어도 동작한다.
 /// 공식 `claude -p /usage`(추론·도구·훅 없음, 공식 CLI가 자체 잠금으로 OAuth를 갱신)의 구조화 응답만 쓰며
 /// 토큰은 읽지도 복사하지도 않는다. 조회 전에 이미 identity가 확인된 계정만 대상이고, 조회 뒤 같은 identity인지
@@ -575,7 +590,9 @@ fn apply_omp_auth_failures(accounts: &mut [Account], usage: &Value) {
     }
 }
 
-pub fn scan(paths: &Paths, existing: &[Account]) -> Result<ScanResult, ApiError> {
+/// `force`는 사용자가 직접 요청한 새로고침이다. 이때만 omp의 보고 캐시를 비우고 공식 Claude 조회를 다시 한다.
+/// 정기 조회는 아직 유효한 관측을 다시 묻지 않는다(공급자 `/usage` 호출량과 조회 시간 제한).
+pub fn scan(paths: &Paths, existing: &[Account], force: bool) -> Result<ScanResult, ApiError> {
     let home = user_home()?;
     let mut result = ScanResult {
         accounts: Vec::new(),
@@ -636,6 +653,10 @@ pub fn scan(paths: &Paths, existing: &[Account]) -> Result<ScanResult, ApiError>
     let mut observed_omp = BTreeSet::new();
     let mut omp_usage = None;
     if let Some(binary) = binaries.get("omp") {
+        if force {
+            // 리셋 직후처럼 사용자가 확인을 원하면 omp의 최대 5분 캐시를 비운다. 실패해도 일반 조회로 계속한다.
+            let _ = process::run_quiet(binary, &["usage", "invalidate"], &process::base_env(), &home);
+        }
         match process::run_json_slow(binary, &["usage", "--json"], &process::base_env(), &home) {
             Ok(value) => {
                 observed_omp = add_omp_reports(&mut result, &value, binary, existing);
@@ -652,7 +673,7 @@ pub fn scan(paths: &Paths, existing: &[Account]) -> Result<ScanResult, ApiError>
     for account in result
         .accounts
         .iter_mut()
-        .filter(|a| a.tool == "claude" && a.auth_status == "authenticated" && a.can_launch && !omp_fresh(a))
+        .filter(|a| a.tool == "claude" && a.auth_status == "authenticated" && a.can_launch && !omp_fresh(a) && (force || native_due(a)))
     {
         match native_usage(account, existing) {
             Ok(buckets) => account.buckets = buckets,
@@ -1189,6 +1210,23 @@ mod tests {
         logged_out.auth_status = "auth-required".into();
         assert_eq!(native_usage(&logged_out, &[]).unwrap_err().code, "AUTH_REQUIRED");
         fs::remove_dir_all(&root).unwrap();
+    }
+
+    #[test]
+    fn scheduled_claude_probe_skips_fresh_limits_but_rechecks_after_reset_or_age() {
+        let now = now_ms();
+        let bucket = |observed_at: i64, resets_at: Option<i64>, source: &str| QuotaBucket {
+            id: "b".into(), label: "5시간".into(), model: None, used_percent: Some(40.0),
+            resets_at, observed_at, source: source.into(), status: "known".into(),
+        };
+        let with = |buckets: Vec<QuotaBucket>| Account { tool: "claude".into(), buckets, ..Account::default() };
+        let official = quota::CLAUDE_USAGE_SOURCE;
+        assert!(!native_due(&with(vec![bucket(now - 60_000, Some(now + 3_600_000), official)])));
+        // A limit whose reset time passed is rechecked immediately, so recovery shows without waiting.
+        assert!(native_due(&with(vec![bucket(now - 60_000, Some(now - 1), official)])));
+        assert!(native_due(&with(vec![bucket(now - NATIVE_USAGE_EVERY_MS, Some(now + 3_600_000), official)])));
+        assert!(native_due(&with(vec![bucket(now - 60_000, None, "OMP usage / anthropic")])));
+        assert!(native_due(&with(Vec::new())));
     }
 
     #[test]

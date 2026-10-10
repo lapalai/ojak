@@ -762,6 +762,7 @@ async fn launch_session(intent: LaunchIntent) -> Result<Value, ApiError> {
     open_terminal(args)
 }
 mod provider_login;
+mod local_usage;
 #[tauri::command]
 async fn choose_directory() -> Option<String> {
     rfd::AsyncFileDialog::new()
@@ -2259,6 +2260,7 @@ fn main() {
             provider_login::provider_login_status,
             provider_login::cancel_provider_login,
             provider_login::list_provider_logins,
+            local_usage::local_usage,
             choose_directory,
             settings_preview,
             export_diagnostics,
