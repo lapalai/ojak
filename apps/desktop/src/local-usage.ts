@@ -19,7 +19,7 @@ export interface ModelUsage extends UsageTotals { tool: string; model: string }
 export interface LocalUsageReport {
   indexedAt: number | null; scanning: boolean; truncated: boolean;
   coverageStart: number | null; coverageEnd: number | null;
-  filesScanned: number; filesPending: number;
+  filesScanned: number; filesPending: number; bytesRead: number; bytesTotal: number;
   totals: UsageTotals; tools: ToolUsage[]; models: ModelUsage[];
   /// 기계 코드. 화면 문구는 `tokens.warning.<코드>`에서 찾는다.
   warnings: string[]; excludedRecords: number; duplicateRecords: number;
@@ -88,6 +88,8 @@ export function parseLocalUsageReport(raw: unknown): LocalUsageReport {
     coverageEnd: time(report.coverageEnd, "coverageEnd"),
     filesScanned: count(report.filesScanned, "filesScanned"),
     filesPending: count(report.filesPending, "filesPending"),
+    bytesRead: count(report.bytesRead, "bytesRead"),
+    bytesTotal: count(report.bytesTotal, "bytesTotal"),
     totals: totals(report.totals, "totals"),
     tools: report.tools.map((item, index) => {
       const path = `tools[${index}]`;
@@ -112,7 +114,7 @@ export const POLL_STEP_MS = 1_000;
 export const POLL_MAX_MS = 8_000;
 export function nextPoll(previous: LocalUsageReport | null, next: LocalUsageReport, stalled: number): { delayMs: number; stalled: number } | null {
   if (!next.scanning) return null;
-  const progressed = !previous || previous.filesScanned !== next.filesScanned || previous.filesPending !== next.filesPending || previous.totals.totalTokens !== next.totals.totalTokens;
+  const progressed = !previous || previous.bytesRead !== next.bytesRead || previous.filesScanned !== next.filesScanned || previous.filesPending !== next.filesPending || previous.totals.totalTokens !== next.totals.totalTokens;
   const misses = progressed ? 0 : stalled + 1;
   return { delayMs: Math.min(POLL_MAX_MS, POLL_BASE_MS + misses * POLL_STEP_MS), stalled: misses };
 }
@@ -158,6 +160,12 @@ export function orderedModels(models: ModelUsage[]): ModelUsage[] {
 export function boundedStart(report: LocalUsageReport, range: UsageRange): number | null {
   if (!report.truncated || report.coverageStart === null) return null;
   return range.sinceMs === null || report.coverageStart > range.sinceMs ? report.coverageStart : null;
+}
+
+/// 첫 읽기 진행률(0–1). 장면의 호랑이 크기에만 쓴다. 토큰 양과는 관계없다.
+/// 파일 크기가 제각각이라 읽은 바이트로 센다. 전체 크기를 모르면(0) 시작 크기(0)로 둔다.
+export function readingProgress(report: Pick<LocalUsageReport, "bytesRead" | "bytesTotal">): number {
+  return report.bytesTotal > 0 ? Math.min(1, report.bytesRead / report.bytesTotal) : 0;
 }
 
 /// 화면 문구가 있는 경고 코드(`tokens.warning.<코드>`). 여기 없는 코드는 일반 문구로 보인다. 순서가 화면 순서다.

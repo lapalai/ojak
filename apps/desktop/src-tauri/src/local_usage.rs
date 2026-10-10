@@ -99,6 +99,9 @@ pub struct LocalUsageReport {
     pub coverage_end: Option<i64>,
     pub files_scanned: u64,
     pub files_pending: u64,
+    /// 처음 읽기의 진행률을 바이트로 센다. 파일 크기가 제각각이라 파일 수보다 고르게 늘어난다.
+    pub bytes_read: u64,
+    pub bytes_total: u64,
     pub totals: UsageTotals,
     pub tools: Vec<ToolUsage>,
     pub models: Vec<ModelUsage>,
@@ -116,6 +119,8 @@ fn empty_report(warnings: &[&str]) -> LocalUsageReport {
         coverage_end: None,
         files_scanned: 0,
         files_pending: 0,
+        bytes_read: 0,
+        bytes_total: 0,
         totals: UsageTotals::default(),
         tools: Vec::new(),
         models: Vec::new(),
@@ -1592,18 +1597,20 @@ fn build_report(conn: &Connection, since: Option<i64>, until: i64, now_ms: i64) 
             .is_ok();
         (excluded, skewed)
     };
-    let (pending_files, scanned, unreadable, partial_files, stale_tails): (i64, i64, i64, i64, i64) = conn.query_row(
+    let (pending_files, scanned, unreadable, partial_files, stale_tails, bytes_read, bytes_total): (i64, i64, i64, i64, i64, i64, i64) = conn.query_row(
         &format!(
             "SELECT COALESCE(SUM(CASE WHEN {p} THEN 1 ELSE 0 END),0),
                     COALESCE(SUM(CASE WHEN state = 0 AND NOT {p} THEN 1 ELSE 0 END),0),
                     COALESCE(SUM(CASE WHEN state = 1 THEN 1 ELSE 0 END),0),
                     COALESCE(SUM(CASE WHEN bad > 0 THEN 1 ELSE 0 END),0),
-                    COALESCE(SUM(CASE WHEN state = 0 AND wait >= 0 AND wait = size AND pos < size AND mtime < ?1 THEN 1 ELSE 0 END),0)
+                    COALESCE(SUM(CASE WHEN state = 0 AND wait >= 0 AND wait = size AND pos < size AND mtime < ?1 THEN 1 ELSE 0 END),0),
+                    COALESCE(SUM(CASE WHEN state = 1 THEN size ELSE MIN(pos, size) END),0),
+                    COALESCE(SUM(size),0)
              FROM files",
             p = PENDING_SQL
         ),
         params![now_ms - STALE_TAIL_MS],
-        |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?, r.get(4)?)),
+        |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?, r.get(4)?, r.get(5)?, r.get(6)?)),
     )?;
     let coverage = |order: &str| -> Option<i64> {
         conn.query_row(&format!("SELECT ts FROM records WHERE ts > 0 AND flags = 0 ORDER BY ts {order} LIMIT 1"), [], |r| r.get(0)).ok()
@@ -1656,6 +1663,8 @@ fn build_report(conn: &Connection, since: Option<i64>, until: i64, now_ms: i64) 
         coverage_end: coverage("DESC"),
         files_scanned: scanned.max(0) as u64,
         files_pending: pending_files.max(0) as u64,
+        bytes_read: bytes_read.max(0) as u64,
+        bytes_total: bytes_total.max(0) as u64,
         totals,
         tools: tools_out,
         models: models_out,
@@ -1862,6 +1871,54 @@ fn run_at(db: &Path, paths: &Paths, since: Option<i64>, until: i64) -> LocalUsag
     }
 }
 
+/// 처음 읽기를 끝까지 이어 가는 백그라운드 작업. 화면을 닫아도 멈추지 않는다.
+/// 운영체제에 낮은 우선순위로 알려(macOS background QoS, Windows background mode) 다른 작업이 있으면 양보한다.
+/// 한 번에 하나만 돌며, 읽을 파일이 없으면 끝난다. 이후 늘어난 기록은 화면 조회가 조금씩 읽는다.
+static WORKER: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+fn ensure_worker(db: PathBuf, paths: Paths) {
+    use std::sync::atomic::Ordering;
+    if WORKER.compare_exchange(false, true, Ordering::AcqRel, Ordering::Acquire).is_err() {
+        return;
+    }
+    let spawned = std::thread::Builder::new().name("ojak-local-usage".into()).spawn(move || {
+        lower_thread_priority();
+        loop {
+            // 기간 조회는 필요 없다. 빈 기간(0..0)으로 진행 상태만 받는다.
+            let report = run_at(&db, &paths, Some(0), 0);
+            if report.warnings.iter().any(|w| w == "INDEX_UNAVAILABLE") || report.files_pending == 0 {
+                break;
+            }
+            // 한 번 읽은 뒤 잠깐 쉬어 화면 조회가 잠금을 얻을 틈을 준다. 속도 조절은 운영체제 우선순위에 맡긴다.
+            std::thread::sleep(Duration::from_millis(50));
+        }
+        WORKER.store(false, Ordering::Release);
+    });
+    if spawned.is_err() {
+        WORKER.store(false, Ordering::Release);
+    }
+}
+
+#[cfg(target_os = "macos")]
+fn lower_thread_priority() {
+    // QOS_CLASS_BACKGROUND: 색인처럼 사용자가 결과를 기다리지 않는 일. CPU·디스크 I/O 모두 낮은 우선순위가 된다.
+    unsafe extern "C" {
+        fn pthread_set_qos_class_self_np(qos: u32, relpri: i32) -> i32;
+    }
+    const QOS_CLASS_BACKGROUND: u32 = 0x09;
+    unsafe {
+        pthread_set_qos_class_self_np(QOS_CLASS_BACKGROUND, 0);
+    }
+}
+#[cfg(windows)]
+fn lower_thread_priority() {
+    use windows_sys::Win32::System::Threading::{GetCurrentThread, SetThreadPriority, THREAD_MODE_BACKGROUND_BEGIN};
+    unsafe {
+        SetThreadPriority(GetCurrentThread(), THREAD_MODE_BACKGROUND_BEGIN);
+    }
+}
+#[cfg(not(any(target_os = "macos", windows)))]
+fn lower_thread_priority() {}
+
 /// `sinceMs`는 포함, `untilMs`는 제외(Unix ms), `sinceMs`가 null이면 전체 기간.
 /// 호출마다 읽는 양에 상한이 있고 남은 일은 `scanning`으로 알린다. 기간을 바꿔도 기록 파일을 다시 읽지 않는다.
 #[tauri::command]
@@ -1872,7 +1929,13 @@ pub async fn local_usage(since_ms: Option<i64>, until_ms: i64) -> Result<LocalUs
     let paths = Paths::discover().map_err(|e| ApiError::new("PATH_ERROR", e.to_string()))?;
     tauri::async_runtime::spawn_blocking(move || {
         let db = paths.home.join("local-usage.sqlite3");
-        run_at(&db, &paths, since_ms, until_ms)
+        let mut report = run_at(&db, &paths, since_ms, until_ms);
+        // 처음 읽기가 남아 있으면 화면과 분리된 작업에 맡긴다. 창을 닫아도 계속된다.
+        if report.files_pending > 0 {
+            ensure_worker(db, paths);
+            report.scanning = true;
+        }
+        report
     })
     .await
     .map_err(|_| ApiError::new("INTERNAL_ERROR", "로컬 사용량 조회 중 오류가 발생했습니다."))
@@ -1944,6 +2007,24 @@ mod tests {
     fn append(path: &Path, text: &str) {
         let mut file = fs::OpenOptions::new().append(true).open(path).unwrap();
         file.write_all(text.as_bytes()).unwrap();
+    }
+
+    #[test]
+    fn byte_progress_reaches_total_only_after_every_file_is_read() {
+        let dir = Temp::new();
+        let root = dir.join("projects");
+        write_lines(&root.join("p/a.jsonl"), &[claude_msg("m1", "2026-05-20T06:30:06.000Z", (10, 5, 0, 0), 0)]);
+        write_lines(&root.join("p/b.jsonl"), &[claude_msg("m2", "2026-05-20T06:31:06.000Z", (10, 5, 0, 0), 0)]);
+        let mut index = open(&dir);
+        let set = set_of(TOOL_CLAUDE, &root);
+        // A one-byte budget reads part of the history and must not report it as complete.
+        index.refresh(&set, now(), Budget { bytes: 1, time: Duration::from_secs(60) }, Duration::ZERO).unwrap();
+        let partial = report(&index, None, now());
+        assert!(partial.bytes_total > 0 && partial.bytes_read < partial.bytes_total);
+        drain(&mut index, &set);
+        let done = report(&index, None, now());
+        assert_eq!(done.bytes_read, done.bytes_total);
+        assert_eq!(done.files_pending, 0);
     }
 
     #[test]

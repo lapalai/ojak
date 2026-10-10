@@ -1,11 +1,11 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { POLL_BASE_MS, POLL_MAX_MS, boundedStart, costKind, formatPercent, formatUsd, nextPoll, orderedModels, parseLocalUsageReport, tokenParts, usageRange, usageState } from "./local-usage.ts";
+import { POLL_BASE_MS, POLL_MAX_MS, boundedStart, costKind, formatPercent, formatUsd, nextPoll, orderedModels, parseLocalUsageReport, readingProgress, tokenParts, usageRange, usageState } from "./local-usage.ts";
 import type { LocalUsageReport, UsageTotals } from "./local-usage.ts";
 
 const totals = (overrides: Partial<UsageTotals> = {}): UsageTotals => ({ inputTokens: 0, outputTokens: 0, cacheReadTokens: 0, cacheWriteTokens: 0, totalTokens: 0, costUsd: null, unpricedTokens: 0, ...overrides });
 const report = (overrides: Partial<LocalUsageReport> = {}): LocalUsageReport => ({
-  indexedAt: 1_000, scanning: false, truncated: false, coverageStart: 100, coverageEnd: 900, filesScanned: 3, filesPending: 0,
+  indexedAt: 1_000, scanning: false, truncated: false, coverageStart: 100, coverageEnd: 900, filesScanned: 3, filesPending: 0, bytesRead: 300, bytesTotal: 300,
   totals: totals(), tools: [], models: [], warnings: [], excludedRecords: 0, duplicateRecords: 0, ...overrides,
 });
 const rejects = (raw: unknown) => assert.throws(() => parseLocalUsageReport(raw), (error: { code?: string }) => error.code === "LOCAL_USAGE_INVALID");
@@ -46,6 +46,13 @@ test("polling continues only while scanning and backs off without progress", () 
   assert.ok(stuck.delayMs > POLL_BASE_MS && stuck.stalled === 1);
   assert.equal(nextPoll(scanning, scanning, 1000)!.delayMs, POLL_MAX_MS);
   assert.deepEqual(nextPoll(scanning, report({ scanning: true, filesScanned: 2, filesPending: 8 }), 5), { delayMs: POLL_BASE_MS, stalled: 0 });
+});
+
+test("reading progress follows bytes read, not tokens or file count, and stays at the start when the total is unknown", () => {
+  assert.equal(readingProgress({ bytesRead: 0, bytesTotal: 0 }), 0);
+  // One huge file read out of many small ones still counts by size.
+  assert.equal(readingProgress({ bytesRead: 250, bytesTotal: 1000 }), 0.25);
+  assert.equal(readingProgress({ bytesRead: 1000, bytesTotal: 1000 }), 1);
 });
 
 test("empty states distinguish reading, unavailable, nothing found and nothing in this period", () => {

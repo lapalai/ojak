@@ -574,6 +574,43 @@ button.tiger-egg:hover:not(:disabled) { background: none; }
 /* 승인된 산수도 시안의 호랑이·깍이 장면(투명 배경)을 같은 선·색으로 픽셀화한 그림. 비율을 지켜 풍경 아래쪽에 앉히고, 왼쪽만 풍경에 번지게 한다. */
 .token-art { position: absolute; z-index: 1; right: 8px; bottom: 0; width: 470px; max-width: 62%; height: auto; image-rendering: pixelated; pointer-events: none; -webkit-mask-image: linear-gradient(to right, transparent 0, #000 12%); mask-image: linear-gradient(to right, transparent 0, #000 12%); }
 @media (prefers-color-scheme: dark) { .token-art { filter: brightness(.8) saturate(.9); } }
+/* 읽는 동안의 장면. 한 바퀴 8초를 셋이 함께 쓴다:
+   0–25% 호랑이 걸어옴(칸1) · 25–40% 냄새 맡기(칸2) · 40–75% 집어 먹기(칸3, 바닥 약과는 손으로 옮겨져 사라짐) · 75–100% 오물오물(칸4, 바닥엔 부스러기).
+   칸 전환은 steps라 그림 사이가 번지지 않고, 위치 이동만 부드럽다. 처음으로 돌아갈 때 튀지 않게 끝과 시작에서 잠깐 흐려진다.
+   transform·background-position·opacity만 움직인다. 크기(--grow)는 읽기 진행률만 따른다. 읽기가 끝나면 요소가 사라져 애니메이션도 멈춘다. */
+.token-play { position: absolute; z-index: 1; left: 36%; right: 8px; bottom: 4px; height: 100%; pointer-events: none; }
+.token-sprite { position: absolute; bottom: 0; display: block; background-repeat: no-repeat; image-rendering: pixelated; }
+@media (prefers-color-scheme: dark) { .token-sprite { filter: brightness(.82) saturate(.9); } }
+.token-tiger-track { position: absolute; bottom: 0; left: 0; width: 107px; height: 96px; transform-origin: 50% 100%; scale: var(--grow, 1); transition: scale 1.2s ease-out; animation: token-tiger-walk 8s ease-in-out infinite; }
+.token-tiger-sprite { left: 0; animation: token-tiger-pose 8s steps(1, end) infinite; }
+.token-yakgwa-sprite { left: 150px; animation: token-yakgwa-bite 8s steps(1, end) infinite; }
+.token-magpie-sprite { left: 178px; animation: token-magpie-pose 1.6s steps(1, end) infinite, token-magpie-hop 1.6s ease-out infinite; }
+@keyframes token-tiger-walk { 0% { translate: 0 0; opacity: 0; } 4% { opacity: 1; } 25% { translate: 58px 0; } 95% { translate: 58px 0; opacity: 1; } 100% { translate: 58px 0; opacity: 0; } }
+@keyframes token-tiger-pose {
+  0% { background-position: 0 0; }
+  25% { background-position: calc(-1 * 106.5px) 0; }
+  40% { background-position: calc(-2 * 106.5px) 0; }
+  75% { background-position: calc(-3 * 106.5px) 0; }
+}
+@keyframes token-yakgwa-bite {
+  0% { background-position: 0 0; opacity: 0; }
+  4% { background-position: 0 0; opacity: 1; }
+  40% { background-position: 0 0; opacity: 0; }
+  75% { background-position: calc(-3 * 22.5px) 0; opacity: 1; }
+  95% { background-position: calc(-3 * 22.5px) 0; opacity: 0; }
+}
+/* steps(1)라 각 구간 값이 다음 키프레임까지 그대로 유지된다. 40%에서 바로 사라지고 75%에 부스러기로 나타난다. */
+@keyframes token-magpie-pose {
+  0% { background-position: 0 0; }
+  20% { background-position: calc(-1 * 80.5px) 0; }
+  35% { background-position: calc(-2 * 80.5px) 0; }
+  65% { background-position: calc(-3 * 80.5px) 0; }
+}
+@keyframes token-magpie-hop { 0%, 35% { translate: 0 0; } 50% { translate: 0 -10px; } 65%, 100% { translate: 0 0; } }
+@media (prefers-reduced-motion: reduce) {
+  .token-tiger-track, .token-tiger-sprite, .token-yakgwa-sprite, .token-magpie-sprite { animation: none; transition: none; }
+  .token-tiger-track { translate: 58px 0; }
+}
 .token-ledger { padding: 20px 26px 18px; background: var(--paper); }
 .token-reading, .token-empty { padding: 18px 0; color: var(--secondary); }
 .token-empty strong { display: block; font-size: var(--fs-heading); color: var(--text); margin-bottom: 4px; }

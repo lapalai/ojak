@@ -3,12 +3,15 @@ import type { CSSProperties } from "react";
 import { Info, RefreshCw } from "lucide-react";
 import { Busy, ErrorMessage } from "./components";
 import { localUsage, toApiError } from "./api";
-import { KNOWN_WARNINGS, USAGE_FILTERS, boundedStart, costKind, formatCount, formatPercent, formatUsd, nextPoll, orderedModels, orderedTools, tokenParts, usageRange, usageState } from "./local-usage";
+import { KNOWN_WARNINGS, USAGE_FILTERS, boundedStart, costKind, formatCount, formatPercent, formatUsd, nextPoll, orderedModels, orderedTools, readingProgress, tokenParts, usageRange, usageState } from "./local-usage";
 import type { LocalUsageReport, UsageFilter, UsageRange, UsageTotals } from "./local-usage";
 import { absoluteTime, relativeTime, toolNames, useCharacters } from "./state";
 import type { ApiError } from "./types";
 import { intlLocale, t } from "./i18n";
 import tigerPlay from "./assets/tiger-play.png";
+import tigerStrip from "./assets/yakgwa-tiger.png";
+import magpieStrip from "./assets/yakgwa-magpie.png";
+import yakgwaStrip from "./assets/yakgwa-yakgwa.png";
 
 /// 모델 표는 처음에 이만큼만 보이고 나머지는 펼친다.
 const MODEL_PREVIEW = 8;
@@ -48,14 +51,17 @@ function useLocalUsage(filter: UsageFilter, reloadKey: number): Loaded | null {
   return loaded?.filter === filter ? loaded : null;
 }
 
-const dayFormat = new Intl.DateTimeFormat(intlLocale, { month: "short", day: "numeric" });
-const monthFormat = new Intl.DateTimeFormat(intlLocale, { year: "numeric", month: "long" });
-const dateFormat = new Intl.DateTimeFormat(intlLocale, { year: "numeric", month: "short", day: "numeric" });
+const rangeFormat = new Intl.DateTimeFormat(intlLocale, { year: "numeric", month: "short", day: "numeric" });
+const dateFormat = rangeFormat;
 
-function periodLabel(filter: UsageFilter, range: UsageRange): string {
-  return filter === "all" ? t("tokens.period.all")
-    : filter === "today" ? t("tokens.period.today", { date: dayFormat.format(range.untilMs - 1) })
-    : t("tokens.period.month", { month: monthFormat.format(range.untilMs - 1) });
+/// 기간과 실제 날짜 범위. 오늘은 하루, 이번 달은 1일~오늘, 전체는 가장 오래된 기록~오늘이다.
+/// 전체 범위의 시작은 지금까지 읽은 기록 기준이므로, 처음 읽는 중에는 더 앞으로 늘어날 수 있다.
+function periodLabel(filter: UsageFilter, range: UsageRange, oldest: number | null): string {
+  const today = range.untilMs - 1;
+  if (filter === "today") return t("tokens.period.today", { date: rangeFormat.format(today) });
+  const from = filter === "month" ? range.sinceMs : oldest;
+  if (from === null) return t("tokens.period.all");
+  return t(filter === "month" ? "tokens.period.month" : "tokens.period.allRange", { range: rangeFormat.formatRange(Math.min(from, today), today) });
 }
 
 const count = (value: number) => formatCount(value, intlLocale);
@@ -68,14 +74,37 @@ function CostCell({ totals }: { totals: UsageTotals }) {
   return <>{formatUsd(totals.costUsd ?? 0, intlLocale)}{kind === "partial" && <> <span className="tag warning" title={t("tokens.cost.partial", { tokens: count(totals.unpricedTokens) })}>{t("tokens.cost.partialTag")}</span></>}</>;
 }
 
-function Scene({ characters }: { characters: boolean }) {
+/// 4칸짜리 동작 그림(가로 띠) 한 장을 칸 단위로 바꿔 보여 준다. 칸 전환은 CSS `steps`라 사이 그림이 번지지 않는다.
+/// `w`·`h`는 한 칸의 화면 크기, 그림은 2배 해상도라 픽셀이 선명하다.
+function Sprite({ src, w, h, className }: { src: string; w: number; h: number; className: string }) {
+  return <i className={`token-sprite ${className}`} style={{ width: w, height: h, backgroundImage: `url(${src})`, backgroundSize: `${w * 4}px ${h}px` } as CSSProperties} />;
+}
+
+/// 읽는 동안: 호랑이가 걸어와 약과 냄새를 맡고, 집어 먹고, 오물거린 뒤 다시 걷는다. 약과는 한 입씩 줄어 부스러기가 됐다가 다시 놓인다.
+/// 깍이는 옆에서 콩콩 뛰다 약과를 물고 선다. 호랑이 크기는 읽은 비율만 따른다(사용량과 무관).
+/// 모두 CSS 애니메이션이며, 읽기가 끝나면 이 장면이 사라져 멈춘다. 움직임 줄이기 설정에서는 첫 동작에서 멈춘 그림이다.
+function ReadingScene({ progress }: { progress: number }) {
+  const scale = 0.6 + 0.4 * progress;
+  return <div className="token-play" aria-hidden="true" style={{ "--grow": scale } as CSSProperties}>
+    <div className="token-tiger-track"><Sprite src={tigerStrip} w={106.5} h={96} className="token-tiger-sprite" /></div>
+    <Sprite src={yakgwaStrip} w={22.5} h={20} className="token-yakgwa-sprite" />
+    <Sprite src={magpieStrip} w={80.5} h={56} className="token-magpie-sprite" />
+  </div>;
+}
+
+function Scene({ characters, reading, progress }: { characters: boolean; reading: boolean; progress: number }) {
   return <div className={`token-landscape${characters ? "" : " plain"}`}>
     <i className="token-ridge far" aria-hidden="true" />
     <i className="token-ridge mid" aria-hidden="true" />
     <i className="token-ridge near" aria-hidden="true" />
     <i className="token-cloud" aria-hidden="true" />
-    <div className="token-caption"><strong>{t("tokens.scene.title")}</strong><small>{t("tokens.scene.note")}</small></div>
-    {characters && <img className="token-art" src={tigerPlay} alt="" width={705} height={288} draggable={false} />}
+    <div className="token-caption">
+      <strong>{characters && reading ? t("tokens.scene.reading") : t("tokens.scene.title")}</strong>
+      <small>{characters && reading ? t("tokens.scene.readingNote") : t("tokens.scene.note")}</small>
+    </div>
+    {characters && (reading
+      ? <ReadingScene progress={progress} />
+      : <img className="token-art" src={tigerPlay} alt="" width={705} height={288} draggable={false} />)}
   </div>;
 }
 
@@ -105,14 +134,14 @@ export function TokenUsageView() {
     </div>
 
     <div className="token-scroll">
-      <Scene characters={characters} />
+      <Scene characters={characters} reading={Boolean(report?.scanning) || !loaded} progress={report ? readingProgress(report) : 0} />
       <div className="token-ledger">
         {!loaded && <div className="token-reading" role="status"><Busy label={t("tokens.loading")} /></div>}
         {loaded?.error && <><ErrorMessage error={loaded.error} />{report && <p className="field-help">{t("tokens.error.stale")}</p>}<div className="row-actions inline"><button type="button" onClick={() => setReloadKey(key => key + 1)}>{t("tokens.error.retry")}</button></div></>}
         {report && state === "data" && loaded && <>
           <div className="token-figures">
             <div className="token-main">
-              <p className="token-label">{t("tokens.metric.label")} <span className="muted">· {periodLabel(filter, loaded.range)}</span></p>
+              <p className="token-label">{t("tokens.metric.label")} <span className="muted">· {periodLabel(filter, loaded.range, report.coverageStart)}</span></p>
               <div className="token-number" aria-label={t("tokens.metric.aria", { count: count(report.totals.totalTokens) })}>{count(report.totals.totalTokens)}<small>{t("tokens.metric.unit")}</small></div>
               <div className="tools">
                 {partial && <span className="tag warning">{t("tokens.metric.partial")}</span>}
@@ -136,7 +165,7 @@ export function TokenUsageView() {
         </>}
         {report && state !== "data" && state !== "reading" && state && <div className="token-empty" role="status"><strong>{t(`tokens.empty.${state}.title`)}</strong><p>{t(`tokens.empty.${state}.body`)}</p></div>}
         {report && <p className="token-status" role="status" aria-live="polite">
-          {report.scanning ? <Busy label={t("tokens.status.reading", { scanned: count(report.filesScanned), pending: count(report.filesPending) })} />
+          {report.scanning ? <Busy label={t("tokens.status.reading", { percent: formatPercent(readingProgress(report)), pending: count(report.filesPending) })} />
             : report.truncated ? t("tokens.status.paused", { pending: count(report.filesPending) })
             : report.indexedAt ? t("tokens.status.indexed", { time: relativeTime(report.indexedAt) }) : null}
           {bounded !== null && <> {t("tokens.status.bounded", { date: dateFormat.format(bounded) })}</>}
