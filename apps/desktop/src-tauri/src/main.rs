@@ -32,6 +32,7 @@ fn request_quit(app: &tauri::AppHandle) {
 fn show_main(app: &tauri::AppHandle) {
     if let Some(popover) = app.get_webview_window(POPOVER) {
         let _ = popover.hide();
+        let _ = popover.emit(VISIBILITY_EVENT, false);
     }
     #[cfg(target_os = "macos")]
     let _ = app.set_activation_policy(tauri::ActivationPolicy::Regular);
@@ -39,10 +40,14 @@ fn show_main(app: &tauri::AppHandle) {
         let _ = window.show();
         let _ = window.unminimize();
         let _ = window.set_focus();
+        let _ = window.emit(VISIBILITY_EVENT, true);
     }
 }
 
 const POPOVER: &str = "popover";
+/// 창이 실제로 보이는지(`true`) 숨겨졌는지(`false`)를 그 창의 화면에 알린다. 화면은 숨겨진 동안 주기 조회를 멈춘다.
+/// WebKit·WebView2는 창을 숨겨도 `document.hidden`을 항상 바꾸지 않으므로 이 이벤트를 기준으로 삼는다.
+const VISIBILITY_EVENT: &str = "ojak://window-visible";
 const POPOVER_WIDTH: f64 = 340.0;
 
 /// 트레이(메뉴바) 아이콘 옆에 팝오버를 연다. 열려 있으면 닫는다.
@@ -52,6 +57,7 @@ fn toggle_popover(app: &tauri::AppHandle, rect: tauri::Rect) {
     let Some(popover) = app.get_webview_window(POPOVER) else { return };
     if popover.is_visible().unwrap_or(false) {
         let _ = popover.hide();
+        let _ = popover.emit(VISIBILITY_EVENT, false);
         return;
     }
     let fallback = popover.scale_factor().unwrap_or(1.0);
@@ -97,6 +103,7 @@ fn toggle_popover(app: &tauri::AppHandle, rect: tauri::Rect) {
     let _ = popover.show();
     let _ = popover.set_focus();
     let _ = popover.emit("ojak://popover-shown", ());
+    let _ = popover.emit(VISIBILITY_EVENT, true);
 }
 
 #[tauri::command]
@@ -108,6 +115,7 @@ fn open_dashboard(app: tauri::AppHandle) {
 fn hide_popover(app: tauri::AppHandle) {
     if let Some(popover) = app.get_webview_window(POPOVER) {
         let _ = popover.hide();
+        let _ = popover.emit(VISIBILITY_EVENT, false);
     }
 }
 
@@ -2551,11 +2559,13 @@ fn main() {
             // 팝오버는 다른 곳을 누르면 닫힌다. 메뉴바 팝오버 관례다.
             tauri::WindowEvent::Focused(false) if window.label() == POPOVER => {
                 let _ = window.hide();
+                let _ = window.emit(VISIBILITY_EVENT, false);
             }
             // 창을 닫으면 앱은 트레이로만 남는다. Dock 아이콘도 숨겨 메뉴바 앱처럼 동작한다.
             tauri::WindowEvent::CloseRequested { api, .. } => {
                 api.prevent_close();
                 let _ = window.hide();
+                let _ = window.emit(VISIBILITY_EVENT, false);
                 #[cfg(target_os = "macos")]
                 if window.label() == "main" {
                     let _ = window.app_handle().set_activation_policy(tauri::ActivationPolicy::Accessory);

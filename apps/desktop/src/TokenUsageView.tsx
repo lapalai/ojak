@@ -5,7 +5,7 @@ import { Busy, ErrorMessage } from "./components";
 import { localUsage, toApiError } from "./api";
 import { KNOWN_WARNINGS, USAGE_FILTERS, boundedStart, costKind, formatCount, formatPercent, formatUsd, nextPoll, orderedModels, orderedTools, readingProgress, tokenParts, usageRange, usageState } from "./local-usage";
 import type { LocalUsageReport, UsageFilter, UsageRange, UsageTotals } from "./local-usage";
-import { absoluteTime, relativeTime, toolNames, useCharacters } from "./state";
+import { absoluteTime, relativeTime, toolNames, useCharacters, useWindowVisible } from "./state";
 import type { ApiError } from "./types";
 import { intlLocale, t } from "./i18n";
 import tigerPlay from "./assets/tiger-play.png";
@@ -22,14 +22,16 @@ interface Loaded { filter: UsageFilter; range: UsageRange; report: LocalUsageRep
 
 /// 기간 조회와 읽는 중 갱신. 읽기가 끝나지 않았을 때만 다시 조회하고, 필터가 바뀌거나 화면이 사라지면 대기 중인 조회와 응답을 모두 버린다.
 /// 필터마다 이펙트가 새로 생겨 `cancelled`가 따로이므로, 늦게 도착한 이전 필터의 응답은 화면에 닿지 못한다.
-function useLocalUsage(filter: UsageFilter, reloadKey: number): Loaded | null {
+function useLocalUsage(filter: UsageFilter, reloadKey: number, visible: boolean): Loaded | null {
   const [loaded, setLoaded] = useState<Loaded | null>(null);
+  // 숨겨진 창은 진행 조회를 하지 않는다. 읽기 자체는 네이티브 작업이 창과 무관하게 이어 가고, 다시 보이면 최신 값을 읽는다.
   useEffect(() => {
+    if (!visible) return;
     let cancelled = false;
     let timer: number | undefined;
     let previous: LocalUsageReport | null = null;
     let stalled = 0;
-    setLoaded(null);
+    setLoaded(current => current?.filter === filter ? current : null);
     const run = async () => {
       const range = usageRange(filter, Date.now());
       try {
@@ -47,7 +49,7 @@ function useLocalUsage(filter: UsageFilter, reloadKey: number): Loaded | null {
     };
     void run();
     return () => { cancelled = true; if (timer !== undefined) window.clearTimeout(timer); };
-  }, [filter, reloadKey]);
+  }, [filter, reloadKey, visible]);
   return loaded?.filter === filter ? loaded : null;
 }
 
@@ -110,10 +112,11 @@ function Scene({ characters, reading, progress }: { characters: boolean; reading
 
 export function TokenUsageView() {
   const characters = useCharacters();
+  const visible = useWindowVisible();
   const [filter, setFilter] = useState<UsageFilter>("today");
   const [reloadKey, setReloadKey] = useState(0);
   const [showAllModels, setShowAllModels] = useState(false);
-  const loaded = useLocalUsage(filter, reloadKey);
+  const loaded = useLocalUsage(filter, reloadKey, visible);
   const report = loaded?.report ?? null;
   const state = report ? usageState(report) : null;
   const partial = Boolean(report && (report.scanning || report.truncated));
@@ -134,7 +137,7 @@ export function TokenUsageView() {
     </div>
 
     <div className="token-scroll">
-      <Scene characters={characters} reading={Boolean(report?.scanning) || !loaded} progress={report ? readingProgress(report) : 0} />
+      <Scene characters={characters && visible} reading={Boolean(report?.scanning) || !loaded} progress={report ? readingProgress(report) : 0} />
       <div className="token-ledger">
         {!loaded && <div className="token-reading" role="status"><Busy label={t("tokens.loading")} /></div>}
         {loaded?.error && <><ErrorMessage error={loaded.error} />{report && <p className="field-help">{t("tokens.error.stale")}</p>}<div className="row-actions inline"><button type="button" onClick={() => setReloadKey(key => key + 1)}>{t("tokens.error.retry")}</button></div></>}

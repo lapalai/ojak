@@ -1575,6 +1575,15 @@ impl Service {
             let store = self.lock()?;
             leases(&store.connection)?
         };
+        // 할 일이 있는 임대가 없으면(용량을 쥔 세션도, 만료될 예약도 없음) 2초마다 쓰기 트랜잭션을 열지 않는다.
+        // 바꿀 임대가 없으므로 "불확실하면 유지" 규칙과 무관하다.
+        if !records.iter().any(|record| record.session.state == "PREPARED" || scheduler::holds_capacity(&record.session.state)) {
+            #[cfg(windows)]
+            if let Ok(mut jobs) = self.jobs.lock() {
+                jobs.clear();
+            }
+            return Ok(());
+        }
         // Windows: 더 이상 용량을 쥐지 않는 세션의 Job 핸들은 놓는다.
         #[cfg(windows)]
         if let Ok(mut jobs) = self.jobs.lock() {

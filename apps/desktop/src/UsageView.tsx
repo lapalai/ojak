@@ -6,7 +6,7 @@ import { AccountRow, accountText } from "./AccountRow";
 import { AllocationSettings } from "./AllocationSettings";
 import { FirstSuccessNotice, OnboardingCard } from "./OnboardingCard";
 import { getRecoveryWatches, rpc, setRecoveryWatch, toApiError } from "./api";
-import { canonicalProvider, fullTime, groupAccounts, isCurrentGroup, projectName, providerNames, relativeTime, timeZoneLabel, useAction, useBridge, useCharacters } from "./state";
+import { canonicalProvider, fullTime, groupAccounts, isCurrentGroup, projectName, providerNames, relativeTime, timeZoneLabel, useAction, useBridge, useCharacters, useWindowVisible } from "./state";
 import type { AccountGroup } from "./state";
 import { PROVIDER_ORDER } from "./types";
 import type { Account, ApiError, Policy, Snapshot } from "./types";
@@ -52,21 +52,22 @@ export function UsageView({ snapshot, masked, online, refreshing, onReload, onRe
   const [watched, setWatched] = useState<string[] | null>(null);
   const [watchError, setWatchError] = useState<ApiError | null>(null);
   const watchAvailable = isTauri();
-  // 알림 감시는 서비스가 한도 회복을 확인하면 스스로 사라지므로 주기적으로 다시 읽는다.
+  const visible = useWindowVisible();
+  // 알림 감시는 서비스가 한도 회복을 확인하면 스스로 사라지므로 주기적으로 다시 읽는다. 창이 숨겨지면 멈춘다.
   useEffect(() => {
-    if (!watchAvailable) return;
+    if (!watchAvailable || !visible) return;
     let active = true;
     const load = () => { if (document.hidden) return; getRecoveryWatches().then(ids => { if (active) { setWatched(ids); setWatchError(null); } }).catch(failure => { if (active) setWatchError(toApiError(failure)); }); };
     load();
     const interval = window.setInterval(load, 5000);
     return () => { active = false; window.clearInterval(interval); };
-  }, [watchAvailable]);
+  }, [watchAvailable, visible]);
   const watch = useMemo(() => ({
     available: watchAvailable, watched,
     set: async (accountId: string, enabled: boolean) => { const next = await setRecoveryWatch(accountId, enabled); setWatched(next); setWatchError(null); return next; },
   }), [watchAvailable, watched]);
   const [now, setNow] = useState(() => Date.now());
-  useEffect(() => { const timer = window.setInterval(() => setNow(Date.now()), 30_000); return () => window.clearInterval(timer); }, []);
+  useEffect(() => { if (!visible) return; setNow(Date.now()); const timer = window.setInterval(() => setNow(Date.now()), 30_000); return () => window.clearInterval(timer); }, [visible]);
   const [period, setPeriod] = useState<Period>("60");
   // 오늘은 0시부터 지금까지를 5분 단위로 올림한다. 5분마다 한 구간씩 늘어난다.
   const midnight = new Date(); midnight.setHours(0, 0, 0, 0);

@@ -1184,6 +1184,27 @@ fn intern_model(conn: &Connection, models: &mut HashMap<String, i64>, name: &str
     Ok(id)
 }
 
+/// 사용 기록 파일을 연다. 링크(Unix symlink, Windows 재분석 지점)는 따라가지 않는다.
+/// 하드 링크는 거부하지 않는다: Orca 같은 실행기가 Codex 기록을 하드 링크로 두 곳에 두는데, 같은 기록은
+/// 응답·누적값 키로 한 번만 세므로 두 경로로 읽어도 합계가 늘지 않는다. 읽기 전용이며 자격 증명 파일이 아니다.
+#[cfg(unix)]
+fn open_log(path: &Path) -> io::Result<fs::File> {
+    aam_protocol::secure::open_read_no_follow(path)
+}
+#[cfg(windows)]
+fn open_log(path: &Path) -> io::Result<fs::File> {
+    use std::os::windows::fs::{MetadataExt, OpenOptionsExt};
+    const FILE_FLAG_OPEN_REPARSE_POINT: u32 = 0x0020_0000;
+    const FILE_ATTRIBUTE_REPARSE_POINT: u32 = 0x400;
+    const FILE_SHARE_ALL: u32 = 0x1 | 0x2 | 0x4;
+    // 쓰는 중인 기록도 읽을 수 있게 읽기·쓰기·삭제 공유로 연다(실행 중인 omp·Codex를 막지 않는다).
+    let file = fs::OpenOptions::new().read(true).share_mode(FILE_SHARE_ALL).custom_flags(FILE_FLAG_OPEN_REPARSE_POINT).open(path)?;
+    if file.metadata()?.file_attributes() & FILE_ATTRIBUTE_REPARSE_POINT != 0 {
+        return Err(io::Error::new(io::ErrorKind::InvalidInput, "link"));
+    }
+    Ok(file)
+}
+
 impl Index {
     fn open(path: &Path) -> rusqlite::Result<Index> {
         match Self::open_once(path) {
@@ -1386,7 +1407,7 @@ impl Index {
     fn ingest(&mut self, idx: usize, bytes_left: &mut u64, deadline: Instant, now_ms: i64) -> Result<(), IngestError> {
         let mut row = self.files[idx].clone();
         let path = row.path.clone().ok_or(IngestError::File)?;
-        let file = aam_protocol::secure::open_read_no_follow(&path)?;
+        let file = open_log(&path)?;
         let meta = file.metadata()?;
         if !meta.is_file() {
             return Err(IngestError::File);
@@ -2010,6 +2031,26 @@ mod tests {
     }
 
     #[test]
+    fn hard_linked_codex_log_is_read_and_counted_once() {
+        let dir = Temp::new();
+        let root = dir.join("sessions");
+        let mut lines = codex_head("sess-1", "gpt-5.5");
+        lines.push(codex_total("2026-05-20T06:30:06.000Z", (1000, 400, 100, 30), (1000, 400, 100)));
+        let original = root.join("a/rollout-1.jsonl");
+        write_lines(&original, &lines);
+        // Orca keeps a second hard link to the same Codex log under its own runtime home.
+        let linked = root.join("orca/rollout-1.jsonl");
+        fs::create_dir_all(linked.parent().unwrap()).unwrap();
+        fs::hard_link(&original, &linked).unwrap();
+        let mut index = open(&dir);
+        drain(&mut index, &set_of(TOOL_CODEX, &root));
+        let r = report(&index, None, now());
+        assert!(!r.warnings.iter().any(|w| w == "SOURCE_UNREADABLE"), "{:?}", r.warnings);
+        assert_eq!(r.totals.input_tokens, 600);
+        assert_eq!(r.totals.output_tokens, 100);
+    }
+
+    #[test]
     fn byte_progress_reaches_total_only_after_every_file_is_read() {
         let dir = Temp::new();
         let root = dir.join("projects");
@@ -2025,6 +2066,37 @@ mod tests {
         let done = report(&index, None, now());
         assert_eq!(done.bytes_read, done.bytes_total);
         assert_eq!(done.files_pending, 0);
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn background_reader_thread_runs_at_windows_background_priority() {
+        use windows_sys::Win32::System::Threading::{GetCurrentThread, GetThreadPriority, THREAD_PRIORITY_NORMAL};
+        let priority = std::thread::spawn(|| {
+            lower_thread_priority();
+            unsafe { GetThreadPriority(GetCurrentThread()) }
+        })
+        .join()
+        .unwrap();
+        // THREAD_MODE_BACKGROUND_BEGIN lowers CPU, I/O and memory priority; GetThreadPriority then reports -4
+        // (below THREAD_PRIORITY_LOWEST). Without it the thread stays at THREAD_PRIORITY_NORMAL (0).
+        assert_eq!(priority, -4);
+        assert!(priority < THREAD_PRIORITY_NORMAL);
+    }
+
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn background_reader_thread_runs_at_macos_background_qos() {
+        unsafe extern "C" {
+            fn qos_class_self() -> u32;
+        }
+        let qos = std::thread::spawn(|| {
+            lower_thread_priority();
+            unsafe { qos_class_self() }
+        })
+        .join()
+        .unwrap();
+        assert_eq!(qos, 0x09, "QOS_CLASS_BACKGROUND");
     }
 
     #[test]

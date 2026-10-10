@@ -585,7 +585,7 @@ button.tiger-egg:hover:not(:disabled) { background: none; }
 .token-tiger-sprite { left: 0; animation: token-tiger-pose 8s steps(1, end) infinite; }
 .token-yakgwa-sprite { left: 150px; animation: token-yakgwa-bite 8s steps(1, end) infinite; }
 .token-magpie-sprite { left: 178px; animation: token-magpie-pose 1.6s steps(1, end) infinite, token-magpie-hop 1.6s ease-out infinite; }
-@keyframes token-tiger-walk { 0% { translate: 0 0; opacity: 0; } 4% { opacity: 1; } 25% { translate: 58px 0; } 95% { translate: 58px 0; opacity: 1; } 100% { translate: 58px 0; opacity: 0; } }
+@keyframes token-tiger-walk { 0% { translate: 0 0; opacity: 0; } 2% { opacity: 1; } 25% { translate: 58px 0; } 98% { translate: 58px 0; opacity: 1; } 100% { translate: 58px 0; opacity: 0; } }
 @keyframes token-tiger-pose {
   0% { background-position: 0 0; }
   25% { background-position: calc(-1 * 106.5px) 0; }

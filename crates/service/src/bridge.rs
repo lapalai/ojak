@@ -894,7 +894,8 @@ impl Bridge {
                     && a.auth_status == "authenticated" && a.identity_key == source.account.identity_key
                     && a.profile_path == source.account.profile_path && a.binary_path == source.account.binary_path));
             if !valid { return respond(&mut client, 401, &json!({"error":"Native profile is no longer enabled."})); }
-            let route = format!("/{suffix}");
+            // 쿼리를 함께 넘긴다. 빠지면 long-poll의 `wait=`가 0이 되어 omp gateway가 쉬지 않고 다시 요청한다.
+            let route = if request.query.is_empty() { format!("/{suffix}") } else { format!("/{suffix}?{}", request.query) };
             let request = match read_body(&mut client, request, rest) {
                 Ok(request) => request,
                 Err(_) => return respond(&mut client, 400, &json!({"error":"Invalid native broker request."})),
@@ -1513,7 +1514,10 @@ fn open_bounded_log(path: &Path) -> io::Result<fs::File> {
 
 struct Request {
     method: String,
+    /// 경로만(쿼리 제외). 라우팅은 이것으로 한다.
     path: String,
+    /// `?` 뒤의 쿼리 문자열(없으면 빈 문자열). native broker의 `wait=` 같은 매개변수가 여기 있다.
+    query: String,
     headers: Vec<(String, String)>,
     body: Vec<u8>,
 }
@@ -1548,14 +1552,16 @@ fn read_head(stream: &mut TcpStream) -> Result<(Request, Vec<u8>), String> {
     let mut lines = head.split("\r\n");
     let mut first = lines.next().unwrap_or_default().split(' ');
     let method = first.next().unwrap_or_default().to_owned();
-    let path = first.next().unwrap_or_default().split('?').next().unwrap_or_default().to_owned();
+    let target = first.next().unwrap_or_default();
+    let (path, query) = target.split_once('?').unwrap_or((target, ""));
+    let (path, query) = (path.to_owned(), query.to_owned());
     // 헤더 값의 제어 문자는 upstream 요청에 줄을 끼워 넣을 수 있으므로 여기서 제거한다.
     let headers: Vec<(String, String)> = lines
         .filter_map(|line| line.split_once(':'))
         .map(|(key, value)| (key.trim().to_owned(), value.trim().chars().filter(|c| !c.is_control()).collect()))
         .collect();
     let rest = buffer[end..].to_vec();
-    Ok((Request { method, path, headers, body: Vec::new() }, rest))
+    Ok((Request { method, path, query, headers, body: Vec::new() }, rest))
 }
 
 /// 인증이 끝난 뒤 본문을 읽는다.

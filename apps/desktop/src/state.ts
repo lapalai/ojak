@@ -1,4 +1,6 @@
 import { useCallback, useEffect, useRef, useState } from "react";
+import { getCurrentWindow } from "@tauri-apps/api/window";
+import { listen } from "@tauri-apps/api/event";
 import { bucketState } from "./limits";
 import { bridgeUsage, ompBridgeAction, rpc, toApiError } from "./api";
 import type { BridgeUsage, OmpBridgeStatus } from "./api";
@@ -235,6 +237,20 @@ export function useAction() {
   return { pending, error, message, run, clear: () => { setError(null); setMessage(null); } };
 }
 
+/// 이 창이 지금 보이는지. 앱이 창을 숨기거나 보일 때 보내는 `ojak://window-visible`을 따른다.
+/// WebKit·WebView2는 창을 숨겨도 `document.hidden`을 늘 바꾸지는 않으므로 이 값을 주기 조회의 기준으로 쓴다.
+/// 시작 값은 창의 실제 표시 상태다(자동 시작으로 숨겨 뜬 창, 숨겨 둔 팝오버는 처음부터 멈춘다).
+export function useWindowVisible(): boolean {
+  const [visible, setVisible] = useState(true);
+  useEffect(() => {
+    let active = true;
+    void getCurrentWindow().isVisible().then(value => { if (active) setVisible(value); }).catch(() => undefined);
+    const off = listen<boolean>("ojak://window-visible", event => { if (active) setVisible(event.payload); });
+    return () => { active = false; void off.then(stop => stop()); };
+  }, []);
+  return visible;
+}
+
 export function useSnapshot() {
   const [snapshot, setSnapshot] = useState<Snapshot | null>(null);
   const [error, setError] = useState<ApiError | null>(null);
@@ -273,14 +289,20 @@ export function useSnapshot() {
     }
   }, []);
 
+  const visible = useWindowVisible();
   useEffect(() => {
     alive.current = true;
+    return () => { alive.current = false; };
+  }, []);
+  // 숨겨진 창은 3초 주기 조회를 하지 않는다. 다시 보이면 곧바로 한 번 읽고 주기를 재개한다.
+  useEffect(() => {
+    if (!visible) return;
     void load();
     const interval = window.setInterval(() => { if (!document.hidden && !refreshLock.current) void load(); }, 3000);
     const onVisible = () => { if (!document.hidden) void load(); };
     document.addEventListener("visibilitychange", onVisible);
-    return () => { alive.current = false; window.clearInterval(interval); document.removeEventListener("visibilitychange", onVisible); };
-  }, [load]);
+    return () => { window.clearInterval(interval); document.removeEventListener("visibilitychange", onVisible); };
+  }, [load, visible]);
   return { snapshot, error, connecting, refreshing, reload: load };
 }
 
@@ -294,7 +316,9 @@ export function useBridge(windowMinutes: number | null) {
   const [usageWindow, setUsageWindow] = useState(bridgeCache.usageWindow);
   const [error, setError] = useState<ApiError | null>(null);
   const [loaded, setLoaded] = useState(bridgeCache.status !== null);
+  const visible = useWindowVisible();
   useEffect(() => {
+    if (!visible) return;
     let active = true;
     let busy = false;
     setLoaded(false);
@@ -321,6 +345,6 @@ export function useBridge(windowMinutes: number | null) {
     const onVisible = () => { if (!document.hidden) void load(); };
     document.addEventListener("visibilitychange", onVisible);
     return () => { active = false; window.clearInterval(interval); document.removeEventListener("visibilitychange", onVisible); };
-  }, [windowMinutes]);
+  }, [windowMinutes, visible]);
   return { status, usage: usageWindow === windowMinutes ? usage : null, error, loaded: loaded && (windowMinutes === null || usageWindow === windowMinutes || Boolean(error)) };
 }
