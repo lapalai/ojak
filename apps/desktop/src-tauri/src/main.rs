@@ -43,13 +43,17 @@ fn show_main(app: &tauri::AppHandle) {
 }
 
 /// 창을 보이거나 숨기고, 그 창의 화면에만 알린다. `emit`은 모든 창에 가므로 팝오버를 닫을 때 대시보드까지
-/// 멈추지 않도록 `emit_to`로 이 창만 겨눈다. WebView2는 창을 숨겨도 웹뷰를 계속 그리므로 웹뷰도 함께 숨긴다.
+/// 멈추지 않도록 `emit_to`로 이 창만 겨눈다. WebView2는 창을 숨겨도 웹뷰를 계속 그리므로 Windows에서만 웹뷰도
+/// 함께 숨긴다. macOS에서 웹뷰를 숨기면 팝오버가 열리자마자 다시 닫혀(0.5.6~0.5.7) 창만 숨긴다(WebKit은 그리지 않는다).
 fn set_shown(window: &tauri::WebviewWindow, shown: bool) {
+    #[cfg(windows)]
     let webview: &tauri::Webview = window.as_ref();
     if shown {
         let _ = window.show();
+        #[cfg(windows)]
         let _ = webview.show();
     } else {
+        #[cfg(windows)]
         let _ = webview.hide();
         let _ = window.hide();
     }
