@@ -47,6 +47,8 @@ omp 연동은 선택 기능입니다. 브릿지를 연결하고 `ojak-*` 공급�
 2. 이 빌드는 서명하지 않습니다. SmartScreen이 "Windows의 PC 보호"를 띄우면 **추가 정보 → 실행**을 누르세요. AhnLab V3 등 백신이 `aam.exe`나 `aam-service.exe`를 보류하면 예외로 두고 설치 파일을 다시 실행하세요.
 3. **시작하기**로 서비스와 터미널 명령을 연결합니다. 새 Windows 터미널에서 `claude` 또는 `codex`를 입력하세요. `aam`도 같은 사용자 PATH에 들어갑니다.
 4. 업데이트는 설정 → 정보의 "업데이트 확인"입니다. 앱 안 업데이트가 없으면 새 setup.exe를 같은 사용자로 다시 설치하세요. 실행 중인 작업이 있으면 설치가 멈춥니다. 작업을 끝낸 뒤 다시 실행하세요.
+   - **설치·업데이트 전에 Orca와 열려 있는 omp를 모두 종료하세요.** omp가 Ojak 관측 프로그램(`aam.exe omp-observer`)을 띄워 두면 설치 파일이 `aam.exe`를 바꾸지 못해 "기존 Ojak을 안전하게 멈추지 못해 설치를 멈췄어요"로 멈춥니다(파일은 바뀌지 않습니다). Orca는 안에서 omp를 계속 띄우므로 창만 닫지 말고 앱을 완전히 끄세요. 설치가 끝나면 다시 켜면 됩니다.
+   - 예전 설치가 중간에 끊겼다면 같은 메시지가 계속 날 수 있습니다. 설치 창의 **[자세히]**에 `installer recover`가 보이면 Orca·omp를 끈 뒤 [이슈](https://github.com/lapalai/ojak/issues)로 알려 주세요.
 5. 제거는 **설정 → 앱 → Ojak → 제거**입니다. omp 연결을 먼저 원래대로 되돌린 뒤 서비스를 끕니다. 실행 중인 작업이 있으면 제거가 멈춥니다. 작업을 끝내거나 PC를 다시 시작한 뒤 다시 제거하세요.
 6. 데이터는 `%APPDATA%\AI Account Manager`에 있습니다. 제거해도 계정·프로필·로그는 지우지 않습니다.
 
@@ -326,6 +328,8 @@ Do not run the installer as administrator, including "Run as administrator" from
 2. This build is unsigned. If SmartScreen says "Windows protected your PC", choose **More info → Run anyway**. If antivirus software such as AhnLab V3 quarantines `aam.exe` or `aam-service.exe`, allow those files and run the installer again.
 3. Press **Start** to connect the service and terminal commands. In a new Windows Terminal window, type `claude` or `codex`. `aam` is added to the same user PATH.
 4. Updates are under Settings → About → Check for updates. If in-app update is unavailable, install a new setup.exe as the same user. Installation stops while work is running. Finish that work, then run the installer again.
+   - **Quit Orca and every open omp before installing or updating.** omp keeps an Ojak observer (`aam.exe omp-observer`) running, which stops the installer from replacing `aam.exe`; setup then aborts with "Could not safely stop the existing Ojak" (no files are changed). Orca runs omp inside it, so quit the app fully, not just its window. Start them again after setup finishes.
+   - If an earlier install was interrupted, the same message can repeat. If **Show details** mentions `installer recover`, quit Orca and omp, then report it in [Issues](https://github.com/lapalai/ojak/issues).
 5. Uninstall from **Settings → Apps → Ojak → Uninstall**. Ojak restores omp first, then stops the service. Uninstall stops while work is running. Finish that work or restart the PC, then uninstall again.
 6. Data stays in `%APPDATA%\AI Account Manager`. Uninstall does not delete accounts, profiles, or logs.
 
