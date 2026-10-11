@@ -94,7 +94,7 @@ If setup says it could not safely stop Ojak:
 2. Retry setup. When it stops at this safety check, it has not replaced the application files.
 3. If the installer details mention `installer recover`, an earlier install may have been interrupted. With Orca/omp closed, [report the issue](https://github.com/lapalai/ojak/issues) rather than editing the database or forcing file replacement.
 
-Inspect the installer's details and `%TEMP%\Ojak-installer.log`. Starting with 0.6.2, failures record the stage (`stage`), helper exit result (`exit`), and actual error code (`code`). Older generic messages do not establish that running work caused the failure. Review and redact any log before sharing it.
+Inspect the installer's details and `%TEMP%\Ojak-installer.log`. Starting with 0.6.3, failures record the stage (`stage`), helper exit result (`exit`), and actual error code (`code`). Older generic messages do not establish that running work caused the failure. Review and redact any log before sharing it.
 
 - `SESSION_BUSY` / `INSTALLER_FILES_BUSY`: finish running work, quit Orca/omp normally, then retry.
 - `OMP_CONFIG_FAILED`: previous omp connection settings could not be restored. Check the omp installation and executable. An installation never connected to omp can be removed without omp.

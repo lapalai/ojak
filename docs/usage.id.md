@@ -94,7 +94,7 @@ Jika installer menyatakan Ojak tidak bisa dihentikan dengan aman:
 2. Jalankan installer lagi. Jika berhenti pada pemeriksaan keamanan ini, file aplikasi belum diganti.
 3. Jika bagian detail installer menyebut `installer recover`, pemasangan sebelumnya mungkin terputus. Tutup Orca/omp dan [laporkan masalah](https://github.com/lapalai/ojak/issues), bukan mengedit database atau memaksa penggantian file.
 
-Periksa detail installer dan `%TEMP%\Ojak-installer.log`. Mulai 0.6.2, kegagalan mencatat tahap (`stage`), hasil keluar helper (`exit`), dan kode kesalahan sebenarnya (`code`). Pesan umum versi lama tidak membuktikan bahwa pekerjaan aktif adalah penyebabnya. Tinjau dan samarkan data pribadi sebelum membagikan log.
+Periksa detail installer dan `%TEMP%\Ojak-installer.log`. Mulai 0.6.3, kegagalan mencatat tahap (`stage`), hasil keluar helper (`exit`), dan kode kesalahan sebenarnya (`code`). Pesan umum versi lama tidak membuktikan bahwa pekerjaan aktif adalah penyebabnya. Tinjau dan samarkan data pribadi sebelum membagikan log.
 
 - `SESSION_BUSY` / `INSTALLER_FILES_BUSY`: selesaikan pekerjaan aktif, tutup Orca/omp secara normal, lalu coba lagi.
 - `OMP_CONFIG_FAILED`: pengaturan koneksi omp sebelumnya tidak dapat dipulihkan. Periksa pemasangan dan executable omp. Instalasi yang belum pernah terhubung ke omp dapat dihapus tanpa omp.
