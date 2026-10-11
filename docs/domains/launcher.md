@@ -63,6 +63,7 @@ shim → `route.resolve` → `lease.acquire`(PREPARED) → 실행 계획·identi
 - Windows NSIS는 `installer prepare|finish|recover|remove`로 앱 소유 서비스의 활성·불확실 lease를 검사하고, 기존 실행 파일 백업 → 안전 종료 → 새 파일 hash 확인 → 서비스 재시작을 수행한다. 새 설치를 자동으로 서비스 등록하지 않으며, 실패하면 복구 기록을 보존하고 검증된 원본으로 복구한다. `remove`는 서비스를 끄기 전에 `aam deactivate`와 같은 순서로 omp bridge·broker·observer를 푼다. 앱이 만든 HKCU Run `Ojak`(로그인 자동 실행)만 지운다.
 - NSIS 제거 도우미는 설치 폴더가 아닌 임시 복사본으로 실행한다. 설치 전과 제거 후 `aam.exe`의 쓰기 핸들 획득으로 실행 파일 잠금을 확인하며 파일 내용은 쓰지 않는다. 공유 잠금이 5초 후에도 남으면 `INSTALLER_FILES_BUSY`로 멈추고 열려 있는 omp/Ojak 명령을 종료하도록 안내한다. 업데이트는 이 검사 전에 백업·종료 기록을 만들거나 서비스를 중지하지 않는다. 구버전 omp 프로세스를 임의로 죽이지 않는다.
 - Windows 업데이트·복구는 종료 permit에 대응하는 `service.cancelUninstall` RPC로 DB의 신규 배정 차단까지 해제한 뒤 설치 기록을 정리한다. 명시적인 `service install`과 앱의 서비스 재시작도 DB 배정을 재개하며, 앱의 재시작은 `service_stop`의 안전 검사를 거친다.
+- 저장소 설치 진입점: macOS `install.sh`, Windows `install.ps1`. 공개 버전을 한 번 선택하고 체크섬 검증 후 기존 CLI/NSIS 안전 경로를 이용한다. 기본 `aam setup` → `aam setup --check`, 명시 `--with-omp`/`-WithOmp`만 omp를 연결하며 `ready`·서비스 버전·명령 검사·omp 상태를 각각 판단한다. Mac은 교체 잠금·staging·이전 앱 백업을 사용하고 기존 앱 교체에 `--skip-service`를 허용하지 않는다. Windows는 일반 사용자만 설치하며 NSIS prepare/finish/recover를 유지한다. 플래그·종료 결과는 [에이전트 안내](../install-for-agents.md), 회귀 검증은 `scripts/install-sh.test.mjs`와 `tests/install-ps1.tests.ps1`에 있다.
 
 ## 호스트 연결 (`src/hosts.rs`)
 `host_connections`가 Orca·VS Code·Cursor(모든 OS)와 Superset·cmux·Conductor(macOS만)의 shim 연결 상태와 설정 안내를 만든다. 데스크톱 연결 화면이 사용한다.

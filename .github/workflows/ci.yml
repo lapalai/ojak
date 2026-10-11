@@ -42,6 +42,15 @@ jobs:
       - name: Install npm dependencies
         run: npm ci
 
+      - name: macOS installer scenarios
+        if: runner.os == 'macOS'
+        run: node --test scripts/install-sh.test.mjs
+
+      - name: Windows installer scenarios
+        if: runner.os == 'Windows'
+        shell: powershell
+        run: powershell -NoProfile -File tests/install-ps1.tests.ps1
+
       - name: Cargo tests
         run: cargo test --workspace --exclude ai-account-manager -- --test-threads=1
 

@@ -1,0 +1,22 @@
+# Ojak
+
+> A local macOS menu bar and Windows tray app for managing your own Claude Code and Codex subscription accounts. Unofficial, early preview; no provider-limit bypass.
+
+## Installation
+
+- [Agent installation guide](https://github.com/lapalai/ojak/blob/main/docs/install-for-agents.md): Supported platforms, safe installation, account setup, optional omp integration, and verification with `aam setup --check`.
+- [Latest public release](https://github.com/lapalai/ojak/releases/latest): macOS Apple silicon DMG and Windows x64 installer.
+
+## User documentation
+
+- [English](https://github.com/lapalai/ojak/blob/main/README.md)
+- [한국어](https://github.com/lapalai/ojak/blob/main/docs/README.ko.md)
+- [Bahasa Indonesia](https://github.com/lapalai/ojak/blob/main/docs/README.id.md)
+- [User guide](https://github.com/lapalai/ojak/blob/main/docs/usage.md): Usage, troubleshooting, optional omp integration, and limitations.
+- [Security policy](https://github.com/lapalai/ojak/blob/main/SECURITY.md)
+
+## Development
+
+- [Contributing](https://github.com/lapalai/ojak/blob/main/CONTRIBUTING.md)
+- [Architecture](https://github.com/lapalai/ojak/blob/main/docs/domains/INDEX.md)
+- [Release policy](https://github.com/lapalai/ojak/blob/main/docs/release-policy.md)

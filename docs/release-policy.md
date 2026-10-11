@@ -1,6 +1,6 @@
 # 릴리스 정책
 
-만드는 방법(빌드·서명·태그)은 `README.md`와 `.github/workflows/release.yml`에 있다. 이 문서는 언제, 무엇을, 어떤 순서로 내는지 정한다.
+빌드 준비는 [기여 안내](../CONTRIBUTING.md), 설치·사용은 [README](../README.md)에 있다. 이 문서는 버전·서명·태그·공개 순서를 정한다. 실제 워크플로는 [release.yml](../.github/workflows/release.yml)을 따른다.
 
 ## 버전
 - 형식은 `x.y.z`만 쓴다(`scripts/bump-version.mjs`가 강제). 태그는 `v` + 같은 버전이다.
@@ -68,3 +68,33 @@
 
 ## 업데이트 서명 키
 - 비밀키는 GitHub secret(`TAURI_SIGNING_PRIVATE_KEY`, `TAURI_SIGNING_PRIVATE_KEY_PASSWORD`)에만 둔다. 공개키와 한 쌍이어야 하며, 분실에 대비해 저장소 밖에도 보관한다.
+
+업데이터 서명은 Apple Developer ID 서명·공증 및 Windows Authenticode와 별개다. 키를 새로 만들어야 한다면 저장소 밖 경로를 지정한다.
+
+```sh
+npx tauri signer generate -w "$HOME/.tauri/ojak.key"
+```
+
+1. 출력된 공개키를 `apps/desktop/src-tauri/tauri.conf.json`의 `plugins.updater.pubkey`에 넣는다. 현재 값은 실제 minisign 공개키다. 빈 값이나 `REPLACE_WITH_TAURI_UPDATER_PUBKEY`로 바꾸면 업데이트 UI와 확인 요청이 비활성화된다.
+2. 짝이 되는 비밀키 내용을 `TAURI_SIGNING_PRIVATE_KEY`에, 암호가 있으면 `TAURI_SIGNING_PRIVATE_KEY_PASSWORD`에 넣는다. 비밀키를 커밋하지 않는다.
+3. 첫 태그 전에 키 쌍을 확인한다. `scripts/verify-signing-key.mjs`는 작은 파일에 서명한 뒤 저장소의 공개키로 검증한다. 짝이 다르거나 암호가 틀리거나 값이 비어 있으면 중단한다. 비밀 값이 명령 이력이나 로그에 노출되지 않는 방식으로 환경변수를 공급한다.
+4. 키를 바꾸면 기존 설치본이 새 서명을 검증하지 못할 수 있다. 새 버전의 직접 설치 안내와 함께 배포하며, 기존 키로 서명한 것처럼 취급하지 않는다.
+
+비밀키가 없는 로컬 빌드에서 `scripts/build.mjs`는 업데이터 산출물만 끄고 앱·설치 파일을 만든다. 키가 있으면 Mac의 `Ojak.app.tar.gz`와 `.sig` 등 업데이터 산출물도 만든다. 빌드 완료와 두 OS 배포 검증 완료는 구분한다.
+
+## 저장소 이름을 바꿀 때
+
+현재 저장소는 `lapalai/ojak`이다. 이름을 바꾸면 다음 항목을 함께 확인한다.
+
+| 파일 | 바꿀 내용 |
+|---|---|
+| `README.md`, `docs/README.*.md`, `docs/usage*.md` | 릴리스·배지·이슈·설치 스크립트 링크 |
+| `install.sh`, `install.ps1` | 설치기의 `lapalai/ojak` 저장소 설정과 공식 asset URL 검증 |
+| `docs/install-for-agents.md`, `llms.txt` | 에이전트 안내와 문서 URL |
+| `apps/desktop/src-tauri/tauri.conf.json` | updater endpoint `https://github.com/lapalai/ojak/releases/latest/download/latest.json` |
+| `.github/ISSUE_TEMPLATE/config.yml`, `SECURITY.md` | 보안 비공개 보고 주소 |
+| `Cargo.toml` | `repository`, `homepage` |
+| `package.json`, `apps/desktop/package.json` | `repository`, `bugs`, `homepage` |
+| 이 문서, `.github/workflows/release.yml` | 배포 주소와 `github.repository` 허용 저장소 조건 |
+
+워크플로의 저장소 허용 조건은 포크에서 서명 비밀키를 쓰지 않도록 하는 보호 장치다. 이름을 바꿔도 없애지 않는다. 새 파일에 저장소 주소를 고정하면 이 표도 갱신한다.

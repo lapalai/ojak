@@ -191,7 +191,7 @@ export function SettingsDialog({ snapshot, onClose }: { snapshot: Snapshot | nul
       const result = await setLanguage(choice);
       setChoice(choice);
       try {
-        if (choice === "system") localStorage.removeItem(LANGUAGE_KEY); else localStorage.setItem(LANGUAGE_KEY, choice);
+        localStorage.setItem(LANGUAGE_KEY, result.resolved);
       } catch { /* 저장소가 막혀도 네이티브 설정은 바뀌었다. */ }
       // 화면 문구는 시작할 때 한 번 정해지므로, 표시 언어가 바뀌면 다시 불러온다.
       if (result.resolved !== locale) window.location.reload();

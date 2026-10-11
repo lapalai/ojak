@@ -2,7 +2,7 @@
 /// 서비스·어댑터가 보내는 문장(account.reason, notice, 배정 사유)은 서버 텍스트 그대로 보여 준다. ApiError는 코드가 `error.code.*`에 있으면 표시 언어 문장을 먼저 보이고 서비스 원문은 '자세히'에 둔다(`errors.ts`).
 export type Locale = "en" | "ko" | "id";
 
-/// 설정에서 고른 언어. 네이티브(`ui-settings.json`)가 기준이고, 화면은 시작 직후 읽을 수 있게 여기에도 둔다.
+/// 네이티브가 결정한 실제 표시 언어 캐시. system 등의 사용자 선택은 네이티브(ui-settings.json)에 보존한다.
 export const LANGUAGE_KEY = "ojak.language";
 export type LanguageChoice = "system" | Locale;
 
@@ -14,14 +14,32 @@ export function localeFromTag(tag: string | undefined): Locale {
   return "en";
 }
 
-function detectLocale(): Locale {
+type LanguageStorage = Pick<Storage, "getItem" | "setItem">;
+
+/** 저장된 표시 언어 캐시가 있으면 그것을, 없으면 WebView 선호 언어를 쓴다. */
+export function resolveLocale(storage: Pick<Storage, "getItem"> | null, languages: readonly string[]): Locale {
   try {
-    const chosen = localStorage.getItem(LANGUAGE_KEY);
+    const chosen = storage?.getItem(LANGUAGE_KEY);
     if (chosen === "ko" || chosen === "en" || chosen === "id") return chosen;
   } catch { /* 저장소를 못 읽으면 시스템 언어를 쓴다. */ }
-  if (typeof navigator === "undefined") return "en";
-  const preferred = navigator.languages?.length ? navigator.languages : [navigator.language];
-  return localeFromTag(preferred[0]);
+  return localeFromTag(languages[0]);
+}
+
+/// 네이티브가 정한 표시 언어를 캐시한다. 다시 불러와야 하면(현재 화면 언어와 다르고 캐시가 저장됐을 때) true.
+/// 캐시를 못 쓰면 다시 불러와도 같은 언어로 시작해 무한 반복하므로 false다.
+export function cacheResolvedLanguage(storage: Pick<Storage, "setItem"> | null, resolved: Locale, current: Locale): boolean {
+  try {
+    if (!storage) return false;
+    storage.setItem(LANGUAGE_KEY, resolved);
+  } catch { return false; }
+  return resolved !== current;
+}
+
+function detectLocale(): Locale {
+  let storage: LanguageStorage | null = null;
+  try { storage = localStorage; } catch { /* 접근 자체가 막힌 환경 */ }
+  if (typeof navigator === "undefined") return resolveLocale(storage, []);
+  return resolveLocale(storage, navigator.languages?.length ? navigator.languages : [navigator.language]);
 }
 
 export const locale: Locale = detectLocale();
