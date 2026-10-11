@@ -113,7 +113,13 @@ fn config_get(key: &str) -> Result<Value, ApiError> {
         .args(["config", "get", key, "--json"])
         .output()
         .map_err(|_| error("OMP_CONFIG_FAILED", "omp 설정을 읽지 못했어요."))?;
-    Ok(serde_json::from_slice::<Value>(&output.stdout).ok().and_then(|value| value.get("value").cloned()).unwrap_or(Value::Null))
+    if !output.status.success() {
+        return Err(error("OMP_CONFIG_FAILED", "omp 설정 조회에 실패했어요. 연결 기록은 보존했어요."));
+    }
+    serde_json::from_slice::<Value>(&output.stdout)
+        .ok()
+        .and_then(|value| value.get("value").cloned())
+        .ok_or_else(|| error("OMP_CONFIG_FAILED", "omp 설정 응답을 확인하지 못했어요. 연결 기록은 보존했어요."))
 }
 
 fn config_set(key: &str, value: &Value) -> Result<(), ApiError> {
@@ -352,10 +358,23 @@ pub fn connect(paths: &Paths) -> Result<Status, ApiError> {
 }
 
 pub fn disconnect(paths: &Paths) -> Result<Status, ApiError> {
-    let (directory, _) = extension_state()?;
-    omp_extension::uninstall(&ACCOUNTS, &directory).map_err(extension_error)?;
+    let directory = omp_extension::extension_directory(&ACCOUNTS).map_err(extension_error)?;
+    let installed = omp_extension::inspect(&ACCOUNTS, &directory).map_err(extension_error)?.is_some();
+    // omp는 선택 연결이다. 연결한 흔적이 없으면 설치되지 않은 omp를 실행하거나 설정을 만들지 않는다.
+    // 확장만 먼저 지우면 설정 복원 실패 후 재시도 때 연결 흔적을 잃으므로 마지막에 지운다.
+    let recorded = [paths.bridge_settings(), paths.home.join(ROLE_BACKUP)]
+        .iter()
+        .try_fold(false, |found, path| match fs::symlink_metadata(path) {
+            Ok(_) => Ok(true),
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(found),
+            Err(_) => Err(error("BRIDGE_STATE_FAILED", "Ojak 연결 기록을 확인하지 못했어요.")),
+        })?;
+    if !installed && !recorded {
+        return status(paths);
+    }
     scope_ojak_models(false)?;
     detach_model_roles(paths)?;
+    omp_extension::uninstall(&ACCOUNTS, &directory).map_err(extension_error)?;
     write_settings(paths, false)?;
     status(paths)
 }
