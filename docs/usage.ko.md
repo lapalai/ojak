@@ -94,7 +94,12 @@ aam omp-broker connect && aam omp-bridge connect
 2. 설치를 다시 실행하세요. 이 안전 검사에서 멈춘 경우에는 앱 파일을 아직 교체하지 않았습니다.
 3. 설치 창의 자세히에 `installer recover`가 보이면 이전 설치가 중간에 끊겼을 수 있어요. Orca·omp를 끈 뒤 [이슈로 알려 주세요](https://github.com/lapalai/ojak/issues). DB 수정이나 강제 파일 교체로 해결하려 하지 마세요.
 
-설치 창의 자세히와 `%TEMP%\Ojak-installer.log`를 확인하세요. 로그를 공유하기 전에는 개인정보가 없는지 확인하고 가려 주세요. 진행 중인 관리 작업 때문에 설치·제거가 멈출 수도 있어요. 작업을 마치거나 PC를 다시 시작한 뒤 재시도하세요.
+설치 창의 자세히와 `%TEMP%\Ojak-installer.log`를 확인하세요. 0.6.2부터 실패 단계(`stage`), 도우미 종료값(`exit`), 실제 오류 코드(`code`)를 기록합니다. 기존 버전의 일반 안내문만으로는 실행 중인 작업이 원인인지 알 수 없습니다. 로그를 공유하기 전에는 개인정보가 없는지 확인하고 가려 주세요.
+
+- `SESSION_BUSY` / `INSTALLER_FILES_BUSY`: 진행 중인 작업을 마치고 Orca·omp를 정상 종료한 뒤 재시도하세요.
+- `OMP_CONFIG_FAILED`: 이전 omp 연결의 설정을 복원하지 못했습니다. omp 설치·실행 상태를 확인하세요. omp를 연결한 적 없는 설치본은 omp 없이 제거할 수 있습니다.
+- `LEASE_STATE_UNKNOWN`: 서비스가 꺼져 있어 저장된 세션의 안전 상태를 확인하지 못했습니다. Ojak 서비스를 다시 시작한 뒤 작업 상태를 확인하세요. DB나 lease를 직접 지우지 마세요.
+- `HELPER_RESULT_UNAVAILABLE`: 도우미가 오류 코드 파일을 남기지 못했습니다. `exit=error`는 실행 실패, `exit=timeout`은 nsExec 시간 초과입니다. 설치 창의 자세히와 백신 격리 기록을 확인하세요.
 
 ## 세션이 끝났는데 자리가 남아 있을 때
 

@@ -34,6 +34,9 @@ enum Action {
         action: String,
         #[arg(long)]
         directory: PathBuf,
+        /// NSIS에 전달할 비밀 없는 ASCII 오류 코드 파일.
+        #[arg(long)]
+        error_file: Option<PathBuf>,
     },
     #[command(about = "계정, 한도, 대화 상태를 보여 줘요.")]
     Status {
@@ -372,9 +375,21 @@ fn remove_installation(paths: &Paths, directory: &Path) -> Result<(), ApiError> 
 fn execute(paths: &Paths, action: Action) -> Result<(), ApiError> {
     match action {
         #[cfg(windows)]
-        Action::Installer { action, directory } if action == "remove" => remove_installation(paths, &directory)?,
-        #[cfg(windows)]
-        Action::Installer { action, directory } => install::installer(paths, &action, &directory)?,
+        Action::Installer { action, directory, error_file } => {
+            let result = if action == "remove" {
+                remove_installation(paths, &directory)
+            } else {
+                install::installer(paths, &action, &directory)
+            };
+            if let Some(path) = error_file {
+                // 원문 오류에는 사용자 경로 등이 있을 수 있다. NSIS에는 코드만 전달한다.
+                let code = result.as_ref().err().map_or("OK", |error| error.code.as_str());
+                if let Err(error) = std::fs::write(path, code) {
+                    eprintln!("aam: installer error-code file unavailable ({:?})", error.kind());
+                }
+            }
+            result?;
+        },
         Action::Status { json } => {
             let snapshot = read_snapshot(paths)?;
             if json {
