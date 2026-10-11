@@ -1,14 +1,14 @@
 # 보안 정책 / Security policy
 
-Ojak은 미리보기(0.1.x)입니다. 장기 지원 브랜치는 없습니다. 보안 수정은 `main`의 최신 커밋과, 공개 릴리스가 생긴 뒤에는 **가장 최근 GitHub 릴리스**에만 들어갑니다. 그 이전 태그는 고치지 않습니다.
+Ojak은 초기 미리보기 단계입니다. 장기 지원 브랜치는 없습니다. 보안 수정은 `main`의 최신 커밋과 **가장 최근 GitHub 릴리스**에만 들어갑니다. 그 이전 태그는 고치지 않습니다.
 
-This project is a pre-release (0.1.x). There is no long-term support branch. Fixes land on the latest `main` commit and, once a public release exists, only on the latest GitHub release.
+Ojak is an early preview. There is no long-term support branch. Security fixes land on the latest `main` commit and the latest GitHub release; older releases are not maintained.
 
 ## 지원 버전 / Supported versions
 
 | 버전 / Version | 지원 / Supported |
 |---|---|
-| 최신 `main`, 그리고 공개 후 최신 릴리스 / latest `main`, and the latest release after one is published | 예 / yes |
+| 최신 `main`과 최신 GitHub 릴리스 / latest `main` and latest GitHub release | 예 / yes |
 | 그 이전 릴리스 / older releases | 아니오 / no |
 
 Windows 빌드는 x64 미리보기입니다. 같은 지원 정책이 적용됩니다. / The Windows build is an x64 preview under the same policy.

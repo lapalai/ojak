@@ -13,7 +13,7 @@ import { appInfo, getLanguage, refreshIntegrations, rpc, setPrivacy, updatesStat
 import ojakIcon from "./assets/ojak-icon.png";
 import { groupAccounts, isCurrentGroup, occupiedStates, relativeTime, useAction, useSnapshot } from "./state";
 import type { Policy, Session } from "./types";
-import { LANGUAGE_KEY, locale, modKey, t } from "./i18n";
+import { cacheResolvedLanguage, locale, modKey, t } from "./i18n";
 import { UPDATE_CHECK_INTERVAL_MS } from "./updates";
 
 type View = "usage" | "tokens" | "sessions" | "connect";
@@ -56,10 +56,11 @@ export default function App() {
     const updateTimer = window.setInterval(() => { void updatesStatus(false).catch(() => undefined); }, UPDATE_CHECK_INTERVAL_MS);
     void updatesStatus(false).catch(() => undefined);
     // 네이티브 언어 설정이 기준이다. 화면이 다른 언어로 시작했으면(저장소 초기화 등) 맞춰 다시 불러온다.
-    void getLanguage().then(({ choice, resolved }) => {
-      if (resolved === locale) return;
-      try { if (choice === "system") localStorage.removeItem(LANGUAGE_KEY); else localStorage.setItem(LANGUAGE_KEY, choice); } catch { return; }
-      window.location.reload();
+    void getLanguage().then(({ resolved }) => {
+      // 선택(system 포함)은 네이티브에 보존하고, 웹뷰에는 실제 표시 언어를 캐시한다.
+      let storage: Storage | null = null;
+      try { storage = localStorage; } catch { /* 저장소 접근이 막힌 환경 */ }
+      if (cacheResolvedLanguage(storage, resolved, locale)) window.location.reload();
     }).catch(() => undefined);
     // 트레이·⌘Q·Dock 종료 요청은 네이티브가 막고 이 이벤트로 확인 창을 띄운다.
     const unlisten = [listen("ojak://confirm-quit", () => setDialog({ kind: "quit" })), listen("ojak://settings", () => setDialog({ kind: "settings" }))];
