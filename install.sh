@@ -253,7 +253,9 @@ if [ -d "$other_dest/Ojak.app" ]; then
 fi
 
 json_get() {
-  "$PLUTIL" -extract "$2" raw -o - "$1" 2>/dev/null
+  # Some macOS releases print the extraction error on stdout, so a failed lookup must yield no value.
+  _json_value=$("$PLUTIL" -extract "$2" raw -o - "$1" 2>/dev/null) || return 1
+  printf '%s\n' "$_json_value"
 }
 json_type() {
   "$PLUTIL" -type "$2" "$1" 2>/dev/null
