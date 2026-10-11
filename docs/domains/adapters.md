@@ -28,8 +28,11 @@
 - Codex: `account.type=chatgpt` 필수. `app-server`가 보고한 codexHome이 프로필과 같아야 한다.
 - identity를 얻어야만 `preflight-verified` + `can_launch=true` (`native.rs:63-72`).
 - omp 계정은 관측 전용(`OMP_GATE`, `native.rs:10-12`). Ojak이 omp를 직접 실행하지 않는다.
+- `omp usage --json.disabledCredentials`의 `invalid_grant`·`invalid_token`은 기존 관측 계정과 공급자·subject/workspace identity가 정확히 일치할 때만 `auth-required`로 반영한다. 원문 오류는 저장하지 않는다. 같은 identity의 현재 보고서와 정상 native 로그인은 무효화하지 않으며, 단순 조회 누락·타임아웃·429·503은 인증 만료 근거가 아니다.
 - 크레딧(`native.rs` → `quota.rs::codex_credits`): Codex는 `account/rateLimits/read` 응답의 `credits{hasCredits,unlimited,balance}`·`ordinaryUsageAllowed`를 `Account.credits`에 읽는다. `codex` 한도 묶음 → 단일 `rateLimits` → 크레딧을 알려 준 다른 묶음 순. `hasCredits`가 없거나 응답에 `credits`가 없으면 `None`(있다고 가정하지 않음), `available = (hasCredits && 잔액이 0 이하가 아님) || unlimited`. `balance`는 숫자로 읽힐 때만 보관(ChatGPT 크레딧 단위, 금액 아님). 조회에 실패하면 이전 값을 이어 쓰지 않는다. 실제 크레딧 사용 상태는 관측한 적 없어 공식 스키마의 필드 형태로만 시험했다(미검증).
 - Claude 추가 사용량(`quota.rs::omp_extra_usage`): omp 사용량 보고의 `anthropic:extra` 항목(`amount.unit="usd"`, `used`, 선택 `limit`, `status`)을 `Account.extra_usage{enabled,used_usd,limit_usd,observed_at}`로 읽어 Claude 계정에 붙인다. omp는 켜져 있고 USD일 때만 이 항목을 내보내므로 항목이 없으면 "켜졌다고 보지 않음"이다. USD 항목은 `omp_buckets`가 건너뛰어 percent 버킷이 되지 않는다(소진 판정에 섞이지 않음). 음수·잘못된 금액·`limit<=0`은 무시, 항목이 `exhausted`면 쓸 수 없는 것으로 본다. 켜진 상태는 이 Mac에서 관측한 적 없고 omp `claude.ts` 소스의 필드 형태 기준이다(미관측).
+- Claude 구독 한도: 신선한 omp 관측이 없으면 등록된 공식 프로필에서 `/usage`를 safe mode·도구/MCP 비활성화·세션 저장 없이 조회한다. 구독 인증(`apiKeySource=none`), 성공한 로컬 명령(`num_turns=0`), 구조화된 `limits` 배열을 모두 확인하고 조회 뒤 identity를 다시 검증한다. 캐시된 본문만 있거나 조회·identity 검증이 실패하면 이전 관측 시각을 갱신하지 않고 `NATIVE_USAGE_UNAVAILABLE`로 알린다. omp에 같은 계정을 다시 로그인할 필요가 없으며, 토큰 갱신은 공식 CLI가 담당한다. 기존 omp 버킷 ID를 이어 사용한다.
+- 실기기 대조: 동일 Claude 계정·workspace의 웹 사용량과 공식 CLI에서 5시간/주간/Fable 사용률이 각각 90/24/1%로 일치함을 확인했다. 웹은 사용률, Ojak은 잔여율(`100 - 사용률`)을 표시한다. 웹 화면도 캐시된 값과 마지막 갱신 시각을 표시하므로 같은 관측 시점끼리 비교하며, 리셋 시각은 브라우저와 OS 시간대 차이를 UTC로 정규화한다. 이 대조는 웹 로그인된 한 계정에 대한 검증이다.
 
 ## 안전 검사 (`src/safety.rs`)
 - 환경변수·설정 파일의 API key·base URL·token·auth helper를 찾으면 `AUTH_OVERRIDE_CONFLICT`. 메시지에는 환경변수 이름, 또는 설정 파일 경로와 키만 적고 값은 적지 않는다. 이 터미널에서 변수를 해제하거나 해당 파일에서 키를 제거하라고 안내한다. 자동으로 고치지 않는다.

@@ -59,8 +59,10 @@ pub(crate) fn provider_id(raw: &str) -> &'static str {
 }
 
 pub(crate) fn report_identity(report: &Value) -> Option<String> {
-    let meta = report.get("metadata")?;
-    let provider = text(report, "provider")?;
+    identity_from_metadata(&text(report, "provider")?, report.get("metadata")?)
+}
+
+pub(crate) fn identity_from_metadata(provider: &str, meta: &Value) -> Option<String> {
     let subject = text(meta, "accountId").or_else(|| text(meta, "subject"));
     let workspace = text(meta, "orgId")
         .or_else(|| text(meta, "organizationId"))
@@ -223,6 +225,100 @@ pub(crate) fn omp_buckets(report: &Value, identity: &str) -> Vec<QuotaBucket> {
     buckets
 }
 
+/// 공식 Claude CLI `/usage`에서 얻은 버킷의 출처. `OMP usage` 접두어와 구분한다.
+pub(crate) const CLAUDE_USAGE_SOURCE: &str = "Claude /usage · 공식 CLI 조회 시각";
+
+/// `claude -p /usage --output-format stream-json --verbose`가 낸 이벤트에서 구독 한도를 읽는다.
+/// 이벤트 계약(설치된 2.1.295 실측): `system/init.apiKeySource`가 `none`(구독 로그인만), 결과 이벤트가
+/// `is_error=false`·`num_turns=0`(추론 없음), `assistant.usage_report.rate_limits.limits`가 배열.
+/// 네트워크 조회가 실패하면 CLI가 본문 텍스트에는 캐시된 값을 보여 주지만 `limits`는 null이므로,
+/// 구조화된 `limits`가 배열일 때만 관측으로 인정한다. 하나라도 어긋나면 빈 목록을 돌려준다(관측 없음).
+/// `id_of(upstream_id)`는 같은 한도의 안정적인 버킷 ID를 만드는 호출자 몫이다.
+pub(crate) fn claude_usage_buckets(
+    events: &[Value],
+    observed_at: i64,
+    mut id_of: impl FnMut(&str) -> String,
+) -> Vec<QuotaBucket> {
+    let subscription_only = events.iter().any(|event| {
+        event.get("type").and_then(Value::as_str) == Some("system")
+            && event.get("subtype").and_then(Value::as_str) == Some("init")
+            && event.get("apiKeySource").and_then(Value::as_str) == Some("none")
+    });
+    let clean_result = events.iter().any(|event| {
+        event.get("type").and_then(Value::as_str) == Some("result")
+            && event.get("is_error").and_then(Value::as_bool) == Some(false)
+            && event.get("num_turns").and_then(Value::as_u64) == Some(0)
+    });
+    let limits = events.iter().find_map(|event| {
+        (event.get("type").and_then(Value::as_str) == Some("assistant")
+            && event["local_command_run"]["command"].as_str() == Some("usage"))
+        .then(|| event["usage_report"]["rate_limits"]["limits"].as_array())
+        .flatten()
+    });
+    let (true, true, Some(limits)) = (subscription_only, clean_result, limits) else {
+        return Vec::new();
+    };
+    let mut buckets: Vec<QuotaBucket> = Vec::new();
+    for limit in limits {
+        let Some(used) = limit.get("percent").and_then(Value::as_f64).and_then(percent) else {
+            continue;
+        };
+        let (upstream, label, period, model): (String, String, &str, Option<String>) =
+            match limit.get("kind").and_then(Value::as_str) {
+                Some("session") => ("anthropic:5h".into(), "Claude 5 Hour".into(), "5시간", None),
+                Some("weekly_all") => ("anthropic:7d".into(), "Claude 7 Day".into(), "주간", None),
+                Some("weekly_scoped") if limit["scope"]["surface"].is_null() => {
+                    let Some(name) = text(&limit["scope"]["model"], "display_name") else {
+                        continue;
+                    };
+                    let model = name.to_ascii_lowercase();
+                    if !["fable", "sonnet", "opus", "haiku"].contains(&model.as_str()) {
+                        continue;
+                    }
+                    let label = if model == "fable" {
+                        "Fable".to_owned()
+                    } else {
+                        format!("Claude 7 Day ({name})")
+                    };
+                    (format!("anthropic:7d:{model}"), label, "주간", Some(model))
+                }
+                _ => continue,
+            };
+        let label = format!("{label} · {period}");
+        let label = if model.as_deref() == Some("fable") { "Fable 주간".to_owned() } else { label };
+        let id = id_of(&upstream);
+        if buckets.iter().any(|bucket| bucket.id == id) {
+            continue;
+        }
+        let resets_at = limit
+            .get("resets_at")
+            .and_then(Value::as_str)
+            .and_then(|value| {
+                time::OffsetDateTime::parse(value, &time::format_description::well_known::Rfc3339).ok()
+            })
+            .and_then(|at| i64::try_from(at.unix_timestamp_nanos() / 1_000_000).ok())
+            .filter(|at| *at > 0);
+        let status = if resets_at.is_some_and(|reset| reset <= observed_at) {
+            "stale"
+        } else if used >= 100.0 {
+            "exhausted"
+        } else {
+            "known"
+        };
+        buckets.push(QuotaBucket {
+            id,
+            label,
+            model,
+            used_percent: Some(used),
+            resets_at,
+            observed_at,
+            source: CLAUDE_USAGE_SOURCE.into(),
+            status: status.into(),
+        });
+    }
+    buckets
+}
+
 pub(crate) fn codex_buckets(result: &Value, identity: &str, observed_at: i64) -> Vec<QuotaBucket> {
     let mut buckets = Vec::new();
     let mut scopes = Vec::new();
@@ -374,6 +470,65 @@ mod tests {
             buckets[0].id,
             omp_buckets(&report, "subject-b|workspace-b")[0].id
         );
+    }
+    fn usage_events(limits: Value) -> Vec<Value> {
+        vec![
+            json!({"type":"system","subtype":"init","apiKeySource":"none"}),
+            json!({"type":"assistant","local_command_run":{"command":"usage","args":""},"usage_report":{"session":{},"rate_limits":{"limits":limits,"extra_usage":{"is_enabled":false}}}}),
+            json!({"type":"result","subtype":"success","is_error":false,"num_turns":0}),
+        ]
+    }
+    #[test]
+    fn claude_usage_shares_omp_bucket_ids_and_keeps_provider_reset_times() {
+        let observed = now_ms();
+        let events = usage_events(json!([
+            {"kind":"session","group":"session","percent":37,"resets_at":"2099-01-01T05:00:00.000000+00:00","scope":null},
+            {"kind":"weekly_all","group":"weekly","percent":100,"resets_at":"2099-01-02T00:00:00+00:00","scope":null},
+            {"kind":"weekly_scoped","group":"weekly","percent":40,"resets_at":"2099-01-02T00:00:00+00:00","scope":{"model":{"display_name":"Fable"},"surface":null}},
+            {"kind":"weekly_scoped","group":"weekly","percent":10,"resets_at":"2099-01-02T00:00:00+00:00","scope":{"model":null,"surface":"cowork"}},
+            {"kind":"session","percent":"not a number"}
+        ]));
+        let buckets = claude_usage_buckets(&events, observed, |upstream| {
+            stable_id(&["omp", "anthropic", "subject|workspace", upstream])
+        });
+        assert_eq!(buckets.len(), 3);
+        let report = json!({"provider":"anthropic","fetchedAt":observed,"limits":[
+            {"id":"anthropic:5h","label":"Claude 5 Hour","window":{"id":"5h","durationMs":18000000,"resetsAt":observed+1},"amount":{"usedFraction":0.1},"status":"ok"},
+            {"id":"anthropic:7d","label":"Claude 7 Day","window":{"id":"7d","durationMs":604800000,"resetsAt":observed+1},"amount":{"usedFraction":0.1},"status":"ok"},
+            {"id":"anthropic:7d:fable","label":"Fable","scope":{"modelId":"fable"},"window":{"id":"7d","durationMs":604800000,"resetsAt":observed+1},"amount":{"usedFraction":0.1},"status":"ok"}
+        ]});
+        let omp = omp_buckets(&report, "subject|workspace");
+        for (native, upstream) in buckets.iter().zip(&omp) {
+            assert_eq!(native.id, upstream.id);
+            assert_eq!(native.label, upstream.label);
+            assert_eq!(native.model, upstream.model);
+        }
+        assert_eq!(buckets[0].used_percent, Some(37.0));
+        assert_eq!(buckets[0].status, "known");
+        assert_eq!(buckets[0].observed_at, observed);
+        assert_eq!(buckets[0].source, CLAUDE_USAGE_SOURCE);
+        assert!(buckets[0].resets_at.is_some_and(|reset| reset > observed));
+        assert_eq!(buckets[1].status, "exhausted");
+        assert_eq!(buckets[2].model.as_deref(), Some("fable"));
+    }
+    #[test]
+    fn claude_usage_without_structured_limits_or_subscription_proof_is_no_observation() {
+        let id = |upstream: &str| upstream.to_owned();
+        let limits = json!([{"kind":"session","percent":5,"resets_at":"2099-01-01T05:00:00+00:00","scope":null}]);
+        // 네트워크 실패 시 CLI는 캐시된 본문 텍스트만 주고 구조화된 limits는 null이다. 그 값은 관측이 아니다.
+        assert!(claude_usage_buckets(&usage_events(json!(null)), now_ms(), id).is_empty());
+        let mut api_key = usage_events(limits.clone());
+        api_key[0]["apiKeySource"] = json!("ANTHROPIC_API_KEY");
+        assert!(claude_usage_buckets(&api_key, now_ms(), id).is_empty());
+        let mut errored = usage_events(limits.clone());
+        errored[2]["is_error"] = json!(true);
+        assert!(claude_usage_buckets(&errored, now_ms(), id).is_empty());
+        let mut inferred = usage_events(limits);
+        inferred[2]["num_turns"] = json!(1);
+        assert!(claude_usage_buckets(&inferred, now_ms(), id).is_empty());
+        // 이미 지난 리셋 시각의 값은 새 관측이어도 known으로 두지 않는다.
+        let past = usage_events(json!([{"kind":"session","percent":50,"resets_at":"2001-01-01T00:00:00+00:00","scope":null}]));
+        assert_eq!(claude_usage_buckets(&past, now_ms(), id)[0].status, "stale");
     }
     #[test]
     fn missing_observation_never_becomes_fresh_zero() {

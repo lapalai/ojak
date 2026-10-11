@@ -150,6 +150,26 @@ fn restore_state(paths: &Paths, state: &BTreeMap<String, String>) -> Result<(), 
     }
     Ok(())
 }
+fn ensure_launcher_released(install_dir: &Path) -> Result<(), ApiError> {
+    let path = install_dir.join("aam.exe");
+    // NSIS runs a temporary helper. A direct internal CLI call cannot wait for itself.
+    if launcher()? == path { return Ok(()); }
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
+    loop {
+        match fs::OpenOptions::new().write(true).open(&path) {
+            Ok(_) => return Ok(()),
+            Err(failure) if failure.kind() == std::io::ErrorKind::NotFound => return Ok(()),
+            Err(failure) if matches!(failure.raw_os_error(), Some(32 | 33)) => {
+                if std::time::Instant::now() >= deadline {
+                    return Err(error("INSTALLER_FILES_BUSY", "Ojak 실행 파일을 쓰는 프로그램이 남아 있어요. 열려 있는 omp와 Ojak 명령을 종료한 뒤 다시 시도해 주세요. 앱 실행 파일은 바꾸지 않았어요."));
+                }
+                std::thread::sleep(std::time::Duration::from_millis(50));
+            }
+            Err(failure) => return Err(io_error(failure)),
+        }
+    }
+}
+
 pub(super) fn run(paths: &Paths, action: &str, install_dir: &Path) -> Result<(), ApiError> {
     let install_dir = directory(install_dir)?;
     match action {
@@ -165,6 +185,7 @@ pub(super) fn run(paths: &Paths, action: &str, install_dir: &Path) -> Result<(),
                     return Err(error("FOREIGN_INSTALL", "다른 설치가 관리하는 서비스는 중지하지 않습니다."));
                 }
             }
+            ensure_launcher_released(&install_dir)?;
             private_dir(&paths.home)?;
             let backup = paths.home.join(BACKUP);
             // Exclusive creation prevents two installers from sharing or overwriting a transaction.
@@ -237,6 +258,7 @@ pub(super) fn run(paths: &Paths, action: &str, install_dir: &Path) -> Result<(),
         "remove" => {
             // NSIS는 `aam installer remove`를 부른다. 바이너리가 deactivate::run으로 broker 블록을
             // 먼저 지운 뒤에 이 단계로 앱 자동 실행만 지운다. 여기서 서비스를 먼저 끄면 omp 로그인이 깨진다.
+            ensure_launcher_released(&install_dir)?;
             super::remove_app_autostart(&install_dir)
         }
         _ => Err(error("INVALID_ARGUMENT", "지원하지 않는 설치 단계입니다.")),
@@ -259,6 +281,23 @@ mod tests {
         }
     }
     impl Drop for Fixture { fn drop(&mut self) { let _ = fs::remove_dir_all(&self.root); } }
+    #[test]
+    fn locked_launcher_blocks_update_before_creating_recovery_state() {
+        use std::os::windows::fs::OpenOptionsExt;
+        let fixture = Fixture::new();
+        let executable = fixture.app.join("aam.exe");
+        fs::write(&executable, b"original launcher").unwrap();
+        let held = fs::OpenOptions::new().read(true).share_mode(0).open(&executable).unwrap();
+        let failure = run(&fixture.paths, "prepare", &fixture.app).unwrap_err();
+        assert_eq!(failure.code, "INSTALLER_FILES_BUSY");
+        assert!(!fixture.paths.home.join(RECEIPT).exists());
+        assert!(!fixture.paths.home.join(BACKUP).exists());
+        drop(held);
+        assert_eq!(fs::read(&executable).unwrap(), b"original launcher");
+        run(&fixture.paths, "prepare", &fixture.app).unwrap();
+        run(&fixture.paths, "recover", &fixture.app).unwrap();
+        assert_eq!(fs::read(&executable).unwrap(), b"original launcher");
+    }
     #[test]
     fn interrupted_pair_replacement_restores_originals_without_enrolling_service() {
         let fixture = Fixture::new();

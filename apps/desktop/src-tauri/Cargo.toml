@@ -23,9 +23,12 @@ tauri-plugin-autostart = "2"
 libc.workspace = true
 rfd = "0.15"
 tauri-plugin-notification = "2"
+rusqlite = { version = "0.32", features = ["bundled"] }
+memchr = "2"
 
 [target.'cfg(target_os = "macos")'.dependencies]
 window-vibrancy = "0.6"
 
 [target.'cfg(windows)'.dependencies]
-windows-sys = { version = "0.59", features = ["Win32_Globalization"] }
+tauri-plugin-single-instance = "2"
+windows-sys = { version = "0.59", features = ["Win32_Globalization", "Win32_System_Threading"] }

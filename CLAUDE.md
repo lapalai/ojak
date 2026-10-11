@@ -25,6 +25,7 @@ macOS 전용. Claude Code·Codex·omp 여러 구독 계정을 한 사용자 안�
 - omp 공급자 ID 표(`ojak-*`, 이전 `aam-*`)는 `service/src/bridge.rs`, `integrations/omp/aam-accounts.js`, `launcher/src/omp_bridge.rs`, `apps/desktop/src/state.ts`(providerAliases·directProviders), `apps/desktop/src/ConnectionsView.tsx`(bridgeProviderOrder)를 함께 바꾼다.
 - `logs/bridge.log` 줄 형식을 바꾸면 `apps/desktop/src-tauri/src/main.rs`의 파서도 고친다.
 - 비밀(token, 이메일, 프롬프트)을 로그·오류·진단 내보내기에 넣지 않는다.
+- 기능·버그 수정·UI/문구·인증·설치/업데이트 동작을 바꿔 사용자 설치본에 반영할 때는 **로컬 설치도 예외 없이 버전을 올린다**. 공개 버전과 같은 번호로 수정본을 설치하거나 배포하지 않는다. `node scripts/bump-version.mjs x.y.z`로 앱·CLI·서비스 버전을 함께 올리고 lockfile·CHANGELOG도 갱신한다. 기능 추가는 minor, 수정은 최소 patch다. Mac 반영·Windows 반영·공개 배포 여부를 따로 보고하고, 두 OS 검증 전 배포 완료라고 하지 않는다. 상세 게이트는 `docs/release-policy.md`를 따른다.
 
 ## 배포 (이 Mac)
 설치본 `~/Applications/Ojak.app`을 교체한 뒤 `launchctl kickstart -k gui/$(id -u)/ai.aam.service` → `aam integration install` → 필요 시 `aam omp-bridge connect`. 서비스 재시작은 실행 중인 omp 브릿지 세션에 영향을 줄 수 있다.

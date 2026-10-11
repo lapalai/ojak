@@ -131,6 +131,31 @@ fn read_owned<T: serde::de::DeserializeOwned>(path: &Path) -> Result<Option<T>, 
         })
 }
 
+/// A second app copy must not rewrite integrations owned by the installed helper.
+pub fn is_current_launcher(paths: &Paths) -> Result<bool, ApiError> {
+    #[derive(Deserialize)]
+    #[serde(rename_all = "camelCase")]
+    struct ManagedService {
+        owner: String,
+        binary_path: PathBuf,
+    }
+    let expected = if let Some(record) = read_owned::<ManagedService>(&paths.home.join("service-install.json"))? {
+        if record.owner != OWNER {
+            return Err(error("FOREIGN_INSTALL", "다른 프로그램의 서비스 연결은 바꾸지 않아요."));
+        }
+        record.binary_path.with_file_name(if cfg!(windows) { "aam.exe" } else { "aam" })
+    } else if let Some(record) = read_owned::<Integration>(&paths.home.join("integration.json"))? {
+        if record.owner != OWNER {
+            return Err(error("FOREIGN_INSTALL", "다른 프로그램의 명령 연결은 바꾸지 않아요."));
+        }
+        record.launcher_path
+    } else {
+        return Ok(false);
+    };
+    let current = std::env::current_exe().and_then(fs::canonicalize).map_err(io_error)?;
+    Ok(expected.canonicalize().is_ok_and(|path| path == current))
+}
+
 fn atomic_write(path: &Path, bytes: &[u8]) -> Result<(), ApiError> {
     if fs::symlink_metadata(path).is_ok_and(|meta| meta.file_type().is_symlink()) {
         return Err(error("UNSAFE_PATH", "바로가기는 바꾸지 않아요."));
@@ -164,7 +189,7 @@ fn save(path: &Path, value: &impl Serialize) -> Result<(), ApiError> {
     )
 }
 
-pub(crate) fn native_program(path: &Path) -> Result<PathBuf, ApiError> {
+pub fn native_program(path: &Path) -> Result<PathBuf, ApiError> {
     let path = fs::canonicalize(path)
         .map_err(|_| error("BINARY_MISSING", "공식 실행 파일이 없어요."))?;
     let metadata = fs::metadata(&path).map_err(io_error)?;
@@ -965,5 +990,32 @@ mod windows_tests {
         assert_eq!(aam_protocol::winutil::file_owner_sid(&path).unwrap(), sid);
         assert!(read_owned::<serde_json::Value>(&path).unwrap().is_some());
         fs::remove_dir_all(&dir).unwrap();
+    }
+}
+
+#[cfg(test)]
+mod launcher_ownership_tests {
+    use super::*;
+
+    #[test]
+    fn maintenance_requires_the_current_owned_installation() {
+        let home = std::env::temp_dir().join(format!("aam-current-install-{}", aam_protocol::new_id()));
+        private_dir(&home).unwrap();
+        let paths = Paths { socket: home.join("socket"), database: home.join("unused.sqlite3"), profiles: home.join("profiles"), home: home.clone() };
+        assert!(!is_current_launcher(&paths).unwrap());
+        let mut record = Integration {
+            owner: OWNER.into(), version: INTEGRATION_VERSION,
+            launcher_path: std::env::current_exe().unwrap(),
+            native_binaries: BTreeMap::new(), shims: vec![],
+        };
+        save(&home.join("integration.json"), &record).unwrap();
+        assert!(is_current_launcher(&paths).unwrap());
+        save(&home.join("service-install.json"), &json!({"owner": OWNER, "binaryPath": home.join("another-install/aam-service.exe")})).unwrap();
+        assert!(!is_current_launcher(&paths).unwrap());
+        fs::remove_file(home.join("service-install.json")).unwrap();
+        record.owner = "not-ojak".into();
+        save(&home.join("integration.json"), &record).unwrap();
+        assert_eq!(is_current_launcher(&paths).unwrap_err().code, "FOREIGN_INSTALL");
+        fs::remove_dir_all(home).unwrap();
     }
 }

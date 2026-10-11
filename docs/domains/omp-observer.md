@@ -15,6 +15,7 @@ omp 확장이 세션마다 스냅샷을 `<AAM_HOME>/omp-observations/<pid>-<sha2
 - `AAM_HOME`이 바뀌면 설치된 확장 해시가 달라져 "최신 아님"으로 보인다. 다시 설치하면 된다.
 - 수정된 기존 파일·symlink 충돌은 덮어쓰지 않는다.
 - Windows는 JS의 Unix uid 검사 대신 `omp_observer_writer.rs`의 native writer가 현재 사용자 ACL·단일 링크 일반 파일·재분석 지점 여부와 부모 프로세스 identity를 검사하고 원자적으로 스냅샷을 쓴다. 실패하면 성공 스냅샷으로 취급하지 않는다.
+- 새 관측 확장은 설치된 자신의 진입 파일을 감시한다. 확장이 제거·교체되면 timer와 추가 관측을 멈추고 진행 중인 쓰기를 마친 뒤 writer의 실제 `close`까지 기다린다. `session_shutdown`도 같은 방식으로 실행 파일 핸들을 해제한다. 이미 실행 중인 구버전 확장은 omp를 다시 열거나 reload해야 이 동작이 적용된다.
 - 외부 세션 파일은 실제 OMP 프로세스의 열린 쓰기 핸들로 확인한다. 파일명·mtime·observer의 경로 선언만으로 열린 세션을 추정하지 않는다. 아직 저장 파일이 없는 새 대화는 프로세스만 관측될 수 있다.
 
 ## 요청 경로 관측
@@ -24,7 +25,7 @@ omp 확장이 세션마다 스냅샷을 `<AAM_HOME>/omp-observations/<pid>-<sha2
 - Rust는 `customType === "aam-route"`만 별도 파싱한다. 서비스 재시작이나 확장 스냅샷 만료 후에도 세션 파일의 경로 근거를 복원한다. 기존 읽기·행 수 제한은 유지한다.
 - 완료 메시지의 provider는 gateway의 upstream 이름일 수 있다. `message_end`·`model_usage`·과거 기록에 경로가 없으면 미경유로 추정하지 않는다. 경로 기록과 완료 기록을 시각이나 폴더로 억지 연결하지 않는다.
 - 연결 내역·경로 확인 불가 경고는 명시적인 `route: direct|unknown` 관측만 표시한다. `route: bridge`는 브릿지 사용량에서 다루고, 경로가 없는 완료·보조 호출·모델 선택 기록은 연결 상태 판정에서 제외한다. 따라서 Ojak 경유 응답에 upstream 공급자 이름이 남아도 별도의 “확인 필요” 행을 만들지 않는다. 구형 기록의 경로는 여전히 알 수 없으며, 경고에서 제외한다고 경유로 확정하는 것은 아니다.
-- 확장 갱신: 새 `aam`으로 `aam omp-observer uninstall` → `aam omp-observer install`. 실행 중인 omp는 유지되며, 새 omp 실행 또는 확장 reload 후 새 요청부터 관측한다. 과거 경로는 소급 생성하지 않는다.
+- 확장 갱신: 앱을 열면 현재 설치본이 소유한 기존 확장을 자동으로 맞춘다(`aam integration refresh-extensions`). 수동으로는 새 `aam`으로 `aam omp-observer uninstall` → `aam omp-observer install`. 실행 중인 omp는 강제 종료하지 않으며, 새 omp 실행 또는 확장 reload 후 새 요청부터 새 관측 코드가 동작한다. 과거 경로는 소급 생성하지 않는다.
 
 
 ## Screen Flow / Lifecycle
@@ -93,7 +94,6 @@ graph LR
 
 ### 이슈
 - [medium] Function: Stale snapshots are never removed. The JS writes `<pid>-<sha256(sessionId)>.json` for every process and session (aam-observer.js:49-81), and nothing in integrations/ or crates/ deletes them: `omp-observations` appears on
-- [medium] Example: The installer's safety rules have no Rust tests: receipt owner/sha256 check, symlink ancestor rejection, the rule that a modified file is never overwritten, and the staging re-verification on uninstall. See omp_extension
 - [low] Function: Tauri command `omp_observer_action` (apps/desktop/src-tauri/src/main.rs:427, :998) has no frontend invoker under apps/desktop/src. docs/spec.md:155 says install is CLI-only, while docs/spec.md:572 says it happens on the 
 - [low] Function: Schema limits have almost no headroom. Rust accepts at most 16 issues (observed_metadata.rs:531), and the JS can already emit 15 distinct codes (4 BASE_ISSUES at aam-observer.js:19 plus 11 conditional ones). One new issu
 - [low] Function: Upgrading is inconsistent. `aam omp-observer install` on an outdated copy returns an error asking for uninstall then install (omp_extension.rs:199-201). The omp_bridge flow instead auto-reinstalls (omp_bridge.rs:250-251)
@@ -101,7 +101,6 @@ graph LR
 
 ### 다음 할 일
 - [ ] Function: skip the useless 'shutdown' write, or unlink the owned snapshot on session_shutdown (aam-observer.js:292-302). Add best-effort pruning of snapshots whose pid has exited, or that are older than FRESH_MS, to the adapters read path or the service.
-- [ ] Example: add #[cfg(test)] for omp_extension.rs covering install → inspect(current) → modified index.js refused → symlink ancestor refused → uninstall staging verify, using a temp PI_CODING_AGENT_DIR.
 - [ ] Function: either wire `omp_observer_action` into the connection screen or remove the Tauri command, then reconcile docs/spec.md:155 with :572.
 - [ ] Function: raise the Rust issue cap (observed_metadata.rs:531) or define the issue enum in one shared place, so the JS and Rust limits cannot drift.
 - [ ] Function: add doc comments to ObservedScan, omp_observer::run and omp_extension inspect/install/uninstall. Document the v1 snapshot schema in docs/domains/omp-observer.md, with field table and limits (calls ≤64, pins/providers ≤32, 64KiB/128KiB, 90s freshness).

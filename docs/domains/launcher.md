@@ -25,6 +25,15 @@ shim → `route.resolve` → `lease.acquire`(PREPARED) → 실행 계획·identi
 ## 연결 확장 (`extend_integration`)
 - 설치 스크립트는 계정이 없을 때 `aam integration install`을 돌리므로 그때는 `aam` shim만 생긴다. 계정 등록이 끝나면(`aam account login`·`aam account add`·앱의 `account.register`) 연결 기록(integration.json)이 있을 때만 `aam integration extend --tool <도구>`로 새로 실행 가능해진 도구의 shim을 더한다. 서비스 시작 직후 도구 탐지가 끝나지 않았으면 최대 20초 기다린다. 연결을 설치한 적이 없으면 아무것도 바꾸지 않는다.
 
+## 앱 로그인 작업 (`src/provider_login.rs`, `aam provider-login`)
+- 앱(Tauri)이 시작하는 숨은 하위 명령. `--provider anthropic|openai-codex|xai-oauth|google-antigravity [--account <Ojak 계정 ID> | --label <이름> [--settings-digest <d>]]`. stdout은 한 줄에 JSON 하나이고 매번 전체 상태 `{state,accountId,identity,error,sync}`다. 끝나는 줄은 정확히 하나(succeeded|failed|canceled)이며 종료 코드는 0/1/130. 인증 주소·토큰·omp 원문 오류는 출력하지 않는다. `state`: starting → waiting → verifying → syncing → 끝.
+- 취소: stdin 닫힘(앱 종료·충돌 포함), `{"type":"cancel"}` 한 줄, SIGTERM. 이 작업이 시작한 프로세스 그룹(Windows는 kill-on-close Job)만 SIGTERM→3초→SIGKILL로 끝내고, 아직 등록하지 않은 새 프로필만 지운다. 등록(`account.register`)이 끝난 뒤의 취소는 프로필과 로그인을 그대로 두고 취소만 알린다.
+- Claude·Codex: 공식 `claude auth login`·`codex login`을 격리 프로필에서 연다(`enrollment_plan`/`relogin_plan` 재사용). 등록 전에 공식 CLI로 확인한 identity가 대상 계정과 다르면 `ACCOUNT_MISMATCH`로 끝내고 등록하지 않는다. 만료된 omp 전용 계정(`tool=omp`)을 고르면 omp 계정 ID를 native ID로 쓰지 않고 새 관리 프로필에 로그인한 뒤 `aam_adapters::same_login`(이메일 + 워크스페이스)으로만 대조한다.
+- xAI·Gemini: `omp --mode rpc --no-ui`를 자식으로 띄워 `{"type":"login","providerId":…}`를 보낸다(문서화된 RPC 로그인). omp가 `open_url`로 준 주소는 https와 공급자 허용 호스트(xAI `x.ai`·`grok.com`, Google `accounts.google.com`, 포트·userinfo 없음)일 때만 기본 브라우저로 연다. 끝나면 broker 스냅샷에서 이번 로그인 이후(`authorizedAt`)의 비밀 없는 항목 하나를 `omp_credential_identity`로 identity로 바꿔 확인하고, 다시 로그인이면 대상 omp 관측 계정의 identity와 같을 때만 성공한다.
+- 성공은 반영 확인 뒤에만: `quota.refresh` 완료 시각이 로그인 뒤여야 한다. native는 `authenticated`·`canLaunch`·`preflight-verified`를 모두 요구하고, omp는 이번에 로그인한 identity와 일치하며 인증 오류 없이 로그인 뒤 관측된 `OMP usage` 한도가 있어야 한다. 브릿지가 켜져 있으면 해당 게이트웨이(`bridge.status`의 `gateways[].accountKey`)가 실행 중일 때 `sync: synced`. 브릿지를 꺼 둔 경우 `sync: disabled`. 150초 안에 못 맞추면 `LOGIN_SYNC_TIMEOUT`(로그인은 저장됨).
+- 오류 코드: `ACCOUNT_MISMATCH`, `LOGIN_TIMEOUT`(10분), `LOGIN_FAILED`, `LOGIN_SYNC_TIMEOUT`, `OMP_LOGIN_UNVERIFIED`, `OMP_SYNC_UNAVAILABLE`, `BROWSER_OPEN_FAILED`, `ACCOUNT_NOT_FOUND`, `INVALID_PARAMS`, `PLATFORM_UNSUPPORTED` 및 어댑터 코드(`BINARY_MISSING`, `AUTH_OVERRIDE_CONFLICT`, `AUTH_REQUIRED`, `IDENTITY_UNVERIFIED`).
+- macOS 실검증: 네 공급자의 공식 로그인 시작·취소, 미등록 Claude 프로필 정리, 설치된 앱의 대기 표시·창 닫기 후 재연결·취소 결과를 확인했다. Claude 공식 승인 화면까지 도달했으나 브라우저 계정이 대상과 다르고 승인 버튼이 비활성 상태여서, 새 OAuth 승인부터 성공·동기화까지의 종단 검증은 완료하지 못했다. 기존 native 프로필의 재로그인은 공식 CLI가 인증 파일을 먼저 갱신하므로, 다른 계정으로 로그인한 경우 등록을 거절해도 이전 인증 파일을 되돌리지는 않는다. 올바른 계정으로 다시 로그인해야 한다.
+
 ## 인수 검사 (`src/arguments.rs`)
 - 관리 실행은 허용 목록에 있는 옵션만 받는다. 인증·프로필·공급자·엔드포인트 옵션은 `AUTH_OVERRIDE_CONFLICT`. 확인하지 않은 옵션과 세션 선택기는 `NATIVE_OPTION_UNSUPPORTED`. 오류는 옵션·하위 명령 이름만 말하고 값은 출력하지 않는다. 데스크톱은 이 코드를 따로 분기하지 않고 메시지와 코드 문자열만 보여 준다.
 - 세션에 영향 없는 플래그(`--add-dir`, `--debug`, `--verbose`, `--search` 등)는 허용한다. `--bare`, `--mcp-config`, `--settings`(호스트 hook 제외), Codex `-c`/`--config`/`--oss`/`--profile`은 막는다. `--bg`처럼 계정 예약을 벗어날 수 있는 플래그도 막는다.
@@ -42,6 +51,8 @@ shim → `route.resolve` → `lease.acquire`(PREPARED) → 실행 계획·identi
 - shim은 Unix에서 `AAM_HOME/bin/{aam,claude,codex}` → 앱의 `aam` symlink, Windows에서 같은 이름의 `.cmd`다. `aam`은 계정이 없어도 만든다. 사용자 파일이 있으면 `SHIM_CONFLICT`로 멈춘다.
 - LaunchAgent `ai.aam.service`. `aam-service`는 `aam`과 같은 폴더에 있어야 한다.
 - zsh PATH 블록: `shell.rs` (`shell-integration.json`).
+- `aam integration refresh-extensions`는 현재 서비스 설치 기록(없으면 통합 기록)의 launcher와 같은 실행 파일일 때만 이미 설치한 omp 계정·관측 확장을 갱신한다. 소유권·기존 해시를 확인하고 수정된 파일은 거절한다. 누락된 확장을 새로 켜거나 계정·로그인·역할 모델 설정을 바꾸지 않는다.
+- 자동 확장 교체는 비검색 임시 디렉터리에서 새 파일·권한·소유 기록을 먼저 완성하고 검증한다. 기존 파일을 격리한 뒤 소스 해시를 다시 확인하고 새 디렉터리를 공개한다. 공개 실패 시 기존 파일을 되돌리며, 다른 프로세스가 설치 경로를 차지했으면 덮어쓰지 않고 복구 위치를 안내한다.
 - 통합 준비: `aam setup`은 누락된 서비스·shim·셸 설정을 설치하고 새 로그인 셸에서 명령을 확인한다. `--with-omp`는 동의한 사용자를 위해 기존 broker → bridge → observer 안전 설치 경로도 실행한다. 충돌은 중단하며 omp 단계 오류는 JSON `omp.error`에 남긴다. 설치 함수가 돌려준 성공 문장은 버리고, `주의:` 경고와 명령 확인 실패는 JSON `notices`에 단계·코드·다음 행동과 함께 남긴다.
 - `aam setup --status`는 설정 조회만 하며 셸 시작 파일을 실행하지 않는다. `--check`는 설치 없이 명령을 재검증한다. `configured`는 설정 파일 기준, `tools[].verified`는 실제 검사(true/false/null), `ready`는 명시적 검사 완료다. 기존 터미널·IDE·omp 세션 전환이나 실모델 요청 성공을 뜻하지 않는다. `notices`는 실패한 단계의 이유와 다음 행동이다.
 - Unix 명령 검사는 `$SHELL`의 `/bin/zsh`, `/bin/bash`, `/bin/sh` 로그인 셸에서 `command -v`가 관리 shim과 같은 파일인지(`-ef`, symlink 허용) 확인한다. 그 외 셸은 `unsupported-shell`로 지원 셸과 직접 넣을 PATH를 알린다. 상속 PATH의 Ojak 경로를 먼저 제거하며, 명령별 5초 제한 후 프로세스 그룹을 종료한다. 셸 출력은 버리고 구조화된 결과만 보고한다. 인수 없는 `aam`은 짧은 도움말을 출력한다. 사용법 오류는 빠진 인수·알 수 없는 명령처럼 종류와 사용법 틀만 알리고 입력 값은 출력하지 않는다. shim 경로는 바꾸지 않는다.
@@ -50,6 +61,7 @@ shim → `route.resolve` → `lease.acquire`(PREPARED) → 실행 계획·identi
 - `aam service restart` (`service_version::restart`): 같은 버전이면 아무것도 안 한다. 아니면 `service.prepareUninstall`(stop과 같은 lease 검사: 점유·불확실 lease가 있으면 `SESSION_BUSY`로 멈추고 아무것도 바꾸지 않음)으로 새 배정을 닫고 → macOS `launchctl kickstart -k`(`install::service_kickstart`: 앱이 설치한 기록·plist가 그대로일 때만) / Windows 기존 `service_restart`(안전 종료 + 기록된 실행 파일 시작) → 시작 시각이 바뀐 새 프로세스가 응답하면 `service.resumeAdmission` → 버전이 앱과 같은지 확인한다. 시작 실패 시 배정을 다시 열고 기존 서비스를 둔다. 새 프로세스를 20초 안에 확인하지 못하면 `SERVICE_NOT_READY`, 재시작했는데 버전이 다르면 `SERVICE_VERSION_STALE`. 시간 초과만으로 lease를 풀지 않는다.
 - macOS와 Windows 모두 `ompSupported: true`이며 같은 준비 흐름을 사용한다. 지원 여부와 실제 broker·bridge·observer 연결 완료는 별도 값이다.
 - Windows NSIS는 `installer prepare|finish|recover|remove`로 앱 소유 서비스의 활성·불확실 lease를 검사하고, 기존 실행 파일 백업 → 안전 종료 → 새 파일 hash 확인 → 서비스 재시작을 수행한다. 새 설치를 자동으로 서비스 등록하지 않으며, 실패하면 복구 기록을 보존하고 검증된 원본으로 복구한다. `remove`는 서비스를 끄기 전에 `aam deactivate`와 같은 순서로 omp bridge·broker·observer를 푼다. 앱이 만든 HKCU Run `Ojak`(로그인 자동 실행)만 지운다.
+- NSIS 제거 도우미는 설치 폴더가 아닌 임시 복사본으로 실행한다. 설치 전과 제거 후 `aam.exe`의 쓰기 핸들 획득으로 실행 파일 잠금을 확인하며 파일 내용은 쓰지 않는다. 공유 잠금이 5초 후에도 남으면 `INSTALLER_FILES_BUSY`로 멈추고 열려 있는 omp/Ojak 명령을 종료하도록 안내한다. 업데이트는 이 검사 전에 백업·종료 기록을 만들거나 서비스를 중지하지 않는다. 구버전 omp 프로세스를 임의로 죽이지 않는다.
 - Windows 업데이트·복구는 종료 permit에 대응하는 `service.cancelUninstall` RPC로 DB의 신규 배정 차단까지 해제한 뒤 설치 기록을 정리한다. 명시적인 `service install`과 앱의 서비스 재시작도 DB 배정을 재개하며, 앱의 재시작은 `service_stop`의 안전 검사를 거친다.
 
 ## 호스트 연결 (`src/hosts.rs`)

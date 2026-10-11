@@ -1,8 +1,11 @@
 import { useEffect, useState } from "react";
 import { ArrowUpRight, Cable, Download, RefreshCw, Server } from "lucide-react";
-import { assertOpened, exportDiagnostics, hostConnections, loginAccount, ompBridgeAction, ompBrokerAction, stopService, toApiError } from "./api";
+import { exportDiagnostics, hostConnections, ompBridgeAction, ompBrokerAction, stopService, toApiError } from "./api";
 import type { OmpBridgeStatus, OmpBrokerStatus } from "./api";
 import { ActionFeedback, Badge, Busy, Dot, ErrorMessage, Modal } from "./components";
+import { ProviderLoginDialog, loginProviderNames } from "./LoginDialog";
+import { loginProviderOf } from "./login";
+import type { LoginProvider, LoginRequest } from "./login";
 import { absoluteTime, bucketState, canonicalProvider, nextReset, occupiedStates, privacyText, providerNames, relativeTime, toolNames, useAction } from "./state";
 import type { Account, AccountQuotaSummary, ApiError, HostConnections, Snapshot } from "./types";
 import { hostNote, t } from "./i18n";
@@ -25,7 +28,8 @@ function providerStatus(upstream: string, providers: string[], gateways: { provi
 }
 
 
-function OmpPanel({ masked, accounts }: { masked: boolean; accounts: Account[] }) {
+function OmpPanel({ masked, accounts, online, onReload }: { masked: boolean; accounts: Account[]; online: boolean; onReload: () => Promise<void> }) {
+  const [login, setLogin] = useState<LoginRequest | null>(null);
   const [broker, setBroker] = useState<OmpBrokerStatus | null>(null);
   const [bridge, setBridge] = useState<OmpBridgeStatus | null>(null);
   const [statusError, setStatusError] = useState<ApiError | null>(null);
@@ -72,14 +76,16 @@ function OmpPanel({ masked, accounts }: { masked: boolean; accounts: Account[] }
   return <div className="panel">
     <header><Dot color="var(--accent)" /><h2>omp</h2><Badge tone={connected ? "good" : partial ? "warning" : "neutral"}>{connected ? t("status.connected") : partial ? t("status.partial") : broker === null && !statusError ? t("common.checking") : t("status.disconnected")}</Badge></header>
     <div className="steps">
-      <div className="step"><div className="t"><Badge tone={storeReady ? "good" : "neutral"}>{storeReady ? t("step.done") : t("step.required")}</Badge>{t("omp.store")}</div><p>{storeReady ? <>{t("omp.store.readyBefore")}<code>/login</code>{t("omp.store.readyAfter")}</> : broker?.connected ? t("omp.store.noAccounts") : t("omp.store.notConnected")}</p></div>
+      <div className="step"><div className="t"><Badge tone={storeReady ? "good" : "neutral"}>{storeReady ? t("step.done") : t("step.required")}</Badge>{t("omp.store")}</div><p>{storeReady ? t("omp.store.ready") : broker?.connected ? t("omp.store.noAccounts") : t("omp.store.notConnected")}</p></div>
       <div className="step"><div className="t"><Badge tone={loginReady ? "good" : "neutral"}>{loginReady ? t("step.done") : t("step.required")}</Badge>{t("omp.login")}</div><p>{loginReady ? <>{t("omp.login.readyBefore")}<code>/model</code>{t("omp.login.readyAfter")}{ojakLogins > 0 ? t("omp.login.count", { count: ojakLogins }) : t("omp.login.none")}</> : t("omp.login.notReady")}</p>{loginReady && broker && <ul className="field-help">{bridgeProviderOrder.map(upstream => <li key={upstream}>{providerStatus(upstream, availableProviders, gateways)}</li>)}</ul>}</div>
       <div className="step"><div className="t"><Badge tone={running > 0 ? "good" : "neutral"}>{running > 0 ? t("step.done") : t("step.waiting")}</Badge>{t("omp.gateways", { count: gateways.length })}</div><p>{gateways.length ? <>{counts.map(([name, count]) => `${name} ${count}`).join(", ")}. {running === gateways.length ? t("omp.gateways.allRunning") : t("omp.gateways.stopped", { count: gateways.length - running })}</> : t("omp.gateways.pending")}</p></div>
     </div>
     {bridge?.bridge?.error && <p className="gate-reason" role="alert">{privacyText(bridge.bridge.error, masked)}</p>}
     {bridge?.bridge?.blocks.length ? <p className="gate-reason">{t("omp.blocked", { list: bridge.bridge.blocks.map(block => t("omp.blockEntry", { who: masked ? t("privacy.accountHidden") : block.email, scope: block.scope ? ` ${block.scope}` : "", reason: block.reason, until: absoluteTime(block.until) })).join(", ") })}</p> : null}
     <div className="row-actions"><span className="hint">{t("omp.hint")}</span><button type="button" className="button" disabled={action.pending} onClick={() => { void action.run(refresh, () => t("omp.refreshed")); }}><RefreshCw size={13} />{t("omp.recheck")}</button>{connected || (storeReady && loginReady) ? <><button type="button" className="button" disabled={action.pending} onClick={resync}>{t("omp.resync")}</button><button type="button" className="button" disabled={action.pending} onClick={disconnect}>{t("common.disconnect")}</button></> : <button type="button" className="button primary" disabled={action.pending || broker === null} onClick={connect}>{action.pending ? <Busy label={t("common.connecting")} /> : t("common.connect")}</button>}</div>
+    <div className="row-actions"><span className="hint">{t("omp.login.official")}</span>{(["xai-oauth", "google-antigravity"] as LoginProvider[]).map(provider => <button key={provider} type="button" className="button" disabled={!online || action.pending} onClick={() => setLogin({ provider })}>{t("omp.login.signIn", { provider: loginProviderNames[provider] })}</button>)}</div>
     <ActionFeedback error={action.error || statusError} message={action.message} />
+    {login && <ProviderLoginDialog request={login} accounts={accounts} online={online} onReload={onReload} onClose={() => setLogin(null)} />}
   </div>;
 }
 
@@ -97,15 +103,14 @@ function accountState(account: Account, staleAfter: number, summary?: AccountQuo
   return { label: t("account.ready"), tone: "good" };
 }
 
-function ToolPanel({ tool, snapshot, masked, online, shimInstalled, onAdd }: { tool: "claude" | "codex"; snapshot: Snapshot; masked: boolean; online: boolean; shimInstalled: boolean | null; onAdd: (tool: string) => void }) {
-  const action = useAction();
+function ToolPanel({ tool, snapshot, masked, online, shimInstalled, onAdd, onReload }: { tool: "claude" | "codex"; snapshot: Snapshot; masked: boolean; online: boolean; shimInstalled: boolean | null; onAdd: (tool: string) => void; onReload: () => Promise<void> }) {
+  const [login, setLogin] = useState<LoginRequest | null>(null);
   const status = snapshot.tools.find(item => item.id === tool);
   const accounts = snapshot.accounts.filter(account => account.tool === tool);
   const launchable = accounts.filter(account => account.canLaunch && account.enabled).length;
   const relogin = (account: Account) => {
-    void action.run(async () => {
-      assertOpened(await loginAccount(tool, account.label, null, account.id));
-    }, () => t("account.reloginOpened"));
+    const provider = loginProviderOf(account);
+    if (provider) setLogin({ provider, accountId: account.id, accountName: account.email ?? account.label, workspace: account.organization });
   };
   return <div className="panel">
     <header><Dot provider={tool === "claude" ? "anthropic" : "openai"} /><h2>{toolNames[tool]}</h2><Badge tone={launchable ? "good" : status?.installed ? "warning" : "neutral"}>{!status?.installed ? t("tool.notInstalled") : launchable ? t("status.connected") : accounts.length ? t("tool.noLaunchable") : t("tool.noAccounts")}</Badge></header>
@@ -113,11 +118,11 @@ function ToolPanel({ tool, snapshot, masked, online, shimInstalled, onAdd }: { t
       const state = accountState(account, snapshot.policy.staleAfterSeconds, snapshot.quotaSummaries?.find(summary => summary.accountIds.includes(account.id)));
       const needsLogin = !account.canLaunch && account.authStatus === "auth-required";
       const name = privacyText(account.label, masked);
-      return <tr key={account.id}><td>{account.email ? masked ? t("privacy.emailHidden") : account.email : t("account.noEmail")}</td><td className="muted" title={privacyText(account.reason, masked)}>{name}</td><td className="num"><Badge tone={state.tone}>{state.label}</Badge>{needsLogin && <button type="button" className="button" disabled={!online || action.pending || !status?.installed} aria-label={t("account.reloginAria", { name })} onClick={() => relogin(account)}>{t("account.relogin")}</button>}</td></tr>;
+      return <tr key={account.id}><td>{account.email ? masked ? t("privacy.emailHidden") : account.email : t("account.noEmail")}</td><td className="muted" title={privacyText(account.reason, masked)}>{name}</td><td className="num"><Badge tone={state.tone}>{state.label}</Badge>{needsLogin && <button type="button" className="button" disabled={!online || !status?.installed} aria-label={t("account.reloginAria", { name })} onClick={() => relogin(account)}>{t("account.relogin")}</button>}</td></tr>;
     })}</tbody></table> : <div className="empty">{t("connect.noAccounts")}</div>}
     {status?.reason && <p className="gate-reason">{privacyText(status.reason, masked)}</p>}
     <div className="row-actions"><span className="hint">{shimInstalled ? <>{t("tool.shimInstalledBefore")}<code>{tool}</code>{t("tool.shimInstalledAfter")}</> : shimInstalled === false ? <>{t("tool.shimMissingBefore")}<code>{tool}</code>{t("tool.shimMissingAfter")}</> : status?.installed ? t("tool.version", { version: status.version || t("common.unknown") }) : t("tool.installFirst")}</span><button type="button" className="button" disabled={!online || !status?.installed} onClick={() => onAdd(tool)}>{t("tool.addAccount")}</button></div>
-    <ActionFeedback error={action.error} message={action.message} />
+    {login && <ProviderLoginDialog request={login} accounts={snapshot.accounts} online={online} onReload={onReload} onClose={() => setLogin(null)} />}
   </div>;
 }
 
@@ -175,9 +180,9 @@ export function ConnectionsView({ snapshot, masked, online, refreshing, onRefres
   };
   return <section className="view" aria-labelledby="connect-title">
     <div className="top"><div><h1 id="connect-title">{t("nav.connect")}</h1><div className="sub">{t("connect.subtitle")}</div></div></div>
-    <OmpPanel masked={masked} accounts={snapshot.accounts} />
-    <ToolPanel tool="claude" snapshot={snapshot} masked={masked} online={online} shimInstalled={shim("claude")} onAdd={onAdd} />
-    <ToolPanel tool="codex" snapshot={snapshot} masked={masked} online={online} shimInstalled={shim("codex")} onAdd={onAdd} />
+    <OmpPanel masked={masked} accounts={snapshot.accounts} online={online} onReload={onReload} />
+    <ToolPanel tool="claude" snapshot={snapshot} masked={masked} online={online} shimInstalled={shim("claude")} onAdd={onAdd} onReload={onReload} />
+    <ToolPanel tool="codex" snapshot={snapshot} masked={masked} online={online} shimInstalled={shim("codex")} onAdd={onAdd} onReload={onReload} />
     <HostsPanel connections={connections} loadError={loadError} masked={masked} online={online} onIntegration={onIntegration} onRefresh={loadHosts} />
     <div className="panel">
       <header><Server size={15} className="muted" /><h2>{t("service.title")}</h2><Badge tone={online ? "good" : "warning"}>{online ? t("service.runningShort") : t("service.disconnected")}</Badge></header>

@@ -148,13 +148,24 @@ pub(crate) fn summaries(accounts: &[Account], policy: &Policy, blocks: &[BlockSt
         result.credits = credits_of(members, policy, now);
         result.extra_usage = extra_usage_of(members, policy, now);
         if members.iter().all(|a| !a.enabled) { result.kind = "excluded".into(); return result; }
-        if members.iter().filter(|a| a.enabled).all(|a| a.auth_status == "auth-required") { result.kind = "login".into(); return result; }
+        let needs_login = members.iter().any(|a| a.enabled && a.auth_status == "auth-required");
+        // 이메일만 남은 예전 omp placeholder는 정상 로그인 근거가 아니며 확인된 인증 만료를 가리지 않는다.
+        let other_identity = members.iter().any(|a| a.enabled && a.auth_status != "auth-required"
+            && if a.tool == "omp" {
+                a.buckets.iter().any(|bucket| state(bucket, policy, now) != "unknown")
+            } else {
+                a.auth_status == "authenticated" && a.can_launch && a.verification == "preflight-verified"
+            });
+        if needs_login && !other_identity { result.kind = "login".into(); return result; }
         // The newest observation wins for the same upstream bucket; different buckets remain independent.
         let mut buckets: BTreeMap<&str, &QuotaBucket> = BTreeMap::new();
         for account in members {
             for bucket in &account.buckets {
                 let entry = buckets.entry(&bucket.id).or_insert(bucket);
-                if bucket.observed_at > entry.observed_at { *entry = bucket; }
+                if bucket.observed_at > entry.observed_at
+                    || (bucket.observed_at == entry.observed_at && state(entry, policy, now) == "unknown" && state(bucket, policy, now) != "unknown") {
+                    *entry = bucket;
+                }
             }
         }
         let mut known = false;
@@ -177,15 +188,24 @@ pub(crate) fn summaries(accounts: &[Account], policy: &Policy, blocks: &[BlockSt
             if status == "known" && policy.safety_reserve_percent > 0.0
                 && bucket.used_percent.is_some_and(|used| used >= 100.0 - policy.safety_reserve_percent) { reserve.get_or_insert_with(|| bucket.label.clone()); }
         }
+        let mut quota_blocked = false;
         for block in blocks.iter().filter(|block| block.until > now && members.iter().any(|a| matches_block(a, block))) {
             // Do not attach email-only evidence to multiple workspace identities.
             if groups.iter().filter(|group| group.iter().any(|a| matches_block(a, block))).count() != 1 { continue; }
             match block.scope.as_deref() {
-                None | Some("chat") => { result.kind = "resting".into(); result.until = result.until.max(Some(block.until)); result.rate = result.label.is_none(); }
+                None | Some("chat") => {
+                    result.kind = "resting".into();
+                    result.until = result.until.max(Some(block.until));
+                    quota_blocked |= block.quota;
+                }
                 Some(scope) => { models.insert(scope_name(scope)); }
             }
         }
-        if result.kind == "resting" { result.expiring = None; return result; }
+        if result.kind == "resting" {
+            result.rate = result.label.is_none() && !quota_blocked;
+            result.expiring = None;
+            return result;
+        }
         if !known || unsure { result.expiring = None; return result; }
         if !models.is_empty() { result.kind = "partial".into(); result.models = models.into_iter().collect(); }
         else if let Some(label) = reserve { result.kind = "reserve".into(); result.label = Some(label); }

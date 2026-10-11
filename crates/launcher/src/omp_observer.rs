@@ -24,6 +24,7 @@ pub fn run(action: &str) -> Result<String> {
     }
     let changed = match action {
         "install" => install(&OBSERVER, &directory)?,
+        "refresh" => crate::omp_extension::refresh_installed(&OBSERVER, &directory)?,
         "uninstall" => uninstall(&OBSERVER, &directory)?,
         _ => return Err(failure("지원하지 않는 관측 확장 작업입니다.")),
     };

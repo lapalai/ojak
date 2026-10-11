@@ -49,10 +49,16 @@ fn installed_source(extension: &Extension) -> Result<Vec<u8>> {
     );
     // The shim and desktop sibling must fingerprint the same helper executable.
     let writer = format!("const INSTALLED_AAM_WRITER = {};", serde_json::to_string(&env::current_exe()?.canonicalize()?)?);
-    Ok(source
+    let mut source = source
         .replacen("const INSTALLED_AAM_HOME = undefined;", &configured, 1)
-        .replacen("const INSTALLED_AAM_WRITER = undefined;", &writer, 1)
-        .into_bytes())
+        .replacen("const INSTALLED_AAM_WRITER = undefined;", &writer, 1);
+    const ENTRY_MARKER: &str = "const INSTALLED_AAM_ENTRY = undefined;";
+    if let Some(index) = source.find(ENTRY_MARKER) {
+        let entry = extension_directory(extension)?.join(ENTRY);
+        let configured = format!("const INSTALLED_AAM_ENTRY = {};", serde_json::to_string(&entry)?);
+        source.replace_range(index..index + ENTRY_MARKER.len(), &configured);
+    }
+    Ok(source.into_bytes())
 }
 
 pub(crate) fn extension_directory(extension: &Extension) -> Result<PathBuf> {
@@ -213,6 +219,51 @@ fn write_new(path: &Path, bytes: &[u8]) -> Result<()> {
     Ok(())
 }
 
+/// Refresh only an already-owned installation; never opt a user into an extension.
+pub(crate) fn refresh_installed(extension: &Extension, directory: &Path) -> Result<bool> {
+    refresh_with(extension, directory, |source, destination| fs::rename(source, destination))
+}
+
+fn refresh_with(
+    extension: &Extension,
+    directory: &Path,
+    publish: impl FnOnce(&Path, &Path) -> io::Result<()>,
+) -> Result<bool> {
+    let Some(installed) = inspect(extension, directory)? else { return Ok(false) };
+    if installed.current { return Ok(false); }
+    let parent = directory.parent().ok_or_else(|| failure("확장 상위 경로가 없습니다."))?;
+    let transaction = parent.join(format!(".{}-refresh-{}", extension.directory, aam_protocol::new_id()));
+    fs::create_dir(&transaction)?;
+    aam_protocol::secure::restrict_dir(&transaction)?;
+    let candidate = transaction.join("candidate");
+    let previous = transaction.join("previous");
+    // Finish writes, permissions and validation before moving the working installation.
+    install(extension, &candidate)?;
+    if !inspect(extension, &candidate)?.is_some_and(|value| value.current) {
+        return Err(failure("새 확장 검증에 실패했습니다. 기존 연결은 그대로 유지했습니다."));
+    }
+    fs::rename(directory, &previous)?;
+    let checked = inspect(extension, &previous);
+    let result = if matches!(&checked, Ok(Some(value)) if value.source_hash == installed.source_hash) {
+        publish(&candidate, directory).map_err(Into::into)
+    } else {
+        Err(failure("확장 교체 중 기존 파일이 변경되어 중단했습니다."))
+    };
+    if let Err(error) = result {
+        // Never overwrite a file another process placed in the live location.
+        if matches!(&fs::symlink_metadata(directory), Err(error) if error.kind() == io::ErrorKind::NotFound) {
+            fs::rename(&previous, directory)?;
+            uninstall(extension, &candidate)?;
+            fs::remove_dir(&transaction)?;
+            return Err(error);
+        }
+        return Err(failure(&format!("확장 교체 경로에 충돌이 있습니다. 기존 파일은 {}에 보존했습니다.", previous.display())));
+    }
+    uninstall(extension, &previous)?;
+    fs::remove_dir(&transaction)?;
+    Ok(true)
+}
+
 pub(crate) fn install(extension: &Extension, directory: &Path) -> Result<bool> {
     if let Some(installed) = inspect(extension, directory)? {
         if installed.current {
@@ -309,3 +360,61 @@ mod windows_tests {
     }
 }
 
+#[cfg(test)]
+mod refresh_tests {
+    use super::*;
+
+    #[test]
+    fn refresh_upgrades_owned_extensions_without_enabling_absent_ones() {
+        let parent = std::env::temp_dir().join(format!("aam-extension-refresh-{}", aam_protocol::new_id()));
+        aam_protocol::secure::restrict_dir(&parent).unwrap();
+        let parent = parent.canonicalize().unwrap();
+        let directory = parent.join("accounts");
+        let old = Extension { source: b"export const version = 1;\n", owner: "test.extension", directory: "accounts" };
+        let new = Extension { source: b"export const version = 2;\n", owner: old.owner, directory: old.directory };
+        assert!(!refresh_installed(&new, &directory).unwrap());
+        assert!(!directory.exists());
+        install(&old, &directory).unwrap();
+        assert!(!inspect(&new, &directory).unwrap().unwrap().current);
+        assert!(refresh_installed(&new, &directory).unwrap());
+        assert!(inspect(&new, &directory).unwrap().unwrap().current);
+        assert!(!refresh_installed(&new, &directory).unwrap());
+        fs::remove_dir_all(parent).unwrap();
+    }
+
+    #[test]
+    fn failed_refresh_publication_restores_the_working_extension() {
+        let parent = std::env::temp_dir().join(format!("aam-extension-rollback-{}", aam_protocol::new_id()));
+        aam_protocol::secure::restrict_dir(&parent).unwrap();
+        let parent = parent.canonicalize().unwrap();
+        let directory = parent.join("accounts");
+        let old = Extension { source: b"export const version = 1;\n", owner: "test.extension", directory: "accounts" };
+        let new = Extension { source: b"export const version = 2;\n", owner: old.owner, directory: old.directory };
+        install(&old, &directory).unwrap();
+        let receipt = fs::read(directory.join(RECEIPT)).unwrap();
+        let result = refresh_with(&new, &directory, |_, _| Err(io::Error::new(io::ErrorKind::PermissionDenied, "injected publication failure")));
+        assert!(result.is_err());
+        assert!(inspect(&old, &directory).unwrap().unwrap().current);
+        assert_eq!(fs::read(directory.join(RECEIPT)).unwrap(), receipt);
+        assert!(refresh_installed(&new, &directory).unwrap());
+        assert!(inspect(&new, &directory).unwrap().unwrap().current);
+        fs::remove_dir_all(parent).unwrap();
+    }
+
+    #[test]
+    fn refresh_preserves_user_modified_extensions() {
+        let parent = std::env::temp_dir().join(format!("aam-extension-edited-{}", aam_protocol::new_id()));
+        aam_protocol::secure::restrict_dir(&parent).unwrap();
+        let parent = parent.canonicalize().unwrap();
+        let directory = parent.join("accounts");
+        let extension = Extension { source: b"export const version = 1;\n", owner: "test.extension", directory: "accounts" };
+        install(&extension, &directory).unwrap();
+        let entry = directory.join(ENTRY);
+        fs::write(&entry, b"export const userSetting = true;\n").unwrap();
+        let before = fs::read(&entry).unwrap();
+        assert!(refresh_installed(&extension, &directory).is_err());
+        assert_eq!(fs::read(&entry).unwrap(), before);
+        assert!(directory.join(RECEIPT).exists());
+        fs::remove_dir_all(parent).unwrap();
+    }
+}
