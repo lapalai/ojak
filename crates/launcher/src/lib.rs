@@ -1,4 +1,6 @@
 pub mod arguments;
+mod auto_continue;
+mod handoff;
 mod descendants;
 pub mod hosts;
 pub mod install;
@@ -256,6 +258,11 @@ impl WriterWatch {
                 aam_protocol::process_identity(identity.pid).as_ref().ok() == Some(identity)
             };
             let mut seen = std::collections::BTreeSet::new();
+            #[cfg(windows)]
+            let job = aam_protocol::ProcessJob::open(&aam_protocol::job_name(root.pid, &root.started_at)).ok();
+            #[cfg(windows)]
+            let mut tree = job.map_or_else(|| descendants::Descendants::new(root.pid), |job| descendants::Descendants::with_job(root.pid, job));
+            #[cfg(not(windows))]
             let mut tree = descendants::Descendants::new(root.pid);
             let mut root_alive = true;
             loop {
@@ -614,16 +621,45 @@ fn passthrough(
     }
 }
 
+enum RunStep {
+    Finished(ExitStatus),
+    Continue(LaunchIntent),
+}
+
 fn run_inner(
     paths: &Paths,
     intent: LaunchIntent,
     native_args: Vec<OsString>,
     original_args: Option<Vec<OsString>>,
 ) -> Result<ExitStatus, ApiError> {
-    let session_persisted = !native_args
-        .iter()
-        .take_while(|arg| arg.as_os_str() != "--")
-        .any(|arg| arg == "--no-session-persistence");
+    use std::io::IsTerminal;
+    let mut chain = handoff::Chain::start(&intent.tool, &native_args, handoff::Environment {
+        terminal: std::io::stdin().is_terminal() && std::io::stdout().is_terminal() && std::io::stderr().is_terminal(),
+        nested: std::env::var_os("AAM_PARENT_SESSION_ID").is_some(),
+    });
+    let mut intent = intent;
+    let mut args = native_args;
+    let mut original = original_args;
+    loop {
+        match run_once(paths, intent, args, original, &mut chain)? {
+            RunStep::Finished(status) => return Ok(status),
+            RunStep::Continue(next) => {
+                intent = next;
+                args = chain.as_ref().map(handoff::Chain::carry).unwrap_or_default();
+                original = None;
+            }
+        }
+    }
+}
+
+fn run_once(
+    paths: &Paths,
+    intent: LaunchIntent,
+    native_args: Vec<OsString>,
+    original_args: Option<Vec<OsString>>,
+    chain: &mut Option<handoff::Chain>,
+) -> Result<RunStep, ApiError> {
+    let session_persisted = !arguments::is_ephemeral(&native_args);
     if !cfg!(any(target_os = "macos", windows)) {
         return Err(ApiError::new(
             "UNSUPPORTED_PLATFORM",
@@ -635,7 +671,7 @@ fn run_inner(
     let unparented = std::env::var_os("AAM_PARENT_SESSION_ID")
         .is_some()
         .then(|| (intent.clone(), native_args.clone(), original_args.clone()));
-    let retry_unparented = |reason: &ApiError| -> Option<Result<ExitStatus, ApiError>> {
+    let retry_unparented = |reason: &ApiError| -> Option<Result<RunStep, ApiError>> {
         let (intent, native_args, original_args) = unparented.clone()?;
         if !matches!(reason.code.as_str(), "PARENT_SESSION_UNKNOWN" | "PARENT_PROCESS_UNVERIFIED") {
             return None;
@@ -643,7 +679,7 @@ fn run_inner(
         eprintln!("aam: 이 터미널이 물려받은 부모 대화 정보가 지금 실행과 맞지 않아 무시하고 새로 골라요. ({})", reason.code);
         std::env::remove_var("AAM_PARENT_SESSION_ID");
         std::env::remove_var("AAM_PARENT_CAPABILITY");
-        Some(run_inner(paths, intent, native_args, original_args))
+        Some(run_inner(paths, intent, native_args, original_args).map(RunStep::Finished))
     };
     let intent = intent_checked(intent)?;
     // 관리 실행이 불가능해도 사용자의 실행을 막지 않기 위해 원본 인수를 남겨 둡니다.
@@ -843,6 +879,13 @@ fn run_inner(
     if intent.tool == "claude" && !plan.env.contains_key("CLAUDE_CONFIG_DIR") {
         command.env_remove("CLAUDE_CONFIG_DIR");
     }
+    if let Some(chain) = chain.as_mut() {
+        chain.record(&grant.account);
+    }
+    let mut limit_watch = chain.as_ref().map(|_| auto_continue::LimitWatch::new(
+        &grant.account, &grant.session.cwd, grant.session.native_session_id.as_deref(),
+    ));
+    let mut exhausted = None;
     // Codex 비대화형 재개는 `codex exec resume <id> ...` 순서여야 한다. 계획의 `resume <id>`를 exec 뒤로 옮긴다.
     let (plan_args, native_args) = if intent.tool == "codex"
         && intent.resume_session_id.is_some()
@@ -862,7 +905,7 @@ fn run_inner(
     let mut heartbeat = None;
     let mut watch = None;
     let watch_codex = intent.tool == "codex" && grant.session.native_session_id.is_none();
-    let result = supervisor::supervise(command, |identity| {
+    let result = supervisor::supervise_watched(command, |identity| {
         if let (true, Some(identity)) = (watch_codex, identity) {
             watch = Some(WriterWatch::start(identity.clone()));
         }
@@ -875,7 +918,10 @@ fn run_inner(
             attempt.clone(),
             identity.cloned(),
         ));
-    });
+    }, |identity| {
+        exhausted = limit_watch.as_mut().and_then(|watch| watch.poll(identity));
+        exhausted.is_some()
+    }, supervisor::StopTiming::default());
     if let Some(heartbeat) = heartbeat {
         heartbeat.stop();
     }
@@ -901,17 +947,39 @@ fn run_inner(
             let code = status.code();
             // Codex는 시작 때 대화 ID를 정할 수 없어 끝난 뒤 이 계정 프로필에서 찾는다(정확히 하나일 때만).
             let written = watch.take().map(WriterWatch::finish).unwrap_or_default();
-            let discovered = (grant.account.tool == "codex" && grant.session.native_session_id.is_none())
-                .then(|| aam_adapters::codex_session_from(&grant.account, &grant.session.cwd, &written))
-                .flatten();
-            if lifecycle_call(paths, "lease.release", json!({"sessionId":grant.session.id,"capability":grant.capability,"exitCode":code,"reason":reason,"sessionPersisted":session_persisted,"backgroundProcesses":outcome.background_processes,"nativeSessionId":discovered})).is_err() {
+            let discovered = exhausted.as_ref().map(|event| event.native_id.clone()).or_else(|| {
+                (grant.account.tool == "codex" && grant.session.native_session_id.is_none())
+                    .then(|| aam_adapters::codex_session_from(&grant.account, &grant.session.cwd, &written))
+                    .flatten()
+            });
+            let tree_confirmed = outcome.background_processes.as_ref().is_some_and(Vec::is_empty);
+            let released = lifecycle_call(paths, "lease.release", json!({"sessionId":grant.session.id,"capability":grant.capability,"exitCode":code,"reason":reason,"sessionPersisted":session_persisted,"backgroundProcesses":outcome.background_processes,"nativeSessionId":discovered}))
+                .and_then(decode::<Session>);
+            if released.is_err() {
                 eprintln!("aam: 종료를 저장하지 못했어요. 서비스가 돌아오면 조심스럽게 정리해요.");
             }
-            let native = grant.session.native_session_id.clone().or(discovered);
-            if let Some(next) = offer_continue(paths, &grant, native.as_deref()) {
-                return next;
+            if let Some(current) = chain.as_ref() {
+                let facts = handoff::Facts {
+                    exhausted: exhausted.as_ref().map(|event| event.native_id.as_str()),
+                    stopped: outcome.stopped,
+                    interrupted: outcome.interrupted,
+                    tree_confirmed,
+                    released_state: released.as_ref().ok().map(|session| session.state.as_str()),
+                    recorded_native: released.as_ref().ok().and_then(|session| session.native_session_id.as_deref()),
+                    known_native: grant.session.native_session_id.as_deref(),
+                    hops: current.hops(),
+                };
+                match handoff::verdict(&facts) {
+                    handoff::Verdict::Continue => {
+                        let next = next_handoff(paths, &grant, current).map_err(handoff::failed_midway)?;
+                        *chain = chain.take().map(handoff::Chain::advanced);
+                        return Ok(RunStep::Continue(next));
+                    }
+                    handoff::Verdict::Stop(error) => return Err(error),
+                    handoff::Verdict::Declined => {}
+                }
             }
-            Ok(status)
+            Ok(RunStep::Finished(status))
         }
         Err(failure) => {
             if let Some(watch) = watch.take() {
@@ -925,56 +993,33 @@ fn run_inner(
     }
 }
 
-/// 대화형 Claude 실행이 끝났을 때, 쓰던 계정이 한도를 다 써서(또는 안전 여유량 아래라) 새 작업을 받을 수 없고
-/// 다른 계정이 있으면 같은 대화를 그 계정에서 이어 열지 묻는다. Enter(기본 예)면 이어 열고 그 결과를 돌려준다.
-/// 사용량 판단은 서비스의 현재 관측을 쓴다. 관측이 늦어 묻지 않았으면 `aam continue`로 직접 이어 갈 수 있다.
-fn offer_continue(paths: &Paths, grant: &LeaseGrant, native: Option<&str>) -> Option<Result<ExitStatus, ApiError>> {
-    use std::io::{BufRead, IsTerminal, Write};
-    if !matches!(grant.account.tool.as_str(), "claude" | "codex") || native.is_none() {
-        return None;
-    }
-    let base = LaunchIntent {
+fn next_handoff(paths: &Paths, grant: &LeaseGrant, chain: &handoff::Chain) -> Result<LaunchIntent, ApiError> {
+    let mut next = LaunchIntent {
         tool: grant.account.tool.clone(),
         model: grant.session.model.clone(),
         cwd: grant.session.cwd.clone(),
-        account_id: Some(grant.account.id.clone()),
-        parent_session_id: None,
-        resume_session_id: None,
-        native_session_id: None,
-        adopted: false,
-        continue_elsewhere: false,
+        resume_session_id: Some(grant.session.id.clone()),
+        continue_elsewhere: true,
+        ..LaunchIntent::default()
     };
-    let same: aam_protocol::Decision = decode(call(paths, "route.explain", json!({"intent":base})).ok()?).ok()?;
-    let spent = same.candidates.iter().find(|candidate| candidate.account_id == grant.account.id).is_some_and(|candidate| {
-        !candidate.eligible
-            && candidate.reasons.iter().any(|reason| reason.starts_with("QUOTA_EXHAUSTED"))
-    });
-    if !spent {
-        return None;
+    let decision = decode(call(paths, "route.explain", json!({"intent":next}))?)?;
+    let snapshot = read_snapshot(paths)?;
+    let target = handoff::choose_target(&decision, &snapshot.accounts, chain).ok_or_else(handoff::no_account_error)?;
+    next.account_id = Some(target);
+    eprintln!("\naam: 사용량 한도를 확인했어요. 기존 실행 종료를 확인했고, 다른 계정에서 같은 대화를 다시 열어요.");
+    Ok(next)
+}
+
+fn fresh_snapshot(paths: &Paths) -> Result<Snapshot, ApiError> {
+    call(paths, "quota.refresh", json!({"force":true}))?;
+    let deadline = std::time::Instant::now() + Duration::from_secs(30);
+    loop {
+        let snapshot = read_snapshot(paths)?;
+        if !snapshot.refreshing || std::time::Instant::now() >= deadline {
+            return Ok(snapshot);
+        }
+        thread::sleep(Duration::from_millis(200));
     }
-    let interactive = std::io::stdin().is_terminal()
-        && std::io::stderr().is_terminal()
-        && std::env::var_os("AAM_PARENT_SESSION_ID").is_none();
-    let next = LaunchIntent { account_id: None, resume_session_id: Some(grant.session.id.clone()), continue_elsewhere: true, ..base };
-    let other: Option<aam_protocol::Decision> = call(paths, "route.explain", json!({"intent":next})).ok().and_then(|value| decode(value).ok());
-    let target = other.as_ref().and_then(|decision| decision.selected_account_id.clone());
-    let account = target.as_ref().and_then(|id| read_snapshot(paths).ok().and_then(|snapshot| {
-        snapshot.accounts.iter().find(|account| &account.id == id).map(|account| (account.label.clone(), account.email.clone()))
-    }));
-    if !interactive || account.is_none() {
-        eprintln!("aam: 이 계정은 한도를 다 썼어요. 다른 계정에서 이으려면 aam continue를 실행해 주세요.");
-        return None;
-    }
-    let (label, email) = account?;
-    let name = display_account_label(&label, email.as_deref(), privacy_masked(paths));
-    eprint!("\naam: 이 계정은 한도를 다 써서 새 작업을 받을 수 없습니다. 같은 대화를 {name} 계정에서 이어 열까요? [Y/n] ");
-    let _ = std::io::stderr().flush();
-    let mut answer = String::new();
-    std::io::stdin().lock().read_line(&mut answer).ok()?;
-    if !matches!(answer.trim().to_ascii_lowercase().as_str(), "" | "y" | "yes" | "ㅛ") {
-        return None;
-    }
-    Some(run_inner(paths, next, Vec::new(), None))
 }
 
 /// 한도 소진 뒤 같은 대화를 다른 계정에서 이어 연다(`aam continue`). `session`이 없으면 현재 폴더의 마지막 관리 대화
@@ -992,15 +1037,7 @@ pub fn continue_elsewhere(paths: &Paths, tool: Option<String>, session: Option<S
         adopted: false,
         continue_elsewhere: false,
     };
-    let _ = call(paths, "quota.refresh", json!({}));
-    let deadline = std::time::Instant::now() + Duration::from_secs(30);
-    let snapshot = loop {
-        let snapshot = read_snapshot(paths)?;
-        if !snapshot.refreshing || std::time::Instant::now() >= deadline {
-            break snapshot;
-        }
-        thread::sleep(Duration::from_millis(500));
-    };
+    let snapshot = fresh_snapshot(paths)?;
     let original = match session {
         Some(id) => id,
         None => {

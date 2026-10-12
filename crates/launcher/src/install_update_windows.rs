@@ -3,6 +3,9 @@ use super::*;
 use sha2::{Digest, Sha256};
 use std::io::{Read, Write};
 
+#[path = "install_update_blockers_windows.rs"]
+mod blockers;
+
 const RECEIPT: &str = "installer-update.json";
 const BACKUP: &str = "installer-backup";
 const FILES: [&str; 2] = ["aam.exe", "aam-service.exe"];
@@ -150,30 +153,46 @@ fn restore_state(paths: &Paths, state: &BTreeMap<String, String>) -> Result<(), 
     }
     Ok(())
 }
-fn ensure_launcher_released(install_dir: &Path) -> Result<(), ApiError> {
+fn files_busy() -> ApiError {
+    error("INSTALLER_FILES_BUSY", "Ojak 실행 파일을 쓰는 프로그램이 남아 있어요. 열려 있는 omp와 Ojak 명령을 종료한 뒤 다시 시도해 주세요. 앱 실행 파일은 바꾸지 않았어요.")
+}
+/// `aam.exe`를 쓰기로 열 수 있으면 true. 사용 중(32·33)이면 `wait` 동안 기다린 뒤 false. 그 밖의 오류는 그대로 낸다.
+fn released(install_dir: &Path, wait: std::time::Duration) -> Result<bool, ApiError> {
     let path = install_dir.join("aam.exe");
-    // NSIS runs a temporary helper. A direct internal CLI call cannot wait for itself.
-    if launcher()? == path { return Ok(()); }
-    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
+    let deadline = std::time::Instant::now() + wait;
     loop {
         match fs::OpenOptions::new().write(true).open(&path) {
-            Ok(_) => return Ok(()),
-            Err(failure) if failure.kind() == std::io::ErrorKind::NotFound => return Ok(()),
+            Ok(_) => return Ok(true),
+            Err(failure) if failure.kind() == std::io::ErrorKind::NotFound => return Ok(true),
             Err(failure) if matches!(failure.raw_os_error(), Some(32 | 33)) => {
-                if std::time::Instant::now() >= deadline {
-                    return Err(error("INSTALLER_FILES_BUSY", "Ojak 실행 파일을 쓰는 프로그램이 남아 있어요. 열려 있는 omp와 Ojak 명령을 종료한 뒤 다시 시도해 주세요. 앱 실행 파일은 바꾸지 않았어요."));
-                }
+                if std::time::Instant::now() >= deadline { return Ok(false); }
                 std::thread::sleep(std::time::Duration::from_millis(50));
             }
             Err(failure) => return Err(io_error(failure)),
         }
     }
 }
+fn ensure_launcher_released(install_dir: &Path) -> Result<(), ApiError> {
+    // NSIS runs a temporary helper. A direct internal CLI call cannot wait for itself.
+    if launcher()? == install_dir.join("aam.exe") { return Ok(()); }
+    if released(install_dir, std::time::Duration::from_secs(5))? { Ok(()) } else { Err(files_busy()) }
+}
+/// `prepare-interactive` 전용. 조용한 `prepare`는 이 경로를 거치지 않는다. 사용자 동의 없이는 프로세스를 닫지 않으며,
+/// 동의가 끝난 뒤에도 같은 쓰기 잠금 확인으로 다시 검증한다.
+fn release_launcher_interactively(install_dir: &Path) -> Result<(), ApiError> {
+    match ensure_launcher_released(install_dir) {
+        Err(failure) if failure.code == "INSTALLER_FILES_BUSY" => {
+            blockers::negotiate(&mut blockers::System::new(install_dir)?, &mut blockers::Native)?;
+            ensure_launcher_released(install_dir)
+        }
+        other => other,
+    }
+}
 
 pub(super) fn run(paths: &Paths, action: &str, install_dir: &Path) -> Result<(), ApiError> {
     let install_dir = directory(install_dir)?;
     match action {
-        "prepare" => {
+        "prepare" | "prepare-interactive" => {
             if paths.home.join(RECEIPT).exists() || paths.home.join(BACKUP).exists() {
                 return Err(error("UPDATE_RECOVERY_REQUIRED", "이전 업데이트 복구 기록이 있습니다. installer recover로 복구한 뒤 다시 설치하세요."));
             }
@@ -185,7 +204,8 @@ pub(super) fn run(paths: &Paths, action: &str, install_dir: &Path) -> Result<(),
                     return Err(error("FOREIGN_INSTALL", "다른 설치가 관리하는 서비스는 중지하지 않습니다."));
                 }
             }
-            ensure_launcher_released(&install_dir)?;
+            // 조용한 prepare는 닫지 않고 실패한다. 동의 UI와 종료는 prepare-interactive에서만, 백업·영수증을 만들기 전에 일어난다.
+            if action == "prepare-interactive" { release_launcher_interactively(&install_dir)?; } else { ensure_launcher_released(&install_dir)?; }
             private_dir(&paths.home)?;
             let backup = paths.home.join(BACKUP);
             // Exclusive creation prevents two installers from sharing or overwriting a transaction.

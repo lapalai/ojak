@@ -32,8 +32,8 @@ Ojak is a **macOS menu bar and Windows system tray app** for managing your own C
 ## Why Ojak?
 
 - **See your accounts at a glance.** Check remaining usage and reset times without switching between accounts.
-- **Keep your terminal workflow.** Use the official CLIs with the same `claude` and `codex` commands. A running conversation keeps its assigned account.
-- **You decide when to switch.** When a managed CLI session exits after exhausting its quota, Ojak can offer to reopen the conversation on another eligible account. Nothing moves on its own.
+- **Keep your terminal workflow.** Use the official CLIs with the same `claude` and `codex` commands.
+- **Continue automatically after a usage limit.** For supported interactive sessions, Ojak detects an explicit exhaustion record, confirms the old execution has ended, and reopens the same conversation on another eligible account. [Scope and limitations](docs/usage.md#continue-after-a-limit-is-reached).
 - **Understand your usage.** View token counts and API-price estimates from omp, Claude Code, and Codex session logs on your computer. Estimates are not your actual subscription bill; models without known prices are marked separately.
 
 The app supports **English, Korean, and Indonesian**. Some CLI, service, and installer messages are still in Korean.
@@ -98,7 +98,7 @@ If setup is incomplete, the getting-started card shows what's left. If no accoun
 
 Ojak stores its account records, settings, and diagnostic logs on your computer. **Ojak does not send usage telemetry or automatically upload diagnostics.** Ojak still needs the network: sign-in, usage checks, and model requests communicate with providers, and update checks contact GitHub.
 
-- Each new managed session is assigned an account; Ojak does not silently move a running conversation to another account.
+- New managed sessions receive an account. Supported interactive sessions can automatically reopen on another account after confirmed usage exhaustion; this replaces the process rather than changing credentials inside a running CLI.
 - If Ojak cannot confirm that a session ended, it keeps the account's slot reserved rather than risking a conflicting assignment.
 - Token-cost estimates are not invoices. Optional Codex credits and Claude extra usage can incur provider charges; their use for new assignments is off by default. Ojak cannot cap charges incurred by an already-running official CLI.
 

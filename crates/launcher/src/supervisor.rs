@@ -98,6 +98,8 @@ struct Terminal {
     file: Option<std::fs::File>,
     parent_group: i32,
     child_group: Cell<Option<i32>>,
+    /// spawn 전 터미널 설정. 실행기가 native를 직접 끝냈을 때만 되돌린다.
+    saved: Option<libc::termios>,
 }
 #[cfg(unix)]
 impl Terminal {
@@ -108,10 +110,15 @@ impl Terminal {
             .write(true)
             .open("/dev/tty")
             .ok();
+        let saved = file.as_ref().and_then(|file| {
+            let mut termios: libc::termios = unsafe { std::mem::zeroed() };
+            (unsafe { libc::tcgetattr(file.as_raw_fd(), &mut termios) } == 0).then_some(termios)
+        });
         Self {
             file,
             parent_group: group,
             child_group: Cell::new(None),
+            saved,
         }
     }
     fn give_to(&self, group: i32) {
@@ -125,6 +132,26 @@ impl Terminal {
                 self.give_to(self.parent_group);
             }
         }
+    }
+    /// 실행기가 native를 강제로 끝낸 뒤 터미널을 쓸 수 있는 상태로 돌린다. 줄 모드 설정을 복원하고,
+    /// 대체 화면·마우스·붙여넣기 모드처럼 TUI가 켠 모드를 끈다. 터미널을 되찾은(`restore`) 뒤에만 부른다.
+    fn reset_after_stop(&self) {
+        use std::io::Write;
+        let Some(file) = &self.file else {
+            return;
+        };
+        if unsafe { libc::tcgetpgrp(file.as_raw_fd()) } != self.parent_group {
+            return;
+        }
+        if let Some(saved) = &self.saved {
+            unsafe {
+                libc::tcsetattr(file.as_raw_fd(), libc::TCSANOW, saved);
+            }
+        }
+        let mut tty: &std::fs::File = file;
+        let _ = tty.write_all(
+            b"\x1b[<u\x1b[>4m\x1b[?2004l\x1b[?1004l\x1b[?1000l\x1b[?1002l\x1b[?1003l\x1b[?1006l\x1b[?1049l\x1b[?25h\x1b[0m\r\n",
+        );
     }
 }
 #[cfg(unix)]
@@ -154,12 +181,69 @@ pub struct ChildFailure {
 pub struct ChildOutcome {
     pub status: ExitStatus,
     pub background_processes: Option<Vec<ProcessIdentity>>,
+    /// 감시자가 한도 소진을 확인해 실행기가 이 실행의 프로세스 트리를 직접 끝냈다.
+    pub stopped: bool,
+    /// 사용자가 보낸 종료·중단 신호를 전달했다(자동 이어가기를 취소하는 근거).
+    pub interrupted: bool,
+}
+
+/// 감시자가 한도 소진을 확인한 뒤 native를 끝내는 단계별 대기 시간.
+#[derive(Clone, Copy)]
+pub struct StopTiming {
+    /// native가 대화 기록을 디스크에 쓸 시간. 이 동안은 아무 신호도 보내지 않는다.
+    pub flush: Duration,
+    /// 정상 종료 요청(Unix SIGTERM) 뒤 스스로 끝나기를 기다리는 시간.
+    pub grace: Duration,
+    /// 강제 종료 뒤 끝났는지 확인하며 기다리는 최대 시간.
+    pub kill_wait: Duration,
+}
+impl Default for StopTiming {
+    fn default() -> Self {
+        Self {
+            flush: Duration::from_millis(1500),
+            grace: Duration::from_secs(6),
+            kill_wait: Duration::from_secs(4),
+        }
+    }
+}
+
+/// 한도 소진을 확인한 뒤 native를 끝내는 진행 단계.
+#[derive(Clone, Copy)]
+enum Stage {
+    Idle,
+    Flush(Instant),
+    #[cfg(unix)]
+    Term(Instant),
+    Kill(Instant),
+}
+
+const WATCH_INTERVAL: Duration = Duration::from_millis(500);
+
+fn stop_unconfirmed() -> &'static str {
+    "한도 소진 뒤 native 프로세스 종료를 확인하지 못했습니다. 살아 있는 작업을 중단하거나 예약을 해제하지 않았습니다."
 }
 
 #[cfg(unix)]
-pub fn supervise<F>(mut command: Command, on_spawn: F) -> Result<ChildOutcome, ChildFailure>
+pub fn supervise<F>(command: Command, on_spawn: F) -> Result<ChildOutcome, ChildFailure>
 where
     F: FnOnce(Option<&ProcessIdentity>),
+{
+    supervise_watched(command, on_spawn, |_| false, StopTiming::default())
+}
+
+/// `supervise`와 같고, 실행 중 `watcher`를 주기적으로 부른다. `watcher`가 true를 돌려주면(한도 소진 확인)
+/// `timing.flush`만큼 기록 저장을 기다린 뒤 이 실행의 프로세스 그룹만 정상 종료 요청 → 강제 종료 순으로 끝낸다.
+/// 사용자 신호가 먼저 오면 끝내지 않고 취소한다. 종료가 확인되지 않으면 오류로 돌려주고 예약은 풀지 않는다.
+#[cfg(unix)]
+pub fn supervise_watched<F, W>(
+    mut command: Command,
+    on_spawn: F,
+    mut watcher: W,
+    timing: StopTiming,
+) -> Result<ChildOutcome, ChildFailure>
+where
+    F: FnOnce(Option<&ProcessIdentity>),
+    W: FnMut(&ProcessIdentity) -> bool,
 {
     let failure = |code: &str, message: &str, spawned| ChildFailure {
         error: ApiError::new(code, message),
@@ -207,23 +291,57 @@ where
     terminal.child_group.set(Some(pid as i32));
     let mut descendants = crate::descendants::Descendants::new(pid);
     let mut observed_at = Instant::now() - Duration::from_secs(1);
+    let mut watched_at = Instant::now();
     // waitpid가 종료된 자식을 회수하기 전이므로 짧은 실행도 시작 시각을 조회할 수 있습니다.
     let identity = process_identity(pid).ok();
     if tty.is_some() {
         terminal.give_to(pid as i32);
     }
     on_spawn(identity.as_ref());
+    let user_signals: u64 = [libc::SIGINT, libc::SIGTERM, libc::SIGHUP, libc::SIGQUIT]
+        .iter()
+        .fold(0, |mask, signal| mask | (1u64 << signal));
+    let mut interrupted = false;
+    let mut stage = Stage::Idle;
+    let mut stopped = false;
     loop {
         if observed_at.elapsed() >= Duration::from_millis(250) {
             descendants.observe();
             observed_at = Instant::now();
         }
         let pending = SIGNALS.swap(0, Ordering::Relaxed);
+        if pending & user_signals != 0 {
+            interrupted = true;
+            if matches!(stage, Stage::Flush(_)) {
+                stage = Stage::Idle;
+            }
+        }
         if let Some(identity) = &identity {
             for signal in FORWARDED {
                 if pending & (1u64 << signal) != 0 {
                     forward(identity, signal);
                 }
+            }
+            if matches!(stage, Stage::Idle) && !interrupted && !stopped && watched_at.elapsed() >= WATCH_INTERVAL {
+                watched_at = Instant::now();
+                if watcher(identity) {
+                    stage = Stage::Flush(Instant::now() + timing.flush);
+                }
+            }
+            match stage {
+                Stage::Flush(until) if Instant::now() >= until => {
+                    stopped = true;
+                    forward(identity, libc::SIGTERM);
+                    stage = Stage::Term(Instant::now() + timing.grace);
+                }
+                Stage::Term(until) if Instant::now() >= until => {
+                    forward(identity, libc::SIGKILL);
+                    stage = Stage::Kill(Instant::now() + timing.kill_wait);
+                }
+                Stage::Kill(until) if Instant::now() >= until => {
+                    return Err(failure("CHILD_STATE_UNKNOWN", stop_unconfirmed(), true));
+                }
+                _ => {}
             }
         }
         let mut status = 0;
@@ -243,11 +361,25 @@ where
         if result > 0 {
             if libc::WIFEXITED(status) || libc::WIFSIGNALED(status) {
                 terminal.restore();
+                if stopped {
+                    terminal.reset_after_stop();
+                    // 루트가 끝나도 같은 그룹에 남은 자손은 이 실행의 것이므로 birth identity가 맞는 것만 강제로 끝낸다.
+                    descendants.observe();
+                    for survivor in descendants.identities() {
+                        if process_alive(&survivor) {
+                            unsafe {
+                                libc::kill(survivor.pid as i32, libc::SIGKILL);
+                            }
+                        }
+                    }
+                }
                 // supervise가 반환되기 전까지 호출자의 heartbeat는 계속 유지됩니다.
                 let background_processes = descendants.finished(Duration::from_secs(5));
                 return Ok(ChildOutcome {
                     status: ExitStatus::from_raw(status),
                     background_processes,
+                    stopped,
+                    interrupted,
                 });
             }
             if libc::WIFSTOPPED(status) {
@@ -288,11 +420,49 @@ pub fn finish_with_status(status: ExitStatus) -> ! {
 
 /// 콘솔 Ctrl+C·Ctrl+Break를 실행기만 처리한 것으로 표시한다. 같은 콘솔의 native 자식은 그대로 받아 스스로 처리한다.
 /// 핸들러 목록은 자식에 상속되지 않는다(`SetConsoleCtrlHandler(NULL, TRUE)`와 달리 자식의 Ctrl+C를 끄지 않는다).
+/// 사용자가 보낸 중단은 기록해 자동 이어가기를 취소하는 근거로 쓴다.
+#[cfg(windows)]
+static CONSOLE_INTERRUPT: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+
 #[cfg(windows)]
 unsafe extern "system" fn swallow_console_event(event: u32) -> windows_sys::Win32::Foundation::BOOL {
     const CTRL_C_EVENT: u32 = 0;
     const CTRL_BREAK_EVENT: u32 = 1;
-    i32::from(event == CTRL_C_EVENT || event == CTRL_BREAK_EVENT)
+    let handled = event == CTRL_C_EVENT || event == CTRL_BREAK_EVENT;
+    if handled {
+        CONSOLE_INTERRUPT.store(true, std::sync::atomic::Ordering::Relaxed);
+    }
+    i32::from(handled)
+}
+
+/// 실행기가 native를 강제로 끝낸 뒤 되돌릴 콘솔 입출력 모드. TUI가 바꾼 모드를 spawn 전 값으로 복원한다.
+#[cfg(windows)]
+struct ConsoleModes(Vec<(u32, u32)>);
+#[cfg(windows)]
+impl ConsoleModes {
+    fn capture() -> Self {
+        use windows_sys::Win32::System::Console::{GetConsoleMode, GetStdHandle, STD_ERROR_HANDLE, STD_INPUT_HANDLE, STD_OUTPUT_HANDLE};
+        let mut saved = Vec::new();
+        for which in [STD_INPUT_HANDLE, STD_OUTPUT_HANDLE, STD_ERROR_HANDLE] {
+            let handle = unsafe { GetStdHandle(which) };
+            let mut mode = 0u32;
+            if !handle.is_null() && unsafe { GetConsoleMode(handle, &mut mode) } != 0 {
+                saved.push((which, mode));
+            }
+        }
+        Self(saved)
+    }
+    fn restore(&self) {
+        use windows_sys::Win32::System::Console::{GetStdHandle, SetConsoleMode};
+        for (which, mode) in &self.0 {
+            let handle = unsafe { GetStdHandle(*which) };
+            if !handle.is_null() {
+                unsafe {
+                    SetConsoleMode(handle, *mode);
+                }
+            }
+        }
+    }
 }
 
 #[cfg(windows)]
@@ -317,14 +487,32 @@ impl Drop for ConsoleGuard {
 /// Windows 실행 감독. native를 일시 정지 상태로 만들어 이름 있는 Job에 넣은 뒤 재개하므로 모든 자손이 Job 안에 생긴다.
 /// Job은 실행기가 끝나도 프로세스를 죽이지 않는다(작업 보존). 서비스는 Job 이름으로 전체 종료를 확인한다.
 #[cfg(windows)]
-pub fn supervise<F>(mut command: Command, on_spawn: F) -> Result<ChildOutcome, ChildFailure>
+pub fn supervise<F>(command: Command, on_spawn: F) -> Result<ChildOutcome, ChildFailure>
 where
     F: FnOnce(Option<&ProcessIdentity>),
+{
+    supervise_watched(command, on_spawn, |_| false, StopTiming::default())
+}
+
+/// `supervise`와 같고, 실행 중 `watcher`를 주기적으로 부른다. `watcher`가 true를 돌려주면(한도 소진 확인)
+/// `timing.flush`만큼 기록 저장을 기다린 뒤 이 실행의 Job(native와 모든 자손)만 끝낸다.
+/// 사용자 Ctrl+C·Break가 먼저 오면 끝내지 않고 취소한다. 종료가 확인되지 않으면 오류로 돌려주고 예약은 풀지 않는다.
+#[cfg(windows)]
+pub fn supervise_watched<F, W>(
+    mut command: Command,
+    on_spawn: F,
+    mut watcher: W,
+    timing: StopTiming,
+) -> Result<ChildOutcome, ChildFailure>
+where
+    F: FnOnce(Option<&ProcessIdentity>),
+    W: FnMut(&ProcessIdentity) -> bool,
 {
     let failure = |code: &str, message: &str, spawned| ChildFailure {
         error: ApiError::new(code, message),
         spawned,
     };
+    CONSOLE_INTERRUPT.store(false, std::sync::atomic::Ordering::Relaxed);
     let _console = ConsoleGuard::install().ok_or_else(|| {
         failure(
             "SIGNAL_SETUP_FAILED",
@@ -332,6 +520,7 @@ where
             false,
         )
     })?;
+    let modes = ConsoleModes::capture();
     command
         .stdin(Stdio::inherit())
         .stdout(Stdio::inherit())
@@ -348,18 +537,55 @@ where
     let identity = process_identity(pid).ok();
     let mut descendants = crate::descendants::Descendants::with_job(pid, job);
     let mut observed_at = Instant::now() - Duration::from_secs(1);
+    let mut watched_at = Instant::now();
     on_spawn(identity.as_ref());
+    let mut stage = Stage::Idle;
+    let mut stopped = false;
+    let mut interrupted = false;
     loop {
         if observed_at.elapsed() >= Duration::from_millis(250) {
             descendants.observe();
             observed_at = Instant::now();
         }
+        if CONSOLE_INTERRUPT.load(std::sync::atomic::Ordering::Relaxed) {
+            interrupted = true;
+            if matches!(stage, Stage::Flush(_)) {
+                stage = Stage::Idle;
+            }
+        }
+        if let Some(identity) = &identity {
+            if matches!(stage, Stage::Idle) && !interrupted && !stopped && watched_at.elapsed() >= WATCH_INTERVAL {
+                watched_at = Instant::now();
+                if watcher(identity) {
+                    stage = Stage::Flush(Instant::now() + timing.flush);
+                }
+            }
+            match stage {
+                Stage::Flush(until) if Instant::now() >= until => {
+                    stopped = true;
+                    // Job 안의 프로세스만 끝낸다. 터미널 대화 상자가 없는 정상 종료 요청 수단이 없어 곧바로 종료한다.
+                    if !descendants.terminate_job(1) {
+                        return Err(failure("CHILD_STATE_UNKNOWN", stop_unconfirmed(), true));
+                    }
+                    stage = Stage::Kill(Instant::now() + timing.grace + timing.kill_wait);
+                }
+                Stage::Kill(until) if Instant::now() >= until => {
+                    return Err(failure("CHILD_STATE_UNKNOWN", stop_unconfirmed(), true));
+                }
+                _ => {}
+            }
+        }
         match child.try_wait() {
             Ok(Some(status)) => {
+                if stopped {
+                    modes.restore();
+                }
                 let background_processes = descendants.finished(Duration::from_secs(5));
                 return Ok(ChildOutcome {
                     status,
                     background_processes,
+                    stopped,
+                    interrupted,
                 });
             }
             Ok(None) => {}

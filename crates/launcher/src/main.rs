@@ -133,7 +133,7 @@ enum Action {
 }
 #[derive(Args)]
 #[command(
-    after_help = "실행: aam run claude|codex [--account <계정 ID>] [--model <모델>] [--cwd <프로젝트>] [-- <도구 인수>]\n계정을 비우면 시작할 때 한 번만 골라요. 실행 중에는 바꾸지 않아요. omp는 Ojak이 실행하지 않아요. 새 omp 세션에서 /model로 ojak-* 모델을 고르면 Ojak이 계정을 골라요."
+    after_help = "실행: aam run claude|codex [--account <계정 ID>] [--model <모델>] [--cwd <프로젝트>] [-- <도구 인수>]\n대화형 실행에서 사용량 한도 소진이 확인되면 기존 실행 종료를 확인한 뒤 다른 계정에서 같은 대화를 자동으로 다시 열어요. 비대화형·임시·중첩 실행은 제외해요. omp는 Ojak이 실행하지 않아요. 새 omp 세션에서 /model로 ojak-* 모델을 고르면 Ojak이 계정을 골라요."
 )]
 struct Run {
     tool: String,

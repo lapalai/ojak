@@ -28,7 +28,9 @@ aam explain --tool codex
 
 ### Melanjutkan percakapan setelah kuota habis
 
-Saat sesi interaktif yang dikelola Ojak berakhir setelah kuota habis, Ojak bisa menawarkan untuk membuka percakapan yang sama di akun lain yang tersedia. Setujui pertanyaan `[Y/n]` untuk melanjutkan. Jika data pemakaian belum diperbarui atau pertanyaannya tidak bisa ditampilkan, jalankan ini dari folder proyek yang sama:
+Pada terminal interaktif Claude Code dan Codex yang dijalankan melalui Ojak, catatan terstruktur bahwa kuota habis akan memicu kelanjutan otomatis di akun lain yang tersedia. Ojak memastikan proses lama beserta proses turunannya sudah berhenti dan layanan telah melepaskan slot, lalu membuka kembali percakapan yang sama. Tidak ada pertanyaan `[Y/n]`. Akun yang sudah dipakai dalam rangkaian tersebut tidak dipilih lagi, dengan maksimal delapan perpindahan per pemanggilan. Jika tidak ada akun lain atau penghentian maupun identitas percakapan tidak dapat dipastikan, Ojak berhenti dan menjelaskan alasannya.
+
+Perintah noninteraktif (`claude -p`, `codex exec`, dan sejenisnya), pipe, sesi bertingkat, sesi tanpa penyimpanan riwayat, `--worktree`, dan opsi yang tidak aman untuk diterapkan kembali tidak berpindah otomatis. Error rate limit biasa, gangguan jaringan, dan pembatalan oleh pengguna juga tidak memicu perpindahan. Deteksi bergantung pada CLI yang menulis catatan kehabisan kuota dalam format yang didukung. Jika tidak terdeteksi, keluar dari CLI lalu lanjutkan secara manual dari folder proyek yang sama:
 
 ```sh
 aam continue
@@ -88,15 +90,24 @@ Khusus pengelola, layanan macOS bisa dimulai ulang langsung dengan `launchctl ki
 
 Jangan memasang atau menjalankan installer sebagai administrator. Pastikan installer berasal dari [rilis repositori ini](https://github.com/lapalai/ojak/releases/latest). Jika antivirus mengarantina `aam.exe` atau `aam-service.exe`, periksa deteksi dan sumber file sebelum mempertimbangkan pengecualian khusus untuk file itu. Jangan matikan perlindungan secara keseluruhan. Jika ragu, laporkan deteksinya tanpa kredensial atau data pribadi.
 
-Jika installer menyatakan Ojak tidak bisa dihentikan dengan aman:
+Mulai 0.7.0, jika masih ada program yang memakai executable Ojak (`INSTALLER_FILES_BUSY`), installer non-silent menampilkan proses `aam.exe` terkait beserta aplikasi yang menjalankannya (hanya nama dan ID proses), lalu meminta izin. Hanya `aam.exe` dari pemasangan itu, milik pengguna dan sesi login yang sama, yang dapat ditutup. Aplikasi induk seperti Orca/omp hanya ditampilkan sebagai informasi dan tidak ditutup.
 
-1. Selesaikan pekerjaan Claude Code/Codex, lalu **tutup Orca dan semua omp sepenuhnya**. Menutup jendela Orca saja bisa menyisakan observer yang mengunci `aam.exe`.
+1. **Tutup secara normal.** Setelah Anda setuju, installer meminta program itu menutup diri lalu melanjutkan pembaruan. Semua pekerjaan yang berjalan di program tersebut dapat berhenti, dan program yang ditutup tidak dibuka kembali otomatis. Percakapan juga tidak dipulihkan otomatis.
+2. **Tutup paksa adalah pilihan terpisah.** Hanya jika program tidak menutup secara normal, installer menampilkan peringatan kedua bahwa data yang belum disimpan atau pekerjaan yang berjalan bisa hilang. Tanpa persetujuan pada peringatan kedua itu, tidak ada yang ditutup paksa.
+3. **Proses baru perlu izin baru.** Jika proses baru memakai executable, installer bertanya lagi; izin sebelumnya tidak berlaku. Jika proses terus dijalankan ulang, installer berhenti dengan aman setelah paling banyak tiga putaran.
+4. **Batal menghentikan semuanya.** Jika dibatalkan (`INSTALLER_CLOSE_CANCELLED`), tidak ada lagi yang ditutup dan tidak ada file yang diganti. Program yang sudah Anda izinkan untuk ditutup tetap tertutup.
+5. **Instalasi senyap (`/S`) tidak pernah menutup program.** Instalasi gagal dengan `INSTALLER_FILES_BUSY`.
+
+Jika program yang tidak bisa ditutup installer masih menahan file, atau installer berhenti karena alasan lain:
+
+1. Selesaikan pekerjaan Claude Code/Codex, lalu tutup secara normal aplikasi yang terus menjalankan proses tersebut, seperti Orca/omp. Menutup jendelanya saja bisa menyisakan observer yang mengunci `aam.exe`.
 2. Jalankan installer lagi. Jika berhenti pada pemeriksaan keamanan ini, file aplikasi belum diganti.
 3. Jika bagian detail installer menyebut `installer recover`, pemasangan sebelumnya mungkin terputus. Tutup Orca/omp dan [laporkan masalah](https://github.com/lapalai/ojak/issues), bukan mengedit database atau memaksa penggantian file.
 
 Periksa detail installer dan `%TEMP%\Ojak-installer.log`. Mulai 0.6.3, kegagalan mencatat tahap (`stage`), hasil keluar helper (`exit`), dan kode kesalahan sebenarnya (`code`). Pesan umum versi lama tidak membuktikan bahwa pekerjaan aktif adalah penyebabnya. Tinjau dan samarkan data pribadi sebelum membagikan log.
 
-- `SESSION_BUSY` / `INSTALLER_FILES_BUSY`: selesaikan pekerjaan aktif, tutup Orca/omp secara normal, lalu coba lagi.
+- `SESSION_BUSY` / `INSTALLER_FILES_BUSY`: selesaikan pekerjaan aktif, tutup program yang memakai Ojak (biasanya Orca/omp) secara normal, lalu coba lagi. Instalasi senyap tidak menutup program.
+- `INSTALLER_CLOSE_CANCELLED`: Anda membatalkan konfirmasi penutupan. Tidak ada program lain yang ditutup dan tidak ada file yang diganti.
 - `OMP_CONFIG_FAILED`: pengaturan koneksi omp sebelumnya tidak dapat dipulihkan. Periksa pemasangan dan executable omp. Instalasi yang belum pernah terhubung ke omp dapat dihapus tanpa omp.
 - `LEASE_STATE_UNKNOWN`: layanan berhenti sehingga keamanan sesi tersimpan belum dapat dipastikan. Jalankan kembali layanan Ojak dan periksa pekerjaan aktif; jangan hapus database atau lease secara manual.
 - `HELPER_RESULT_UNAVAILABLE`: helper tidak menghasilkan file kode kesalahan. `exit=error` berarti gagal dijalankan; `exit=timeout` berarti nsExec kehabisan waktu. Periksa detail installer dan riwayat karantina antivirus.

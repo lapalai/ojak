@@ -44,6 +44,12 @@ impl Descendants {
         descendants
     }
 
+    /// Windows: 이 실행의 Job(native와 모든 자손)을 끝낸다. Job이 없거나 실패하면 false다.
+    #[cfg(windows)]
+    pub(crate) fn terminate_job(&self, exit_code: u32) -> bool {
+        self.job.as_ref().is_some_and(|job| job.terminate(exit_code).is_ok())
+    }
+
     /// Job에 남은 프로세스를 모두 관측한다. 그룹·자식 구분 없이 한 번에 얻으므로 자식 조회는 하지 않는다.
     #[cfg(windows)]
     fn collect(&mut self, _pid: u32, group: bool) {

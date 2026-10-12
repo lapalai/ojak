@@ -40,6 +40,7 @@ use windows_sys::Win32::{
         IO::{CancelIoEx, GetOverlappedResult, OVERLAPPED},
         JobObjects::{
             AssignProcessToJobObject, CreateJobObjectW, JobObjectBasicAccountingInformation, JobObjectBasicProcessIdList, OpenJobObjectW,
+            TerminateJobObject,
             JOBOBJECT_BASIC_ACCOUNTING_INFORMATION,
             JobObjectExtendedLimitInformation, QueryInformationJobObject, SetInformationJobObject,
             JOBOBJECT_EXTENDED_LIMIT_INFORMATION, JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE,
@@ -843,6 +844,14 @@ impl ProcessJob {
         if unsafe { AssignProcessToJobObject(self.handle.as_raw_handle() as HANDLE, process as HANDLE) }
             == 0
         {
+            return Err(io_error());
+        }
+        Ok(())
+    }
+
+    /// Job 안의 모든 프로세스를 즉시 끝낸다. 자손은 Job을 벗어날 수 없으므로 이 실행이 만든 트리만 대상이다.
+    pub fn terminate(&self, exit_code: u32) -> io::Result<()> {
+        if unsafe { TerminateJobObject(self.handle.as_raw_handle() as HANDLE, exit_code) } == 0 {
             return Err(io_error());
         }
         Ok(())
