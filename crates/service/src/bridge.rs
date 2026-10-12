@@ -214,6 +214,7 @@ pub(crate) struct Block {
     /// `None`이면 계정 전체, `Some`이면 그 모델 계열만 막는다.
     pub scope: Option<String>,
     pub until: i64,
+    pub observed_at: i64,
     pub reason: String,
     /// 사용량 한도 응답이면 참, 요청 속도 제한이면 거짓.
     pub quota: bool,
@@ -242,6 +243,30 @@ fn blocked(blocks: &[Block], key: &str, scope: Option<&str>, now: i64) -> bool {
     blocks
         .iter()
         .any(|block| block.key == key && block.until > now && (block.scope.is_none() || block.scope.as_deref() == scope))
+}
+
+fn quota_recovered(block: &Block, buckets: &[QuotaBucket], now: i64) -> bool {
+    if !block.quota { return false; }
+    let relevant = |bucket: &&QuotaBucket| match (block.scope.as_deref(), bucket.model.as_deref()) {
+        (None, None) => true,
+        (Some(_), None) => true,
+        (Some(scope), Some(model)) => model.eq_ignore_ascii_case(scope),
+        _ => false,
+    };
+    let mut found = false;
+    for bucket in buckets.iter().filter(relevant) {
+        found = true;
+        if bucket.observed_at <= block.observed_at
+            || bucket.observed_at > now
+            || now.saturating_sub(bucket.observed_at) > 900_000
+            || bucket.status != "known"
+            || !bucket.used_percent.is_some_and(|used| used.is_finite() && (0.0..100.0).contains(&used))
+            || bucket.resets_at.is_some_and(|reset| reset <= now)
+        { return false; }
+    }
+    let scoped = block.scope.as_deref().is_none_or(|scope| scope == "chat"
+        || buckets.iter().any(|bucket| bucket.model.as_deref().is_some_and(|model| model.eq_ignore_ascii_case(scope))));
+    found && scoped
 }
 
 /// 리셋 전까지 남은 한도를 시간당 얼마나 써야 다 쓰는지. 클수록 먼저 쓰는 게 이득이다.
@@ -646,9 +671,16 @@ impl Bridge {
             }
         }
         let now = now_ms();
+        let refreshed = self.service.lock().and_then(|store| accounts(&store.connection)).ok();
         let due = {
             let mut state = self.state();
-            state.blocks.retain(|block| block.until > now);
+            let State { blocks, gateways, .. } = &mut *state;
+            blocks.retain(|block| block.until > now && !refreshed.as_ref().is_some_and(|accounts| {
+                gateways.iter().find(|gateway| gateway.key() == block.key).is_some_and(|gateway| {
+                    let (buckets, enabled, _, _) = account_view(gateway, accounts, None, PaidPolicy::default(), now);
+                    enabled && quota_recovered(block, &buckets, now)
+                })
+            }));
             retain_sessions(&mut state.sessions, now);
             now - state.synced_at >= SYNC_MS || state.gateways.iter_mut().any(|gateway| !gateway.running())
         };
@@ -1095,6 +1127,7 @@ impl Bridge {
                     key: candidate.key.clone(),
                     scope: scope.clone(),
                     until,
+                    observed_at: now_ms(),
                     reason: if quota { "사용량 한도 소진".into() } else { "요청 속도 제한".into() },
                     quota,
                     estimate,
@@ -2190,7 +2223,7 @@ mod tests {
         let stale = Candidate { paid_fallback: Some(fresh), ..candidate("paid", vec![old]) };
         assert_eq!(choose(&[stale], "openai-codex", "gpt-6-astra", None, &none, &[], &[], 0.0, now), None);
         // 한도가 남았지만 일시 차단된 구독 계정이 있으면 기다리지 크레딧으로 넘어가지 않는다.
-        let blocks = [Block { key: "roomy".into(), scope: None, until: now + 60_000, reason: "test".into(), quota: false, estimate: false }];
+        let blocks = [Block { key: "roomy".into(), scope: None, until: now + 60_000, observed_at: now, reason: "test".into(), quota: false, estimate: false }];
         assert_eq!(choose(&pool, "openai-codex", "gpt-6-astra", None, &none, &blocks, &[], 0.0, now), None);
         // 모델 전용 한도 소진은 공용 크레딧이 대신 받지 않는다.
         let model_only = Candidate { paid_fallback: Some(fresh), ..candidate("paid", vec![bucket("7d", None, 20.0, 5 * DAY, now), bucket("spark", Some("fable"), 100.0, DAY, now)]) };
@@ -2234,7 +2267,7 @@ mod tests {
         let mut stickies = HashMap::new();
         stickies.insert("s1".into(), Sticky { key: "a".into(), model: "claude-opus-5-5".into(), cwd: None, last_used: now - 60_000, requests: 3 });
         assert_eq!(choose(&pool, "anthropic", "claude-opus-5-5", Some("s1"), &stickies, &[], &[], 0.0, now), Some(0));
-        let blocks = [Block { key: "a".into(), scope: None, until: now + 60_000, reason: "test".into(), quota: false, estimate: false }];
+        let blocks = [Block { key: "a".into(), scope: None, until: now + 60_000, observed_at: now, reason: "test".into(), quota: false, estimate: false }];
         assert_eq!(choose(&pool, "anthropic", "claude-opus-5-5", Some("s1"), &stickies, &blocks, &[], 0.0, now), Some(1));
         // 고정이 오래되면 다시 순위를 매긴다.
         stickies.get_mut("s1").unwrap().last_used = now - STICKY_MS - 1;
@@ -2245,18 +2278,18 @@ mod tests {
     fn scoped_block_does_not_leak_to_other_models_but_account_block_does() {
         let now = 1_000_000_000_000;
         let pool = [candidate("a", vec![]), candidate("b", vec![])];
-        let fable_block = [Block { key: "a".into(), scope: Some("fable".into()), until: now + 60_000, reason: "q".into(), quota: true, estimate: false }];
+        let fable_block = [Block { key: "a".into(), scope: Some("fable".into()), until: now + 60_000, observed_at: now, reason: "q".into(), quota: true, estimate: false }];
         let none = HashMap::new();
         assert_eq!(choose(&pool, "anthropic", "claude-fable-5-1", None, &none, &fable_block, &[], 0.0, now), Some(1));
         assert_eq!(choose(&pool, "anthropic", "claude-opus-5-5", None, &none, &fable_block, &[], 0.0, now), Some(0));
         // Codex는 chat 한도와 spark 한도가 따로다.
-        let chat_block = [Block { key: "a".into(), scope: block_scope("openai-codex", "gpt-6-astra"), until: now + 60_000, reason: "q".into(), quota: true, estimate: false }];
+        let chat_block = [Block { key: "a".into(), scope: block_scope("openai-codex", "gpt-6-astra"), until: now + 60_000, observed_at: now, reason: "q".into(), quota: true, estimate: false }];
         assert_eq!(choose(&pool, "openai-codex", "gpt-6-astra", None, &none, &chat_block, &[], 0.0, now), Some(1));
         // 공급자 수동 배정: 새 대화는 고정 계정이 받을 수 있으면 그 계정. 소진·차단이면 다른 계정으로 넘어간다.
         let mut pinned_pool = vec![candidate("a", vec![]), candidate("b", vec![])];
         pinned_pool[1].pinned = true;
         assert_eq!(choose(&pinned_pool, "anthropic", "claude-opus-5-5", None, &none, &[], &[], 0.0, now), Some(1));
-        let pinned_block = [Block { key: "b".into(), scope: None, until: now + 60_000, reason: "q".into(), quota: false, estimate: false }];
+        let pinned_block = [Block { key: "b".into(), scope: None, until: now + 60_000, observed_at: now, reason: "q".into(), quota: false, estimate: false }];
         assert_eq!(choose(&pinned_pool, "anthropic", "claude-opus-5-5", None, &none, &pinned_block, &[], 0.0, now), Some(0));
         // 진행 중인 대화(sticky)는 고정을 바꿔도 원래 계정을 유지한다.
         let mut kept = HashMap::new();
@@ -2284,7 +2317,29 @@ mod tests {
     }
 
     fn block(key: &str, scope: Option<String>, until: i64, quota: bool, estimate: bool) -> Block {
-        Block { key: key.into(), scope, until, reason: "test".into(), quota, estimate }
+        Block { key: key.into(), scope, until, observed_at: until - 60_000, reason: "test".into(), quota, estimate }
+    }
+
+    #[test]
+    fn quota_recovery_requires_new_known_scoped_usage_not_rate_or_stale_data() {
+        let now = 1_000_000_000_000;
+        let blocked = block("a", None, now + 50_000, true, false);
+        let mut usage = bucket("weekly", None, 0.0, DAY, now);
+        assert!(quota_recovered(&blocked, &[usage.clone()], now));
+        usage.observed_at = blocked.observed_at;
+        assert!(!quota_recovered(&blocked, &[usage.clone()], now));
+        usage.observed_at = now;
+        usage.status = "stale".into();
+        assert!(!quota_recovered(&blocked, &[usage.clone()], now));
+        usage.status = "known".into();
+        assert!(!quota_recovered(&block("a", None, now + 50_000, false, false), &[usage.clone()], now));
+        let scoped = block("a", Some("fable".into()), now + 50_000, true, false);
+        assert!(!quota_recovered(&scoped, &[usage.clone()], now));
+        let model = bucket("fable", Some("fable"), 0.0, DAY, now);
+        assert!(quota_recovered(&scoped, &[usage.clone(), model], now));
+        usage.used_percent = Some(100.0);
+        assert!(!quota_recovered(&blocked, &[usage], now));
+        assert!(!quota_recovered(&blocked, &[], now));
     }
 
     #[test]

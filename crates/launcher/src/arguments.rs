@@ -699,6 +699,82 @@ pub fn tool_from_argv0(value: &OsStr) -> Option<&'static str> {
     }
 }
 
+/// 사용자가 직접 보는 대화형 실행인지. 한도 소진 자동 이어가기는 이 경우에만 켠다.
+/// Claude의 `--print`·입출력 형식 지정, Codex의 `exec`·`e`·`review`는 호스트나 스크립트가 출력을 읽는 한 번짜리 실행이라
+/// 중간에 프로세스를 끝내고 다시 열면 안 된다. 읽을 수 없는 인수가 있으면 보수적으로 아니라고 본다.
+pub fn is_interactive(tool: &str, args: &[OsString]) -> bool {
+    let mut index = 0;
+    while index < args.len() {
+        let Some(text) = args[index].to_str() else {
+            return false;
+        };
+        if text == "--" {
+            // `--` 뒤는 모두 첫 프롬프트 문장이다.
+            return true;
+        }
+        if text.starts_with('-') && text.len() > 1 {
+            let name = text.split_once('=').map_or(text, |(key, _)| key);
+            if tool == "claude"
+                && matches!(name, "--print" | "-p" | "--output-format" | "--input-format")
+            {
+                return false;
+            }
+            if !text.contains('=') && takes_option_value(tool, name) {
+                index += 1;
+            }
+        } else {
+            // 첫 위치 인수가 Codex 비대화형 하위 명령이면 대화형이 아니다. 그 밖의 위치 인수는 첫 프롬프트다.
+            return !(tool == "codex" && matches!(text, "exec" | "e" | "review"));
+        }
+        index += 1;
+    }
+    true
+}
+
+/// 대화 기록을 남기지 않는 실행인지. 기록이 없으면 한도 소진 증거도, 이어 열 대화도 없다.
+pub fn is_ephemeral(args: &[OsString]) -> bool {
+    args.iter()
+        .take_while(|arg| arg.as_os_str() != "--")
+        .any(|arg| arg == "--no-session-persistence" || arg == "--ephemeral")
+}
+
+/// 다른 계정에서 같은 대화를 다시 열 때 이어 갈 native 인수. 옵션(권한·샌드박스·추가 폴더 등)만 남기고
+/// 첫 프롬프트(위치 인수·`--` 뒤)와 대화를 새로 만들거나 첫 입력을 채우는 옵션은 버린다. 모르는 옵션이 있거나
+/// 작업 폴더를 바꾸는 `--worktree`가 있으면 안전하게 옮길 수 없으므로 `None`이다(자동 이어가기를 켜지 않는다).
+pub fn resume_carry(tool: &str, args: &[OsString]) -> Option<Vec<OsString>> {
+    let mut kept = Vec::new();
+    let mut index = 0;
+    while index < args.len() {
+        let text = args[index].to_str()?;
+        if text == "--" {
+            break;
+        }
+        if text.starts_with('-') && text.len() > 1 {
+            let (name, inline) = text.split_once('=').map_or((text, false), |(key, _)| (key, true));
+            if matches!(name, "--worktree" | "-w") {
+                return None;
+            }
+            let kind = option_kind(tool, name)?;
+            let start = index;
+            if kind == OptionKind::Value && !inline {
+                index += 1;
+                args.get(index)?;
+            }
+            if !carry_dropped(tool, name) {
+                kept.extend_from_slice(&args[start..=index]);
+            }
+        }
+        index += 1;
+    }
+    Some(kept)
+}
+
+/// 재개 때 다시 쓰면 같은 대화가 갈라지거나(`--fork-session`), 첫 입력·첨부가 되풀이되는 옵션.
+fn carry_dropped(tool: &str, name: &str) -> bool {
+    matches!(name, "--fork-session" | "--prefill" | "--file" | "--session-id")
+        || (tool == "codex" && matches!(name, "--image" | "-i"))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

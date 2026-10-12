@@ -32,8 +32,8 @@ Ojak adalah **aplikasi menu bar macOS dan system tray Windows** untuk mengelola 
 ## Kenapa pakai Ojak?
 
 - **Cek kuota tanpa berpindah akun.** Sisa kuota dan waktu reset tiap akun tersedia dalam satu layar.
-- **Tetap pakai terminal seperti biasa.** CLI resminya tetap sama, begitu juga perintah `claude` dan `codex`. Percakapan yang sedang berjalan tetap memakai akun yang dipilih saat mulai.
-- **Lanjutkan percakapan dengan persetujuanmu.** Saat sesi CLI yang dikelola Ojak berakhir setelah kuota habis, Ojak bisa menawarkan untuk membuka kembali percakapan di akun lain yang tersedia. Akun tidak diganti diam-diam di tengah sesi.
+- **Tetap pakai terminal seperti biasa.** CLI resminya tetap sama, begitu juga perintah `claude` dan `codex`.
+- **Lanjutkan otomatis setelah kuota habis.** Pada sesi interaktif yang didukung, Ojak mendeteksi catatan kehabisan kuota, memastikan proses lama sudah berhenti, lalu membuka percakapan yang sama di akun lain yang tersedia. [Cakupan dan batasan](usage.id.md#melanjutkan-percakapan-setelah-kuota-habis).
 - **Pahami pemakaian token.** Lihat jumlah token dan perkiraan biaya berdasarkan harga API dari catatan omp, Claude Code, dan Codex di komputer ini. Angkanya bukan tagihan langgananmu; model yang harganya belum diketahui ditandai terpisah.
 
 Antarmuka aplikasi tersedia dalam **Bahasa Indonesia, Inggris, dan Korea**. Sebagian pesan CLI, layanan, dan installer masih berbahasa Korea.
@@ -98,7 +98,7 @@ Kalau penyiapan belum selesai, kartu panduan awal menunjukkan langkah yang tersi
 
 Ojak menyimpan catatan akun, pengaturan, dan log diagnostik di komputermu. **Ojak tidak mengirim statistik pemakaian atau mengunggah diagnostik secara otomatis.** Ini bukan berarti aplikasinya bekerja secara offline: login, pengecekan kuota, dan permintaan model tetap terhubung ke penyedia. Pengecekan pembaruan menghubungi GitHub.
 
-- Akun dipilih saat sesi baru yang dikelola Ojak dimulai. Ojak tidak mengganti akun percakapan yang sedang berjalan secara diam-diam.
+- Akun dipilih saat sesi baru dimulai. Sesi interaktif yang didukung dapat dibuka kembali secara otomatis di akun lain setelah kuota dipastikan habis; proses lama dihentikan terlebih dahulu, bukan mengganti kredensial di dalam CLI yang sedang berjalan.
 - Jika Ojak belum bisa memastikan suatu sesi sudah selesai, slot akun tetap ditahan agar tidak dipakai oleh sesi lain secara bersamaan tanpa kepastian.
 - Perkiraan biaya token bukan tagihan. Fitur opsional kredit Codex dan pemakaian tambahan Claude bisa menimbulkan biaya dari penyedia; penggunaannya untuk sesi baru tidak aktif secara bawaan. Ojak tidak bisa membatasi biaya dari CLI resmi yang sudah berjalan.
 

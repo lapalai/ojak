@@ -28,7 +28,9 @@ aam explain --tool codex
 
 ### Continue after a limit is reached
 
-When an interactive managed session exits after using up its quota, Ojak can offer to reopen the same conversation on another eligible account. Accept the `[Y/n]` prompt to proceed. If usage data has not caught up, or the prompt cannot be shown, run this in the same project folder:
+For interactive Claude Code and Codex terminals launched through Ojak, an explicit usage-exhaustion record triggers automatic continuation on another eligible account. Ojak first confirms that the old process and its descendants have stopped and the service has released the lease, then reopens the same conversation. There is no `[Y/n]` prompt. It never revisits an account in the same chain and allows at most eight switches per invocation. If no eligible account remains, or termination or conversation identity cannot be confirmed, it stops with an explanation.
+
+Noninteractive commands (`claude -p`, `codex exec`, etc.), pipes, nested sessions, ephemeral sessions, `--worktree`, and options that cannot safely be carried over do not switch automatically. Ordinary rate-limit errors, network failures, and user cancellation do not trigger a switch. Detection also depends on the native CLI writing a supported structured exhaustion record. When it cannot detect one, exit the CLI and continue manually from the same project folder:
 
 ```sh
 aam continue
@@ -88,15 +90,24 @@ For maintainers only, a direct macOS restart is `launchctl kickstart -k gui/$(id
 
 Do not install or run the installer as administrator. Verify that the installer came from [this repository's releases](https://github.com/lapalai/ojak/releases/latest). If antivirus quarantines `aam.exe` or `aam-service.exe`, review the detection and source before considering a file-specific exception; do not turn off protection globally. If unsure, report the detection without credentials or personal data.
 
-If setup says it could not safely stop Ojak:
+Starting with 0.7.0, if a program is still using Ojak's executable (`INSTALLER_FILES_BUSY`), a non-silent installer shows the affected `aam.exe` processes and their launching apps (names and process IDs only). It asks for permission before closing anything. Only `aam.exe` from that installation, running as the same user in the same login session, can be closed. Launching apps such as Orca/omp are shown for context and are not closed.
 
-1. Finish running Claude Code/Codex tasks, then quit **Orca and every omp process** normally. Closing only an Orca window may leave its observer running and lock `aam.exe`.
+1. **Close normally.** After you agree, the installer asks those programs to close and then continues the update. Every job those programs are running may stop, and closed programs are not reopened automatically. Conversations are not restored automatically.
+2. **Force close is a separate choice.** Only if a program does not close normally, the installer shows a second warning that unsaved data or running work may be lost. Nothing is force-closed unless you agree to that second prompt.
+3. **New processes need new consent.** If a new process starts using the executable, the installer asks again; earlier consent does not carry over. If processes keep restarting, it stops safely after at most three rounds.
+4. **Cancel stops everything.** Canceling (`INSTALLER_CLOSE_CANCELLED`) closes nothing further and replaces no files. Programs you already allowed to close stay closed.
+5. **Silent installs (`/S`) never close programs.** They fail with `INSTALLER_FILES_BUSY` instead.
+
+If a program the installer cannot close is still holding the file, or the installer stops for another reason:
+
+1. Finish running Claude Code/Codex tasks, then normally quit the launching app that keeps starting the worker (such as Orca/omp). Closing only its window may leave the observer running and lock `aam.exe`.
 2. Retry setup. When it stops at this safety check, it has not replaced the application files.
 3. If the installer details mention `installer recover`, an earlier install may have been interrupted. With Orca/omp closed, [report the issue](https://github.com/lapalai/ojak/issues) rather than editing the database or forcing file replacement.
 
 Inspect the installer's details and `%TEMP%\Ojak-installer.log`. Starting with 0.6.3, failures record the stage (`stage`), helper exit result (`exit`), and actual error code (`code`). Older generic messages do not establish that running work caused the failure. Review and redact any log before sharing it.
 
-- `SESSION_BUSY` / `INSTALLER_FILES_BUSY`: finish running work, quit Orca/omp normally, then retry.
+- `SESSION_BUSY` / `INSTALLER_FILES_BUSY`: finish running work, close the program that is using Ojak (often Orca/omp) normally, then retry. Silent installs never close programs.
+- `INSTALLER_CLOSE_CANCELLED`: you canceled the close prompt. No further programs were closed and no files were replaced.
 - `OMP_CONFIG_FAILED`: previous omp connection settings could not be restored. Check the omp installation and executable. An installation never connected to omp can be removed without omp.
 - `LEASE_STATE_UNKNOWN`: the service is stopped and saved session safety cannot be established. Restart the Ojak service and check running work; do not delete the database or leases manually.
 - `HELPER_RESULT_UNAVAILABLE`: the helper did not leave an error-code file. `exit=error` means launch failed; `exit=timeout` means nsExec timed out. Check installer details and antivirus quarantine history.
