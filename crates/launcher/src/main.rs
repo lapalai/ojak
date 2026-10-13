@@ -364,23 +364,32 @@ fn setup_omp(paths: &Paths, install: bool) -> Value {
     })
 }
 
-/// 서비스를 끄기 전에 `aam deactivate`와 같은 순서로 omp를 푼다. broker 블록이 남은 채 서비스가 사라지면 omp 로그인이 깨진다.
+
 #[cfg(windows)]
-fn remove_installation(paths: &Paths, directory: &Path) -> Result<(), ApiError> {
-    install::confirm_removal_target(paths, directory)?;
-    deactivate::run(paths, false)?;
-    install::installer(paths, "remove", directory)
+fn run_installer(paths: &Paths, action: &str, directory: &Path) -> Result<(), ApiError> {
+    let failed = |_| ApiError::new("INSTALLER_LOCK_FAILED", "설치 도우미의 잠금 소유권을 확인하지 못했습니다.");
+    if !paths.home.try_exists().map_err(failed)? {
+        aam_protocol::secure::restrict_dir(&paths.home).map_err(failed)?;
+    }
+    let lock = aam_protocol::secure::open_owned_file(&paths.home.join("installer-operation.lock")).map_err(failed)?;
+    match lock.try_lock() {
+        Ok(()) => {}
+        Err(std::fs::TryLockError::WouldBlock) => return Err(ApiError::new("INSTALLER_ALREADY_RUNNING", "다른 설치 도우미가 실행 중입니다. 복구 기록은 변경하지 않았습니다.")),
+        Err(std::fs::TryLockError::Error(failure)) => return Err(failed(failure)),
+    }
+    // NSIS 부모가 종료되어도 helper의 전체 수명 동안 guard가 살아 있다. 서비스 자식에는 상속하지 않는다.
+    if action == "remove" {
+        install::confirm_removal_target(paths, directory)?;
+        deactivate::run(paths, false)?;
+    }
+    install::installer(paths, action, directory)
 }
 
 fn execute(paths: &Paths, action: Action) -> Result<(), ApiError> {
     match action {
         #[cfg(windows)]
         Action::Installer { action, directory, error_file } => {
-            let result = if action == "remove" {
-                remove_installation(paths, &directory)
-            } else {
-                install::installer(paths, &action, &directory)
-            };
+            let result = run_installer(paths, &action, &directory);
             if let Some(path) = error_file {
                 // 원문 오류에는 사용자 경로 등이 있을 수 있다. NSIS에는 코드만 전달한다.
                 let code = result.as_ref().err().map_or("OK", |error| error.code.as_str());
@@ -877,5 +886,37 @@ mod usage_tests {
         assert!(!error.message.contains(token), "{}", error.message);
         assert!(error.message.contains("명령") || error.message.contains("옵션") || error.message.contains("인수"), "{}", error.message);
         assert!(error.message.contains("--help"), "{}", error.message);
+    }
+}
+
+#[cfg(all(test, windows))]
+mod installer_tests {
+    use super::*;
+
+    #[test]
+    fn surviving_helper_blocks_the_entire_installer_dispatch_until_it_exits() {
+        let root = std::env::temp_dir().join(format!("aam-installer-lock-{}", aam_protocol::new_id()));
+        let home = root.join("state");
+        let app = root.join("app");
+        aam_protocol::secure::restrict_dir(&home).unwrap();
+        aam_protocol::secure::restrict_dir(&app).unwrap();
+        std::fs::write(app.join("aam.exe"), b"original launcher").unwrap();
+        std::fs::write(app.join("aam-service.exe"), b"original service").unwrap();
+        let paths = Paths { profiles: home.join("profiles"), socket: home.join("socket"), database: home.join("state.sqlite"), home };
+        let held = aam_protocol::secure::open_owned_file(&paths.home.join("installer-operation.lock")).unwrap();
+        held.try_lock().unwrap();
+        let error_file = root.join("error.txt");
+        let failure = execute(&paths, Action::Installer { action: "prepare".into(), directory: app.clone(), error_file: Some(error_file.clone()) }).unwrap_err();
+        assert_eq!(failure.code, "INSTALLER_ALREADY_RUNNING");
+        assert_eq!(std::fs::read_to_string(error_file).unwrap(), "INSTALLER_ALREADY_RUNNING");
+        assert!(!paths.home.join("installer-update.json").exists());
+        assert!(!paths.home.join("installer-backup").exists());
+        assert_eq!(std::fs::read(app.join("aam.exe")).unwrap(), b"original launcher");
+        drop(held);
+        execute(&paths, Action::Installer { action: "prepare".into(), directory: app.clone(), error_file: None }).unwrap();
+        execute(&paths, Action::Installer { action: "recover".into(), directory: app.clone(), error_file: None }).unwrap();
+        assert!(!paths.home.join("installer-update.json").exists());
+        assert_eq!(std::fs::read(app.join("aam-service.exe")).unwrap(), b"original service");
+        std::fs::remove_dir_all(root).unwrap();
     }
 }
