@@ -126,6 +126,13 @@ mod sys {
             winutil::pipe_peer_is_self(&self.handle, self.server_end)
         }
 
+        pub fn server_process_id(&self) -> io::Result<u32> {
+            if self.server_end {
+                return Err(io::Error::other("클라이언트 연결의 서버 identity만 확인할 수 있습니다"));
+            }
+            winutil::pipe_server_pid_of(&self.handle)
+        }
+
         pub fn set_read_timeout(&self, timeout: Option<Duration>) -> io::Result<()> {
             self.read_timeout.set(timeout);
             Ok(())

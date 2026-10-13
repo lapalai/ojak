@@ -11,12 +11,15 @@ use serde_json::json;
 use std::{
     collections::BTreeMap,
     fs,
+    ffi::OsString,
+    os::windows::{ffi::OsStringExt, fs::{MetadataExt, OpenOptionsExt}, io::{AsRawHandle, FromRawHandle, OwnedHandle}},
     path::{Path, PathBuf},
     thread,
     time::{Duration, Instant},
 };
 use windows_sys::Win32::{
-    Foundation::{CloseHandle, ERROR_FILE_NOT_FOUND, WAIT_OBJECT_0},
+    Foundation::{CloseHandle, ERROR_FILE_NOT_FOUND, WAIT_OBJECT_0, WAIT_TIMEOUT},
+    Storage::FileSystem::{FILE_FLAG_OPEN_REPARSE_POINT, FILE_SHARE_READ},
     System::{
         Registry::{
             RegCloseKey, RegCreateKeyExW, RegDeleteValueW, RegGetValueW, RegOpenKeyExW, RegSetValueExW, HKEY,
@@ -24,9 +27,9 @@ use windows_sys::Win32::{
             REG_SZ, RRF_NOEXPAND, RRF_RT_REG_EXPAND_SZ, RRF_RT_REG_SZ,
         },
         Threading::{
-            CreateProcessW, OpenProcess, TerminateProcess, WaitForSingleObject,
+            CreateProcessW, OpenProcess, QueryFullProcessImageNameW, TerminateProcess, WaitForSingleObject,
             CREATE_BREAKAWAY_FROM_JOB, CREATE_NEW_PROCESS_GROUP, CREATE_NO_WINDOW,
-            DETACHED_PROCESS, PROCESS_INFORMATION, PROCESS_SYNCHRONIZE, PROCESS_TERMINATE,
+            DETACHED_PROCESS, PROCESS_INFORMATION, PROCESS_QUERY_LIMITED_INFORMATION, PROCESS_SYNCHRONIZE, PROCESS_TERMINATE,
             STARTUPINFOW,
         },
     },
@@ -485,7 +488,7 @@ fn running(paths: &Paths) -> bool {
 }
 
 /// 콘솔·작업 창과 분리해 서비스를 시작한다. 터미널이나 원격 세션이 닫혀도 함께 끝나지 않게 한다.
-fn start_detached(binary: &Path, paths: &Paths) -> Result<(), ApiError> {
+fn start_detached(binary: &Path, paths: &Paths) -> Result<ServiceProcess, ApiError> {
     let command = wide(&format!("\"{}\"", binary.display()));
     let mut command = command;
     let mut startup: STARTUPINFOW = unsafe { std::mem::zeroed() };
@@ -510,11 +513,12 @@ fn start_detached(binary: &Path, paths: &Paths) -> Result<(), ApiError> {
             )
         };
         if ok != 0 {
-            unsafe {
-                CloseHandle(info.hThread);
-                CloseHandle(info.hProcess);
-            }
-            return Ok(());
+            unsafe { CloseHandle(info.hThread); }
+            return Ok(ServiceProcess {
+                handle: unsafe { OwnedHandle::from_raw_handle(info.hProcess as _) },
+                pid: info.dwProcessId,
+                image: None,
+            });
         }
     }
     Err(error("SERVICE_START_FAILED", "관리 서비스를 시작하지 못했습니다."))
@@ -579,6 +583,71 @@ pub fn service_uninstall(paths: &Paths) -> Result<String, ApiError> {
     service_shutdown(paths, true)
 }
 
+
+/// RPC 승인과 종료가 같은 프로세스 객체를 대상으로 하도록 핸들을 유지한다.
+struct ServiceProcess {
+    handle: OwnedHandle,
+    pid: u32,
+    image: Option<fs::File>,
+}
+impl ServiceProcess {
+    fn connect(paths: &Paths, binary: &Path) -> Result<Option<Self>, ApiError> {
+        let pid = match aam_protocol::service_pid(paths) {
+            Ok(pid) => pid,
+            Err(failure) if failure.raw_os_error() == Some(ERROR_FILE_NOT_FOUND as i32) => return Ok(None),
+            Err(_) => return Err(error("UNMANAGED_SERVICE", "서비스 연결의 소유자를 확인하지 못해 복구 기록을 보존했습니다.")),
+        };
+        let handle = unsafe { OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION | PROCESS_TERMINATE | PROCESS_SYNCHRONIZE, 0, pid) };
+        if handle.is_null() { return Err(error("UNMANAGED_SERVICE", "서비스 프로세스를 확인하지 못해 중지하지 않았습니다.")); }
+        let mut process = Self { handle: unsafe { OwnedHandle::from_raw_handle(handle as _) }, pid, image: None };
+        if !aam_protocol::winutil::same_user_process(pid) || !process.alive() {
+            return Err(error("UNMANAGED_SERVICE", "현재 사용자의 실행 중 서비스가 아니므로 중지하지 않았습니다."));
+        }
+        let parent = binary.parent().ok_or_else(|| error("FOREIGN_INSTALL", "서비스 설치 경로를 확인하지 못했습니다."))?;
+        update::directory(parent)?;
+        // 동일 파일 객체를 유지하고 승인·종료가 끝날 때까지 쓰기와 이름 교체를 막는다.
+        let file = fs::OpenOptions::new().read(true).share_mode(FILE_SHARE_READ)
+            .custom_flags(FILE_FLAG_OPEN_REPARSE_POINT).open(binary).map_err(io_error)?;
+        let metadata = file.metadata().map_err(io_error)?;
+        if !metadata.is_file() || metadata.file_attributes() & 0x400 != 0 {
+            return Err(error("UPDATE_UNSAFE_FILE", "서비스 실행 파일의 종류를 확인하지 못했습니다."));
+        }
+        process.image = Some(file);
+        let mut image = [0u16; 32768];
+        let mut length = image.len() as u32;
+        if unsafe { QueryFullProcessImageNameW(process.handle.as_raw_handle() as _, 0, image.as_mut_ptr(), &mut length) } == 0 {
+            return Err(error("UNMANAGED_SERVICE", "서비스 실행 파일을 확인하지 못해 중지하지 않았습니다."));
+        }
+        let image = PathBuf::from(OsString::from_wide(&image[..length as usize]));
+        if binary.file_name().and_then(|name| name.to_str()) != Some("aam-service.exe")
+            || image.canonicalize().map_err(io_error)? != binary.canonicalize().map_err(io_error)?
+        {
+            return Err(error("FOREIGN_INSTALL", "다른 설치의 실행 중 서비스는 중지하지 않습니다."));
+        }
+        Ok(Some(process))
+    }
+    fn alive(&self) -> bool {
+        unsafe { WaitForSingleObject(self.handle.as_raw_handle() as _, 0) == WAIT_TIMEOUT }
+    }
+    fn call(&self, paths: &Paths, method: &str, params: serde_json::Value) -> Result<serde_json::Value, ApiError> {
+        if !self.alive() { return Err(error("SERVICE_PEER_CHANGED", "승인한 서비스가 종료되어 다른 프로세스에 요청하지 않았습니다.")); }
+        aam_protocol::call_for_process(paths, method, params, self.pid)
+    }
+    fn prepare(&self, paths: &Paths) -> Result<String, ApiError> {
+        let prepared = self.call(paths, "service.prepareUninstall", json!({}))?;
+        let permit = prepared.get("permit").and_then(|value| value.as_str()).filter(|value| !value.is_empty());
+        if prepared.get("safe").and_then(|value| value.as_bool()) != Some(true) || permit.is_none() {
+            return Err(error("INVALID_UNINSTALL_PERMIT", "활성·불확실 lease의 안전 조건을 확인하지 못해 서비스를 중지하지 않았습니다."));
+        }
+        Ok(permit.unwrap().to_owned())
+    }
+    fn stop(&self) -> bool {
+        unsafe {
+            TerminateProcess(self.handle.as_raw_handle() as _, 0) != 0
+                && WaitForSingleObject(self.handle.as_raw_handle() as _, 10_000) == WAIT_OBJECT_0
+        }
+    }
+}
 /// macOS와 같은 안전 절차: 신규 배정 차단과 lease 안전 검사(permit) → 서비스 종료 확인 → 기록 정리.
 fn service_shutdown(paths: &Paths, remove_installation: bool) -> Result<String, ApiError> {
     let record_path = paths.home.join("service-install.json");
@@ -591,17 +660,13 @@ fn service_shutdown(paths: &Paths, remove_installation: bool) -> Result<String, 
     if record.owner != OWNER {
         return Err(error("FOREIGN_INSTALL", "앱 소유 서비스 기록이 아니므로 제거하지 않습니다."));
     }
-    if running(paths) {
-        let prepared = call(paths, "service.prepareUninstall", json!({}))?;
-        let permit = prepared.get("permit").and_then(|v| v.as_str()).filter(|v| !v.is_empty());
-        if prepared.get("safe").and_then(|v| v.as_bool()) != Some(true) || permit.is_none() {
-            return Err(error("INVALID_UNINSTALL_PERMIT", "신규 배정 차단과 lease 안전 검사를 확인하지 못해 서비스를 중지하지 않았습니다."));
-        }
-        record.uninstall_permit = permit.map(str::to_owned);
+    if let Some(process) = ServiceProcess::connect(paths, &record.binary_path)? {
+        let permit = process.prepare(paths)?;
+        record.uninstall_permit = Some(permit);
         save(&record_path, &record)?;
-        let stopped = aam_protocol::service_pid(paths).ok().is_some_and(terminate);
+        let stopped = process.stop();
         if !stopped || running(paths) {
-            if call(paths, "service.cancelUninstall", json!({ "permit": record.uninstall_permit })).is_ok() {
+            if process.call(paths, "service.cancelUninstall", json!({ "permit": record.uninstall_permit })).is_ok() {
                 record.uninstall_permit = None;
                 save(&record_path, &record)?;
             }
@@ -624,17 +689,6 @@ fn service_shutdown(paths: &Paths, remove_installation: bool) -> Result<String, 
     Ok("신규 배정과 활성·불확실 lease의 안전 조건을 확인한 뒤 자동 실행 등록만 제거했습니다. 계정·프로필·로그는 보존했습니다.".into())
 }
 
-fn terminate(pid: u32) -> bool {
-    unsafe {
-        let process = OpenProcess(PROCESS_TERMINATE | PROCESS_SYNCHRONIZE, 0, pid);
-        if process.is_null() {
-            return false;
-        }
-        let ok = TerminateProcess(process, 0) != 0 && WaitForSingleObject(process, 10_000) == WAIT_OBJECT_0;
-        CloseHandle(process);
-        ok
-    }
-}
 
 /// 앱 업데이트 뒤 서비스 교체(macOS `launchctl kickstart -k`에 해당). 앱이 등록한 서비스일 때만 하고,
 /// 등록 기록이 없으면 아무것도 하지 않는다. 종료 확인 뒤 기록된 실행 파일로 다시 시작한다.

@@ -686,6 +686,16 @@ pub fn write_frame<W: Write, T: Serialize>(writer: &mut W, value: &T) -> io::Res
     writer.flush()
 }
 pub fn call(paths: &Paths, method: &str, params: Value) -> Result<Value, ApiError> {
+    call_inner(paths, method, params, None)
+}
+
+/// 설치 복구는 승인한 프로세스와 같은 pipe 연결에만 안전 RPC를 전송한다.
+#[cfg(windows)]
+pub fn call_for_process(paths: &Paths, method: &str, params: Value, pid: u32) -> Result<Value, ApiError> {
+    call_inner(paths, method, params, Some(pid))
+}
+
+fn call_inner(paths: &Paths, method: &str, params: Value, expected_pid: Option<u32>) -> Result<Value, ApiError> {
     let stream = connect(&paths.socket).map_err(|_| {
         ApiError::new(
             "DAEMON_UNAVAILABLE",
@@ -694,12 +704,21 @@ pub fn call(paths: &Paths, method: &str, params: Value) -> Result<Value, ApiErro
     })?;
     // 서비스가 검증하듯 클라이언트도 상대가 같은 사용자인지 확인한다. 다른 사용자가 경로를
     // 선점해 가짜 응답(실행 파일 경로 등)을 주는 것을 막는다.
-    if !peer_is_self(&stream) {
+    #[cfg(windows)]
+    let trusted = match expected_pid {
+        Some(pid) => stream.server_process_id().ok() == Some(pid),
+        None => peer_is_self(&stream),
+    };
+    #[cfg(not(windows))]
+    let trusted = peer_is_self(&stream);
+    if !trusted {
         return Err(ApiError::new(
             "DAEMON_UNTRUSTED",
             "관리 서비스 연결의 상대가 현재 사용자가 아닙니다. 연결하지 않았습니다.",
         ));
     }
+    #[cfg(not(windows))]
+    let _ = expected_pid;
     let mut stream = stream;
     stream
         .set_read_timeout(Some(std::time::Duration::from_secs(60)))
