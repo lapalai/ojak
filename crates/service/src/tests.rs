@@ -135,6 +135,58 @@ fn abort(grant: &LeaseGrant) -> LeaseAction {
         native_session_id: None,
     }
 }
+#[cfg(windows)]
+#[test]
+fn stopped_recovery_requires_matching_permit_and_reopens_new_admission() {
+    let fixture = Fixture::new();
+    let now = now_ms();
+    fixture.save(&account_fixture("recovery", now));
+    let prepared = fixture.service.dispatch("service.prepareUninstall", serde_json::json!({})).unwrap();
+    let permit = prepared["permit"].as_str().unwrap();
+    assert_eq!(fixture.service.acquire(request("blocked-before"), now).unwrap_err().code, "ADMISSION_DISABLED");
+    assert_eq!(cancel_stopped_uninstall(&fixture.service.paths, Some("different-permit")).unwrap_err().code, "UNINSTALL_PERMIT_MISMATCH");
+    assert_eq!(fixture.service.acquire(request("still-blocked"), now).unwrap_err().code, "ADMISSION_DISABLED");
+    cancel_stopped_uninstall(&fixture.service.paths, Some(permit)).unwrap();
+    // DB 취소 뒤 receipt 저장 전에 중단되어도 같은 승인 재시도는 완료 상태를 유지한다.
+    cancel_stopped_uninstall(&fixture.service.paths, Some(permit)).unwrap();
+    let grant = fixture.service.acquire(request("after-cancel"), now).unwrap();
+    assert_eq!(grant.session.state, "PREPARED");
+    fixture.service.finish(abort(&grant), true, now).unwrap();
+}
+
+#[cfg(windows)]
+#[test]
+fn stopped_recovery_preserves_uncertain_reservations_and_the_admission_barrier() {
+    let fixture = Fixture::new();
+    let now = now_ms();
+    fixture.save(&account_fixture("held", now));
+    let grant = fixture.service.acquire(request("held-before-recovery"), now).unwrap();
+    set_metadata(&fixture.service.lock().unwrap().connection, "uninstallPermit", &Some("held-permit")).unwrap();
+    assert_eq!(cancel_stopped_uninstall(&fixture.service.paths, Some("held-permit")).unwrap_err().code, "SESSION_BUSY");
+    let snapshot = fixture.service.stored_snapshot().unwrap();
+    assert_eq!(snapshot.sessions.iter().find(|session| session.id == grant.session.id).unwrap().state, "PREPARED");
+    assert_eq!(fixture.service.acquire(request("must-stay-blocked"), now).unwrap_err().code, "ADMISSION_DISABLED");
+    fixture.service.dispatch("service.cancelUninstall", serde_json::json!({"permit":"held-permit"})).unwrap();
+    fixture.service.finish(abort(&grant), true, now).unwrap();
+}
+
+
+#[cfg(windows)]
+#[test]
+fn stopped_recovery_refuses_a_starting_service_that_has_not_bound_its_pipe() {
+    let fixture = Fixture::new();
+    let now = now_ms();
+    fixture.save(&account_fixture("starting", now));
+    let prepared = fixture.service.dispatch("service.prepareUninstall", serde_json::json!({})).unwrap();
+    let permit = prepared["permit"].as_str().unwrap();
+    let lifetime = server::service_lifetime_lock(&fixture.service.paths).unwrap();
+    assert_eq!(cancel_stopped_uninstall(&fixture.service.paths, Some(permit)).unwrap_err().code, "SERVICE_ALREADY_RUNNING");
+    assert_eq!(fixture.service.acquire(request("startup-must-stay-blocked"), now).unwrap_err().code, "ADMISSION_DISABLED");
+    drop(lifetime);
+    cancel_stopped_uninstall(&fixture.service.paths, Some(permit)).unwrap();
+    let grant = fixture.service.acquire(request("after-startup-cancel"), now).unwrap();
+    fixture.service.finish(abort(&grant), true, now).unwrap();
+}
 
 #[test]
 fn concurrent_clients_cannot_reserve_the_same_last_slot() {

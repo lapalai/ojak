@@ -24,6 +24,47 @@ use std::{
 };
 use store::*;
 
+fn cancel_uninstall_metadata(connection: &rusqlite::Connection, permit: &str) -> Result<(), ApiError> {
+    if metadata::<Option<String>>(connection, "uninstallPermit")?.flatten().as_deref() != Some(permit) {
+        return Err(ApiError::new("UNINSTALL_PERMIT_MISMATCH", "서비스 해제 확인이 맞지 않아요."));
+    }
+    set_metadata(connection, "uninstallPermit", &Option::<String>::None)
+}
+
+/// installer 전용: 서비스가 확실히 종료된 뒤 같은 승인만 취소한다. lease·계정·인증은 변경하지 않는다.
+#[cfg(windows)]
+pub fn cancel_stopped_uninstall(paths: &Paths, expected_permit: Option<&str>) -> Result<(), ApiError> {
+    let _lifetime = server::service_lifetime_lock(paths)?;
+    match service_pid(paths) {
+        Err(failure) if failure.raw_os_error() == Some(2) => {}
+        _ => return Err(ApiError::new("UNMANAGED_SERVICE", "서비스 종료를 확인하지 못해 배정 차단을 해제하지 않았습니다.")),
+    }
+    if !aam_protocol::secure::owned_by_current_user(&paths.database).unwrap_or(false) {
+        return Err(ApiError::new("UNSAFE_PATH", "관리 저장소의 소유를 확인하지 못했습니다."));
+    }
+    let _database = aam_protocol::secure::open_read_no_follow(&paths.database)
+        .map_err(|_| ApiError::new("UNSAFE_PATH", "관리 저장소의 파일 종류를 확인하지 못했습니다."))?;
+    let mut connection = rusqlite::Connection::open_with_flags(&paths.database,
+        rusqlite::OpenFlags::SQLITE_OPEN_READ_WRITE | rusqlite::OpenFlags::SQLITE_OPEN_FULL_MUTEX).map_err(db_error)?;
+    connection.busy_timeout(Duration::from_secs(5)).map_err(db_error)?;
+    connection.execute_batch("PRAGMA trusted_schema=OFF; PRAGMA foreign_keys=ON; PRAGMA synchronous=FULL;").map_err(db_error)?;
+    let version: u32 = connection.query_row("PRAGMA user_version", [], |row| row.get(0)).map_err(db_error)?;
+    if version != 1 { return Err(ApiError::new("SCHEMA_VERSION_UNSUPPORTED", "관리 저장소 형식을 확인하지 못해 복구 기록을 보존했습니다.")); }
+    let tx = connection.transaction_with_behavior(TransactionBehavior::Immediate).map_err(db_error)?;
+    // 타임아웃·재부팅 추정으로 lease를 풀지 않는다. 불확실 상태도 보존한다.
+    if leases(&tx)?.iter().any(|record| scheduler::holds_capacity(&record.session.state)) {
+        return Err(ApiError::new("SESSION_BUSY", "활성·불확실 대화가 남아 배정 차단을 해제하지 않았습니다."));
+    }
+    let stored = metadata::<Option<String>>(&tx, "uninstallPermit")?.flatten();
+    match (expected_permit, stored.as_deref()) {
+        (Some(expected), Some(_)) => cancel_uninstall_metadata(&tx, expected)?,
+        (None, Some(current)) => cancel_uninstall_metadata(&tx, current)?,
+        // 이미 취소된 승인으로 재시도하면 다시 열 상태가 없다. live RPC의 엄격한 검사는 유지한다.
+        (_, None) => {}
+    }
+    tx.commit().map_err(db_error)
+}
+
 pub struct Service {
     paths: Paths,
     store: Mutex<Store>,
@@ -517,17 +558,7 @@ impl Service {
             .connection
             .transaction_with_behavior(TransactionBehavior::Immediate)
             .map_err(db_error)?;
-        if metadata::<Option<String>>(&tx, "uninstallPermit")?
-            .flatten()
-            .as_deref()
-            != Some(request.permit.as_str())
-        {
-            return Err(ApiError::new(
-                "UNINSTALL_PERMIT_MISMATCH",
-                "서비스 해제 확인이 맞지 않아요.",
-            ));
-        }
-        set_metadata(&tx, "uninstallPermit", &Option::<String>::None)?;
+        cancel_uninstall_metadata(&tx, request.permit.as_str())?;
         tx.commit().map_err(db_error)?;
         Ok(serde_json::json!({"cancelled": true}))
     }

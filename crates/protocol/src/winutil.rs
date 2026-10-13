@@ -482,6 +482,10 @@ pub fn open_pipe_client(name: &str) -> io::Result<OwnedHandle> {
 /// 파이프 서버(서비스) 프로세스 ID. 연결한 뒤 상대가 현재 사용자인지 확인한 경우에만 돌려준다.
 pub fn pipe_server_pid(name: &str) -> io::Result<u32> {
     let handle = open_pipe_client(name)?;
+    pipe_server_pid_of(&handle)
+}
+
+pub fn pipe_server_pid_of(handle: &OwnedHandle) -> io::Result<u32> {
     let mut pid = 0u32;
     if unsafe { GetNamedPipeServerProcessId(handle.as_raw_handle() as HANDLE, &mut pid) } == 0 || pid == 0 {
         return Err(io_error());

@@ -9,6 +9,9 @@ mod blockers;
 const RECEIPT: &str = "installer-update.json";
 const BACKUP: &str = "installer-backup";
 const FILES: [&str; 2] = ["aam.exe", "aam-service.exe"];
+// 0.9.2 finish는 새 payload 증거를 저장하기 전에 daemon을 시작했다. 이 특정 migration의
+// 증거는 공개·minisign 검증된 v0.9.2 setup에서 추출한 서비스다. 임의의 현재 파일은 승인하지 않는다.
+const LEGACY_092_SERVICE_HASH: &str = "79aef33a5725b7727b097d750aee90cc261c18980ba77186124a6e38b498225c";
 #[derive(Serialize, Deserialize)]
 struct Update {
     owner: String,
@@ -23,6 +26,15 @@ struct Update {
     /// 파일 검증·서비스 재개가 끝났다. 중단된 백업 정리는 되돌리지 않고 이어서 끝낸다.
     #[serde(default)]
     committed: bool,
+    /// shim map과 구분한다. legacy의 필드 없음은 서비스 등록 부재를 뜻하지 않는다.
+    #[serde(default)]
+    service_record: Option<ServiceRecord>,
+    /// 교체 payload 증거는 원본 복구 hash와 분리하고 daemon 시작 전에 저장한다.
+    #[serde(default)]
+    replacement_files: BTreeMap<String, String>,
+    /// 무기록 daemon의 신규 배정 차단 승인. 종료 전 저장해 복구 재시도에도 같은 승인만 취소한다.
+    #[serde(default)]
+    rollback_permit: Option<String>,
 }
 /// 실행 파일과 함께 되돌려야 하는 shim 상태. shim 형식은 launcher 버전에 묶여 있다
 /// (예: `.cmd`의 `--shim`은 새 launcher만 알아듣는다). AAM_HOME 기준 상대 경로.
@@ -36,6 +48,9 @@ fn state_files() -> Vec<String> {
 fn state_backup(paths: &Paths, name: &str) -> PathBuf { paths.home.join(BACKUP).join("state").join(name.replace('/', "__")) }
 fn hash(path: &Path) -> Result<String, ApiError> {
     let mut file = aam_protocol::secure::open_read_no_follow(path).map_err(io_error)?;
+    hash_file(&mut file)
+}
+fn hash_file(file: &mut fs::File) -> Result<String, ApiError> {
     if !file.metadata().map_err(io_error)?.is_file() { return Err(error("UPDATE_UNSAFE_FILE", "업데이트 파일이 일반 파일이 아닙니다.")); }
     let mut hash = Sha256::new();
     let mut bytes = [0u8; 64 * 1024];
@@ -73,13 +88,23 @@ pub(super) fn directory(path: &Path) -> Result<PathBuf, ApiError> {
 }
 fn load(paths: &Paths, directory: &Path) -> Result<Update, ApiError> {
     let update: Update = read_owned(&paths.home.join(RECEIPT))?.ok_or_else(|| error("UPDATE_NOT_PREPARED", "안전 종료가 확인된 업데이트 기록이 없습니다."))?;
-    if update.owner != OWNER || update.directory != directory || update.files.keys().any(|name| !FILES.contains(&name.as_str())) {
+    if update.owner != OWNER || update.directory != directory
+        || update.files.keys().chain(update.replacement_files.keys()).any(|name| !FILES.contains(&name.as_str()))
+    {
         return Err(error("FOREIGN_INSTALL", "다른 설치의 업데이트 기록은 사용하지 않습니다."));
     }
     if let Some(state) = &update.state {
         let known = state_files();
         if state.keys().any(|name| !known.contains(name)) {
             return Err(error("FOREIGN_INSTALL", "확인되지 않은 shim 경로의 복구 기록은 사용하지 않습니다."));
+        }
+    }
+    if let Some(record) = &update.service_record {
+        if !update.service_installed || record.owner != OWNER
+            || record.binary_path.file_name().and_then(|name| name.to_str()) != Some("aam-service.exe")
+            || record.binary_path.parent().and_then(|path| path.canonicalize().ok()).as_deref() != Some(directory)
+        {
+            return Err(error("FOREIGN_INSTALL", "서비스 복구 기록이 이 설치의 소유 증거와 일치하지 않습니다."));
         }
     }
     Ok(update)
@@ -105,19 +130,35 @@ fn refresh_shims(paths: &Paths, source: &Path) -> Result<(), ApiError> {
 }
 fn resume(paths: &Paths, update: &Update) -> Result<(), ApiError> {
     if !update.service_installed || !update.was_running { return Ok(()); }
+    // 먼저 소유를 검사한다. 승인 metadata가 없으면 검증한 peer에서 새 lease 검사를 받는다.
+    let mut record = owned_service(paths, &update.directory)?
+        .ok_or_else(|| error("UNMANAGED_SERVICE", "서비스 설치 기록을 확인하지 못해 시작하지 않았습니다."))?;
+    if record.uninstall_permit.as_ref().is_some_and(|permit| permit.is_empty()) {
+        return Err(error("INVALID_UNINSTALL_PERMIT", "비어 있는 안전 종료 승인은 사용하지 않습니다."));
+    }
     let binary = update.directory.join("aam-service.exe");
-    start_detached(&binary, paths)?;
+    let process = match ServiceProcess::connect(paths, &binary)? {
+        Some(process) => process,
+        None => start_detached(&binary, paths)?,
+    };
     let deadline = Instant::now() + Duration::from_secs(15);
-    while !running(paths) {
-        if Instant::now() >= deadline { return Err(error("SERVICE_START_TIMEOUT", "파일 교체 후 서비스 시작을 확인하지 못했습니다. 복구 기록을 보존했습니다.")); }
-        thread::sleep(Duration::from_millis(100));
+    loop {
+        if !process.alive() { return Err(error("SERVICE_START_FAILED", "승인한 서비스가 준비되기 전에 종료됐습니다. 복구 기록을 보존했습니다.")); }
+        match process.call(paths, "status.read", json!({})) {
+            Ok(_) => break,
+            Err(failure) if failure.code == "DAEMON_UNAVAILABLE" => {
+                if Instant::now() >= deadline { return Err(error("SERVICE_START_TIMEOUT", "파일 교체 후 서비스 시작을 확인하지 못했습니다. 복구 기록을 보존했습니다.")); }
+                thread::sleep(Duration::from_millis(100));
+            }
+            Err(failure) => return Err(failure),
+        }
     }
-    let mut record: ServiceRecord = read_owned(&paths.home.join("service-install.json"))?.ok_or_else(|| error("UNMANAGED_SERVICE", "서비스 설치 기록을 확인하지 못했습니다."))?;
-    if record.owner != OWNER || record.binary_path.parent().and_then(|path| path.canonicalize().ok()).as_ref() != Some(&update.directory) {
-        return Err(error("FOREIGN_INSTALL", "서비스 소유 기록이 변경되어 신규 배정을 재개하지 않았습니다."));
+    if record.uninstall_permit.is_none() {
+        record.uninstall_permit = Some(process.prepare(paths)?);
+        save(&paths.home.join("service-install.json"), &record)?;
     }
-    let permit = record.uninstall_permit.as_ref().ok_or_else(|| error("INVALID_UNINSTALL_PERMIT", "안전 종료 승인이 없어 신규 배정을 재개하지 않았습니다."))?;
-    call(paths, "service.cancelUninstall", json!({ "permit": permit }))?;
+    let permit = record.uninstall_permit.as_ref().ok_or_else(|| error("INVALID_UNINSTALL_PERMIT", "안전 승인 기록이 없습니다."))?;
+    process.call(paths, "service.cancelUninstall", json!({ "permit": permit }))?;
     record.uninstall_permit = None;
     save(&paths.home.join("service-install.json"), &record)
 }
@@ -262,7 +303,10 @@ fn release_launcher_interactively(install_dir: &Path) -> Result<(), ApiError> {
 fn owned_service(paths: &Paths, install_dir: &Path) -> Result<Option<ServiceRecord>, ApiError> {
     let service: Option<ServiceRecord> = read_owned(&paths.home.join("service-install.json"))?;
     if let Some(record) = &service {
-        if record.owner != OWNER || record.binary_path.parent().and_then(|path| path.canonicalize().ok()).as_deref() != Some(install_dir) {
+        if record.owner != OWNER
+            || record.binary_path.file_name().and_then(|name| name.to_str()) != Some("aam-service.exe")
+            || record.binary_path.parent().and_then(|path| path.canonicalize().ok()).as_deref() != Some(install_dir)
+        {
             return Err(error("FOREIGN_INSTALL", "다른 설치가 관리하는 서비스는 중지하지 않습니다."));
         }
     }
@@ -307,7 +351,7 @@ pub(super) fn run(paths: &Paths, action: &str, install_dir: &Path) -> Result<(),
                     return Err(failure);
                 }
             };
-            let update = Update { owner: OWNER.into(), directory: install_dir, was_running, service_installed: service.is_some(), files, state: Some(state), committed: false };
+            let mut update = Update { owner: OWNER.into(), directory: install_dir, was_running, service_installed: service.is_some(), files, state: Some(state), committed: false, service_record: service, replacement_files: BTreeMap::new(), rollback_permit: None };
             save(&paths.home.join(RECEIPT), &update)?;
             if update.service_installed {
                 if let Err(failure) = service_stop(paths) {
@@ -315,6 +359,8 @@ pub(super) fn run(paths: &Paths, action: &str, install_dir: &Path) -> Result<(),
                     let _ = clear(paths, &update);
                     return Err(failure);
                 }
+                update.service_record = owned_service(paths, &update.directory)?;
+                save(&paths.home.join(RECEIPT), &update)?;
             }
             Ok(())
         }
@@ -326,8 +372,9 @@ pub(super) fn run(paths: &Paths, action: &str, install_dir: &Path) -> Result<(),
                 if hash(&install_dir.join(name))? != expected {
                     return Err(error("UPDATE_FILE_MISMATCH", "설치 파일이 새 빌드와 일치하지 않습니다. 서비스를 시작하지 않았습니다."));
                 }
-                update.files.insert(name.to_owned(), expected);
+                update.replacement_files.insert(name.to_owned(), expected);
             }
+            save(&paths.home.join(RECEIPT), &update)?;
             refresh_shims(paths, &install_dir.join("aam.exe"))?;
             resume(paths, &update)?;
             update.committed = true;
@@ -338,14 +385,15 @@ pub(super) fn run(paths: &Paths, action: &str, install_dir: &Path) -> Result<(),
             if !paths.home.join(RECEIPT).try_exists().map_err(io_error)? { return clear_orphan(paths, &install_dir); }
             let mut update = load(paths, &install_dir)?;
             if update.committed {
-                for (name, expected) in &update.files {
+                let committed_files = if update.replacement_files.is_empty() { &update.files } else { &update.replacement_files };
+                for (name, expected) in committed_files {
                     if hash(&install_dir.join(name))? != *expected {
                         return Err(error("UPDATE_FILE_MISMATCH", "완료된 업데이트의 파일이 달라 복구 기록을 보존했습니다."));
                     }
                 }
                 return clear(paths, &update);
             }
-            owned_service(paths, &install_dir)?;
+            let mut service = owned_service(paths, &install_dir)?;
             ensure_launcher_released(&install_dir)?;
             for (name, expected) in &update.files {
                 verify_restore(&paths.home.join(BACKUP).join(name), &install_dir.join(name), expected)?;
@@ -353,7 +401,39 @@ pub(super) fn run(paths: &Paths, action: &str, install_dir: &Path) -> Result<(),
             for (name, expected) in update.state.iter().flatten() {
                 verify_restore(&state_backup(paths, name), &paths.home.join(name), expected)?;
             }
-            if running(paths) { service_stop(paths)?; }
+            // 먼저 실제 pipe peer를 검증한다. 다른 설치가 연결했으면 소유 기록도 바꾸지 않는다.
+            let binary = install_dir.join("aam-service.exe");
+            let process = ServiceProcess::connect(paths, &binary)?;
+            // 새 transaction의 실제 snapshot만 복원한다. legacy boolean으로 등록하지 않는다.
+            if service.is_none() {
+                if let Some(record) = &update.service_record {
+                    save(&paths.home.join("service-install.json"), record)?;
+                    service = owned_service(paths, &install_dir)?;
+                }
+            }
+            if let Some(mut process) = process {
+                if service.is_some() {
+                    service_stop(paths)?;
+                } else {
+                    // 0.9.2가 시작 후 소유 검사에 실패해 남긴 daemon만 installer 복구에서 다룬다.
+                    let originals_proved = update.service_installed && FILES.iter().all(|name| update.files.contains_key(*name));
+                    let image = process.image.as_mut().ok_or_else(|| error("UNMANAGED_SERVICE", "서비스 실행 파일 객체를 확인하지 못했습니다."))?;
+                    let current_hash = hash_file(image)?;
+                    let known_hash = update.files.get("aam-service.exe").is_some_and(|hash| hash == &current_hash)
+                        || update.replacement_files.get("aam-service.exe").is_some_and(|hash| hash == &current_hash)
+                        || current_hash == LEGACY_092_SERVICE_HASH;
+                    if !originals_proved || !known_hash {
+                        return Err(error("UNMANAGED_SERVICE", "기존 설치의 실행 파일 증거가 없어 무기록 서비스를 중지하지 않았습니다."));
+                    }
+                    let permit = process.prepare(paths)?;
+                    update.rollback_permit = Some(permit.clone());
+                    save(&paths.home.join(RECEIPT), &update)?;
+                    if !process.stop() || running(paths) {
+                        let _ = process.call(paths, "service.cancelUninstall", json!({ "permit": permit }));
+                        return Err(error("SERVICE_STOP_FAILED", "승인한 서비스의 종료를 확인하지 못해 복구 기록을 보존했습니다."));
+                    }
+                }
+            }
             for name in update.files.keys() {
                 let backup = paths.home.join(BACKUP).join(name);
                 if backup.try_exists().map_err(io_error)? { copy(&backup, &install_dir.join(name))?; }
@@ -364,7 +444,14 @@ pub(super) fn run(paths: &Paths, action: &str, install_dir: &Path) -> Result<(),
                 None if update.files.contains_key("aam.exe") => refresh_shims(paths, &install_dir.join("aam.exe"))?,
                 None => {}
             }
-            resume(paths, &update)?;
+            // legacy 소유 기록이 사라졌으면 검증된 파일만 되돌린다. 다음 NSIS 설치가 새 등록을 담당한다.
+            if service.is_some() {
+                resume(paths, &update)?;
+            } else if paths.database.try_exists().map_err(io_error)? {
+                aam_service::cancel_stopped_uninstall(paths, update.rollback_permit.as_deref())?;
+            }
+            update.replacement_files.clear();
+            update.rollback_permit = None;
             update.committed = true;
             save(&paths.home.join(RECEIPT), &update)?;
             clear(paths, &update)
@@ -512,6 +599,30 @@ mod tests {
     }
 
     #[test]
+    fn interrupted_rollback_cleanup_verifies_restored_original_generation_on_retry() {
+        let fixture = Fixture::new();
+        for name in FILES { fs::write(fixture.app.join(name), b"original").unwrap(); }
+        run(&fixture.paths, "prepare", &fixture.app).unwrap();
+        let mut update = load(&fixture.paths, &directory(&fixture.app).unwrap()).unwrap();
+        for name in FILES {
+            fs::write(fixture.app.join(name), b"replacement").unwrap();
+            update.replacement_files.insert(name.into(), hash(&fixture.app.join(name)).unwrap());
+        }
+        save(&fixture.paths.home.join(RECEIPT), &update).unwrap();
+        let unknown = fixture.paths.home.join(BACKUP).join("user-notes.txt");
+        fs::write(&unknown, b"preserve unknown data").unwrap();
+        assert!(run(&fixture.paths, "recover", &fixture.app).is_err());
+        for name in FILES { assert_eq!(fs::read(fixture.app.join(name)).unwrap(), b"original"); }
+        assert_eq!(fs::read(&unknown).unwrap(), b"preserve unknown data");
+        fs::remove_file(&unknown).unwrap();
+        run(&fixture.paths, "recover", &fixture.app).unwrap();
+        for name in FILES { assert_eq!(fs::read(fixture.app.join(name)).unwrap(), b"original"); }
+        assert!(!fixture.paths.home.join(RECEIPT).exists());
+        run(&fixture.paths, "prepare", &fixture.app).unwrap();
+        run(&fixture.paths, "recover", &fixture.app).unwrap();
+    }
+
+    #[test]
     fn missing_legacy_backup_does_not_authorize_unverified_replacement() {
         let fixture = Fixture::new();
         for name in FILES { fs::write(fixture.app.join(name), b"original").unwrap(); }
@@ -524,6 +635,36 @@ mod tests {
         fs::write(fixture.app.join("aam.exe"), b"original").unwrap();
         run(&fixture.paths, "recover", &fixture.app).unwrap();
         assert!(!fixture.paths.home.join(RECEIPT).exists());
+    }
+
+    #[test]
+    fn legacy_missing_enrollment_rolls_back_without_starting_or_registering_service() {
+        let fixture = Fixture::new();
+        for name in FILES { fs::write(fixture.app.join(name), b"original").unwrap(); }
+        run(&fixture.paths, "prepare", &fixture.app).unwrap();
+        let mut update = load(&fixture.paths, &directory(&fixture.app).unwrap()).unwrap();
+        update.service_installed = true;
+        update.was_running = true;
+        save(&fixture.paths.home.join(RECEIPT), &update).unwrap();
+        for name in FILES { fs::write(fixture.app.join(name), b"incomplete replacement").unwrap(); }
+        run(&fixture.paths, "recover", &fixture.app).unwrap();
+        for name in FILES { assert_eq!(fs::read(fixture.app.join(name)).unwrap(), b"original"); }
+        assert!(!fixture.paths.home.join("service-install.json").exists());
+        assert!(!fixture.paths.home.join(RECEIPT).exists());
+        run(&fixture.paths, "prepare", &fixture.app).unwrap();
+        run(&fixture.paths, "recover", &fixture.app).unwrap();
+    }
+
+    #[test]
+    fn resume_rejects_missing_ownership_before_attempting_to_start_service() {
+        let fixture = Fixture::new();
+        for name in FILES { fs::write(fixture.app.join(name), b"not an executable").unwrap(); }
+        run(&fixture.paths, "prepare", &fixture.app).unwrap();
+        let mut update = load(&fixture.paths, &directory(&fixture.app).unwrap()).unwrap();
+        update.service_installed = true;
+        update.was_running = true;
+        assert_eq!(resume(&fixture.paths, &update).unwrap_err().code, "UNMANAGED_SERVICE");
+        assert!(!fixture.paths.home.join("service-install.json").exists());
     }
 
 }

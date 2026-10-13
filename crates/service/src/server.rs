@@ -87,6 +87,13 @@ fn private_file(path: &Path) -> Result<File, ApiError> {
         )
     })
 }
+pub(crate) fn service_lifetime_lock(paths: &Paths) -> Result<File, ApiError> {
+    let lock = private_file(&paths.home.join("service.lock"))?;
+    lock.try_lock_exclusive().map_err(|_| {
+        ApiError::new("SERVICE_ALREADY_RUNNING", "이 사용자의 관리 서비스가 이미 실행 중입니다.")
+    })?;
+    Ok(lock)
+}
 struct ConnectionSlot(Arc<AtomicUsize>);
 impl Drop for ConnectionSlot {
     fn drop(&mut self) {
@@ -116,13 +123,7 @@ pub fn run(paths: Paths) -> Result<(), ApiError> {
             ));
         }
     }
-    let lock = private_file(&paths.home.join("service.lock"))?;
-    lock.try_lock_exclusive().map_err(|_| {
-        ApiError::new(
-            "SERVICE_ALREADY_RUNNING",
-            "이 사용자의 관리 서비스가 이미 실행 중입니다.",
-        )
-    })?;
+    let _lock = service_lifetime_lock(&paths)?;
     let _database_file = private_file(&paths.database)?;
     for suffix in ["-wal", "-shm"] {
         let path = std::path::PathBuf::from(format!("{}{suffix}", paths.database.display()));

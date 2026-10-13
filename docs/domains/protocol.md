@@ -20,6 +20,7 @@
 ## RPC
 - `call` (`lib.rs:458`): 4바이트 길이 prefix + JSON `RpcRequest` → `RpcResponse`
 - `read_frame`/`write_frame` (`lib.rs:435`, `lib.rs:449`)
+- Windows `call_for_process`는 요청을 보낼 **동일 pipe 연결**에서 현재 사용자와 기대 서버 PID를 검사한다. 호출자는 PID 재사용을 막도록 검증한 프로세스 핸들을 호출 완료까지 유지해야 한다. installer의 안전 승인·취소는 이 경로를 쓰며, RPC wire version·메서드·프레임 형식은 바꾸지 않는다.
 
 ## 주요 엔티티
 `Account`, `Session`, `Snapshot`, `Policy`(기본값 `lib.rs:200-214`), `ProcessIdentity`(`lib.rs:218`), `LaunchIntent`, `LeaseGrant`, `Decision`, `ProjectRoute`, `ApiError`. `process_identity` 함수는 `src/process.rs:70` (macOS 전용).
