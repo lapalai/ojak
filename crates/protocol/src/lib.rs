@@ -18,7 +18,7 @@ use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use std::{
     io::{self, Read, Write},
-    path::PathBuf,
+    path::{Path, PathBuf},
     time::{SystemTime, UNIX_EPOCH},
 };
 
@@ -215,6 +215,7 @@ pub struct Account {
     pub can_launch: bool,
     pub reason: Option<String>,
     pub enabled: bool,
+    /// Maximum managed conversations for this identity; 0 means no count limit.
     pub max_concurrency: u32,
     pub buckets: Vec<QuotaBucket>,
     pub last_checked_at: i64,
@@ -351,6 +352,18 @@ impl Default for Policy {
             use_extra_usage_after_limit: false,
         }
     }
+}
+
+/// Shared project authorization for admission and unmanaged native continuation.
+pub fn project_allowed(policy: &Policy, account_id: &str, cwd: &Path) -> bool {
+    policy.project_allowlist.get(account_id).is_none_or(|roots| {
+        roots.iter().any(|root| {
+            let stored = Path::new(root);
+            stored.canonicalize().is_ok_and(|resolved| {
+                resolved == stored && resolved.is_dir() && cwd.starts_with(&resolved)
+            })
+        })
+    })
 }
 #[derive(Debug, Clone, Serialize, Deserialize, Default, PartialEq, Eq)]
 #[serde(rename_all = "camelCase")]

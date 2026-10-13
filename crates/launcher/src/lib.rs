@@ -412,7 +412,8 @@ fn prepare_launch(
                         && intent.resume_session_id.is_none()
                         && error.code == "SESSION_NOT_FOUND")) =>
         {
-            // 미등록 native 대화만 별도의 경로 승인을 받을 수 있습니다.
+            // 미등록 명시 ID는 별도의 비관리 경로 승인이 필요합니다.
+            // 기록 없는 continue는 기본 경로에서만 원본 CLI가 대상을 고릅니다.
             // BUSY·매핑·identity·RPC 오류는 이 분기로 들어오지 않습니다.
             if let Some(id) = &intent.resume_session_id {
                 let exact = uuid::Uuid::parse_str(id).is_ok();
@@ -428,6 +429,21 @@ fn prepare_launch(
             let route = resolve_route(paths, &base)?;
             if route.mode == RouteMode::Unmanaged {
                 return unmanaged_launch(base, &route, original_args);
+            }
+            if continuing
+                && intent.account_id.is_none()
+                && route.mode == RouteMode::Automatic
+                && route.source == "global"
+                && route.account_id.is_none()
+                && route.model.is_none()
+            {
+                let (_, args) = arguments::shim_model(&intent.tool, &native_args)?;
+                let (_, args) = arguments::shim_session_id(&intent.tool, &args)?;
+                arguments::validate_native_args(&intent.tool, &args)?;
+                return Err(ApiError::new(
+                    "CONTINUE_UNMANAGED",
+                    "이 폴더에 Ojak이 기록한 대화가 없어 원본 CLI의 기본 프로필에서 이어 갑니다. 대화와 계정은 원본 CLI가 선택합니다.",
+                ));
             }
             return Err(error);
         }
@@ -477,6 +493,7 @@ fn management_unavailable(code: &str) -> bool {
             | "ADAPTER_UNVERIFIED"
             | "ACCOUNT_DISABLED"
             | "AUTOMATIC_PAUSED"
+            | "CONTINUE_UNMANAGED"
             | "DAEMON_UNAVAILABLE"
             | "SERVICE_UNHEALTHY"
     )
@@ -596,6 +613,15 @@ fn confirm_unmanaged_spend(tool: &str, risk: SpendRisk) -> Result<(), ApiError> 
     }
 }
 
+fn native_continue_project_allowed(snapshot: &Snapshot, tool: &str, profile: &Path, cwd: &Path) -> bool {
+    let canonical = profile.canonicalize().ok();
+    snapshot.accounts.iter().filter(|account| {
+        account.tool == tool && account.profile_path.as_deref().is_some_and(|path| {
+            Path::new(path) == profile || canonical.as_deref() == Some(Path::new(path))
+        })
+    }).all(|account| aam_protocol::project_allowed(&snapshot.policy, &account.id, cwd))
+}
+
 /// 관리 실행을 준비하지 못한 이유를 알린 뒤 원본 CLI를 그대로 실행합니다. 계정은 공식 CLI가 결정합니다.
 /// Ojak의 추가 과금 설정이 꺼져 있는데 원본 CLI가 추가 과금 경로가 있는 계정으로 실행될 수 있으면, 조용히 넘기지 않고
 /// 먼저 확인을 받는다.
@@ -606,7 +632,26 @@ fn passthrough(
     args: Vec<OsString>,
     error: &ApiError,
 ) -> ApiError {
-    if let Some(risk) = read_snapshot(paths).ok().and_then(|snapshot| unmanaged_spend_risk(&snapshot, tool, now_ms())) {
+    let snapshot = if error.code == "CONTINUE_UNMANAGED" {
+        let Some(home) = aam_protocol::user_home() else {
+            return ApiError::new("HOME_MISSING", "원본 CLI의 기본 프로필 위치를 확인하지 못했어요.");
+        };
+        let profile = home.join(if tool == "claude" { ".claude" } else { ".codex" });
+        if let Err(error) = aam_adapters::check_native_auth_context(tool, &profile, Path::new(cwd)) {
+            return error;
+        }
+        let snapshot = match read_snapshot(paths) {
+            Ok(snapshot) => snapshot,
+            Err(error) => return error,
+        };
+        if !native_continue_project_allowed(&snapshot, tool, &profile, Path::new(cwd)) {
+            return ApiError::new("PROJECT_NOT_ALLOWED", "기본 프로필 계정에 허용되지 않은 프로젝트라 원본으로 이어 가지 않았어요.");
+        }
+        Some(snapshot)
+    } else {
+        read_snapshot(paths).ok()
+    };
+    if let Some(risk) = snapshot.as_ref().and_then(|snapshot| unmanaged_spend_risk(snapshot, tool, now_ms())) {
         if let Err(refused) = confirm_unmanaged_spend(tool, risk) {
             return refused;
         }
@@ -2030,6 +2075,107 @@ mod bridge_tests {
             )),
             "PROTOCOL_MISMATCH"
         );
+    }
+
+    #[test]
+    fn continue_without_mapping_allows_native_fallback_only_for_the_default_shim() {
+        for flag in ["-c", "--continue"] {
+            let result = prepared(
+                intent("claude"),
+                args(&["--dangerously-skip-permissions", flag, "--model", "sonnet"]),
+                true,
+                vec![snapshot(vec![]), route("automatic", "global", None)],
+            );
+            assert_eq!(error_code(result), "CONTINUE_UNMANAGED");
+        }
+        assert_eq!(
+            error_code(prepared(
+                intent("claude"),
+                args(&["-c"]),
+                false,
+                vec![snapshot(vec![])],
+            )),
+            "SESSION_NOT_FOUND"
+        );
+        for (mode, source, model) in [
+            ("pinned", "directory", None),
+            ("automatic", "repository", Some("sonnet")),
+        ] {
+            assert_eq!(
+                error_code(prepared(
+                    intent("claude"),
+                    args(&["-c"]),
+                    true,
+                    vec![snapshot(vec![]), route(mode, source, model)],
+                )),
+                "SESSION_NOT_FOUND"
+            );
+        }
+        let mut explicit = intent("claude");
+        explicit.account_id = Some("original-account".into());
+        assert_eq!(
+            error_code(prepared(
+                explicit,
+                args(&["-c"]),
+                true,
+                vec![snapshot(vec![]), route("pinned", "explicit", None)],
+            )),
+            "SESSION_NOT_FOUND"
+        );
+    }
+
+    #[test]
+    fn native_continue_fallback_does_not_bypass_argument_or_route_errors() {
+        for (native, code) in [
+            (args(&["-c", "--mcp-config", "private.json"]), "AUTH_OVERRIDE_CONFLICT"),
+            (args(&["-c", "--native-future-option"]), "NATIVE_OPTION_UNSUPPORTED"),
+            (args(&["-c", "--session-id", "not-a-uuid"]), "SESSION_MAPPING_INVALID"),
+        ] {
+            assert_eq!(
+                error_code(prepared(
+                    intent("claude"),
+                    native,
+                    true,
+                    vec![snapshot(vec![]), route("automatic", "global", None)],
+                )),
+                code
+            );
+        }
+        assert_eq!(
+            error_code(prepared(
+                intent("claude"),
+                args(&["-c"]),
+                true,
+                vec![
+                    snapshot(vec![]),
+                    Err(ApiError::new("ROUTE_CONFLICT", "경로 충돌")),
+                ],
+            )),
+            "ROUTE_CONFLICT"
+        );
+    }
+
+    #[test]
+    fn native_continue_respects_original_profile_allowlists_even_for_disabled_bindings() {
+        let root = std::env::temp_dir().join(format!("aam-native-policy-{}", new_id()));
+        let profile = root.join("profile");
+        let allowed = root.join("allowed");
+        let outside = root.join("outside");
+        for path in [&profile, &allowed, &outside] {
+            std::fs::create_dir_all(path).unwrap();
+        }
+        let profile = profile.canonicalize().unwrap();
+        let allowed = allowed.canonicalize().unwrap();
+        let outside = outside.canonicalize().unwrap();
+        let mut snapshot = spend_snapshot("claude", None, None, policy(false, false), 30.0, now_ms());
+        snapshot.accounts[0].profile_path = Some(profile.to_string_lossy().into_owned());
+        snapshot.accounts[0].enabled = false;
+        snapshot.policy.project_allowlist.insert("a".into(), vec![allowed.to_string_lossy().into_owned()]);
+        assert!(!native_continue_project_allowed(&snapshot, "claude", &profile, &outside));
+        assert!(native_continue_project_allowed(&snapshot, "claude", &profile, &allowed));
+        snapshot.policy.project_allowlist.insert("a".into(), vec![]);
+        assert!(!native_continue_project_allowed(&snapshot, "claude", &profile, &allowed));
+        std::fs::remove_dir_all(root).unwrap();
     }
 
     #[test]

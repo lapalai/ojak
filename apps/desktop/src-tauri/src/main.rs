@@ -1,5 +1,6 @@
 #![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]
 use aam_protocol::{ApiError, LaunchIntent, Paths, Snapshot};
+use parking_lot::Mutex;
 use serde_json::{json, Value};
 use std::{
     io::{Read, Write},
@@ -64,18 +65,19 @@ const POPOVER: &str = "popover";
 /// 창이 실제로 보이는지(`true`) 숨겨졌는지(`false`)를 그 창의 화면에 알린다. 화면은 숨겨진 동안 주기 조회를 멈춘다.
 /// WebKit·WebView2는 창을 숨겨도 `document.hidden`을 항상 바꾸지 않으므로 이 이벤트를 기준으로 삼는다.
 const VISIBILITY_EVENT: &str = "ojak://window-visible";
-const POPOVER_WIDTH: f64 = 340.0;
+use popover_layout::WIDTH as POPOVER_WIDTH;
 
-/// 트레이(메뉴바) 아이콘 옆에 팝오버를 연다. 열려 있으면 닫는다.
-/// 듀얼 모니터에서는 팝오버가 마지막에 있던 모니터가 아니라 **아이콘이 있는 모니터**의 배율과 작업 영역(작업 표시줄 제외)을 기준으로
-/// 계산한다. 왼쪽·위쪽 보조 모니터는 좌표가 음수이므로 0이 아니라 그 모니터 경계로 자른다.
-fn toggle_popover(app: &tauri::AppHandle, rect: tauri::Rect) {
-    let Some(popover) = app.get_webview_window(POPOVER) else { return };
-    if popover.is_visible().unwrap_or(false) {
-        set_shown(&popover, false);
-        return;
-    }
-    let fallback = popover.scale_factor().unwrap_or(1.0);
+struct PopoverLayout {
+    tray: Option<tauri::Rect>,
+    height: f64,
+}
+
+static POPOVER_LAYOUT: LazyLock<Mutex<PopoverLayout>> = LazyLock::new(|| {
+    Mutex::new(PopoverLayout { tray: None, height: 460.0 })
+});
+
+/// Opening and content resizing use the same tray anchor and target-monitor geometry.
+fn layout_popover(popover: &tauri::WebviewWindow, rect: tauri::Rect, height: f64) {
     // 아이콘 중심을 품은 모니터를 직접 찾는다. 모니터마다 배율이 다르므로 그 모니터 배율로 바꿔 비교한다.
     let contains = |m: &tauri::Monitor| {
         let p = rect.position.to_physical::<f64>(m.scale_factor());
@@ -86,38 +88,48 @@ fn toggle_popover(app: &tauri::AppHandle, rect: tauri::Rect) {
     };
     let monitor = popover.available_monitors().ok().and_then(|all| all.into_iter().find(|m| contains(m)))
         .or_else(|| popover.primary_monitor().ok().flatten());
-    let scale = monitor.as_ref().map_or(fallback, |m| m.scale_factor());
+    let Some(monitor) = monitor else { return };
+    let scale = monitor.scale_factor();
     let position = rect.position.to_physical::<f64>(scale);
     let size = rect.size.to_physical::<f64>(scale);
-    let (left, top, right, bottom) = monitor.as_ref().map_or((f64::MIN, f64::MIN, f64::MAX, f64::MAX), |m| {
-        let area = m.work_area();
-        (area.position.x as f64, area.position.y as f64, area.position.x as f64 + area.size.width as f64, area.position.y as f64 + area.size.height as f64)
-    });
-    // 창 크기는 대상 모니터 배율로 다시 잡는다(이전 모니터 배율의 물리 크기를 쓰면 높이가 틀어진다).
-    let logical_height = popover.outer_size().ok().map_or(460.0, |s| s.height as f64 / fallback);
-    let width = POPOVER_WIDTH * scale;
-    let height = logical_height * scale;
-    let margin = 8.0 * scale;
-    // macOS 메뉴바 메뉴는 아이콘의 왼쪽 끝에 맞춰 내려온다. Windows 트레이 플라이아웃은 아이콘 가운데 위에 연다.
-    let anchor = if cfg!(target_os = "macos") { position.x } else { position.x + size.width / 2.0 - width / 2.0 };
-    let middle = position.y + size.height / 2.0;
-    // macOS 메뉴바는 작업 영역 위에 있으므로 옆 열기는 Windows 세로 작업 표시줄에만 쓴다.
-    let side = cfg!(windows) && (position.x >= right - 1.0 || position.x + size.width <= left + 1.0);
-    let (x, y) = if side {
-        // 작업 표시줄이 왼쪽·오른쪽에 있으면 아이콘 옆으로 연다.
-        let x = if position.x >= right - 1.0 { position.x - width - 4.0 * scale } else { position.x + size.width + 4.0 * scale };
-        (x, middle - height / 2.0)
-    } else if middle > (top + bottom) / 2.0 {
-        (anchor, position.y - height - 4.0 * scale)
-    } else {
-        (anchor, position.y + size.height + 4.0 * scale)
-    };
-    let x = x.min(right - width - margin).max(left + margin);
-    let y = y.min(bottom - height - margin).max(top + margin);
-    let _ = popover.set_position(tauri::PhysicalPosition::new(x, y));
+    let area = monitor.work_area();
+    let placement = popover_layout::place(
+        popover_layout::Rect { left: position.x, top: position.y, width: size.width, height: size.height },
+        popover_layout::Rect { left: area.position.x as f64, top: area.position.y as f64, width: area.size.width as f64, height: area.size.height as f64 },
+        scale,
+        height,
+        cfg!(target_os = "macos"),
+    );
+    // Move to the target monitor before applying its physical size; the old monitor's DPI must not resize it.
+    let _ = popover.set_position(tauri::PhysicalPosition::new(placement.x, placement.y));
+    let _ = popover.set_size(tauri::PhysicalSize::new(placement.width as u32, placement.height as u32));
+}
+
+/// 트레이(메뉴바) 아이콘 옆에 팝오버를 연다. 열려 있으면 닫는다.
+fn toggle_popover(app: &tauri::AppHandle, rect: tauri::Rect) {
+    let Some(popover) = app.get_webview_window(POPOVER) else { return };
+    if popover.is_visible().unwrap_or(false) {
+        set_shown(&popover, false);
+        return;
+    }
+    let mut layout = POPOVER_LAYOUT.lock();
+    layout.tray = Some(rect);
+    layout_popover(&popover, rect, layout.height);
     set_shown(&popover, true);
     let _ = popover.set_focus();
     let _ = popover.emit_to(tauri::EventTarget::webview_window(POPOVER), "ojak://popover-shown", ());
+}
+
+#[tauri::command]
+fn resize_popover(app: tauri::AppHandle, height: f64) {
+    if !height.is_finite() || height <= 0.0 {
+        return;
+    }
+    let mut layout = POPOVER_LAYOUT.lock();
+    layout.height = height.min(popover_layout::MAX_HEIGHT);
+    if let (Some(popover), Some(rect)) = (app.get_webview_window(POPOVER), layout.tray) {
+        layout_popover(&popover, rect, layout.height);
+    }
 }
 
 #[tauri::command]
@@ -784,6 +796,7 @@ async fn launch_session(intent: LaunchIntent) -> Result<Value, ApiError> {
 }
 mod provider_login;
 mod local_usage;
+mod popover_layout;
 #[tauri::command]
 async fn choose_directory() -> Option<String> {
     rfd::AsyncFileDialog::new()
@@ -2306,6 +2319,7 @@ fn main() {
             refresh_integrations,
             open_dashboard,
             hide_popover,
+            resize_popover,
             get_tray_threshold,
             set_tray_threshold,
             get_expiring_notify,

@@ -3,5 +3,5 @@
   "identifier": "main-window",
   "description": "로컬 대시보드의 창 조작만 허용합니다.",
   "windows": ["main", "popover"],
-  "permissions": ["core:default", "core:window:allow-start-dragging", "core:window:allow-set-size"]
+  "permissions": ["core:default", "core:window:allow-start-dragging"]
 }
