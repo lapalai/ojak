@@ -1,6 +1,6 @@
 use aam_protocol::{
-    Account, AllocationMode, ApiError, Candidate, Decision, LaunchIntent, Policy, QuotaBucket,
-    Session, NATIVE_DEFAULT_MODEL,
+    project_allowed, Account, AllocationMode, ApiError, Candidate, Decision, LaunchIntent, Policy,
+    QuotaBucket, Session, NATIVE_DEFAULT_MODEL,
 };
 use std::{
     cmp::Ordering,
@@ -145,19 +145,6 @@ pub(crate) fn canonical_directory(directory: &str) -> Result<PathBuf, ApiError> 
         })
 }
 
-fn project_allowed(policy: &Policy, account_id: &str, cwd: &Path) -> bool {
-    policy
-        .project_allowlist
-        .get(account_id)
-        .is_none_or(|roots| {
-            roots.iter().any(|root| {
-                let path = Path::new(root);
-                // 저장 이후 허용 루트가 다른 위치를 가리키도록 바뀌면 다시 승인을 받아야 합니다.
-                canonical_directory(root)
-                    .is_ok_and(|resolved| resolved == path && cwd.starts_with(&resolved))
-            })
-        })
-}
 
 /// 계정 id → Claude 공식 설정의 기본 모델(모델, 출처). 파일을 읽으므로 서비스 잠금 밖에서 만든다.
 pub type Configured = HashMap<String, (String, String)>;
@@ -270,8 +257,9 @@ pub fn decide_with(
             .iter()
             .filter(|other| other.can_launch)
             .map(|other| other.max_concurrency)
+            .filter(|limit| *limit > 0)
             .min()
-            .unwrap_or(account.max_concurrency);
+            .unwrap_or(0);
         let mut exclusions = Vec::new();
         if !project_allowed(policy, &account.id, &cwd) {
             exclusions.push(reason("PROJECT_NOT_ALLOWED", "이 계정에 허용되지 않은 프로젝트예요. 설정의 프로젝트 허용 목록을 확인해 주세요."));
@@ -314,7 +302,7 @@ pub fn decide_with(
                 "프로필 분리와 실제 계정 확인이 아직 검증되지 않았어요.",
             ));
         }
-        if active >= group_limit as usize {
+        if group_limit > 0 && active >= group_limit as usize {
             exclusions.push(reason(
                 "CAPACITY_RESERVED",
                 "실행 중이거나 시작 결과가 불확실한 대화가 동시 사용 자리를 쓰고 있어요.",

@@ -28,6 +28,7 @@ SQLite `state.sqlite3`, WAL, `synchronous=FULL`, busy_timeout 5초. 테이블 `a
 
 ## 배정 (`scheduler.rs`)
 - 동시성은 identity 그룹(같은 provider + identity_key 또는 omp credential pin) 단위로 센다 (`scheduler.rs:181-210`).
+- `Account.maxConcurrency`는 기본 1이며 `account.update`로 1~32 또는 0(개수 제한 없음)을 지정한다. 0·2 이상은 `supports_shared_profile_concurrency`가 확인한 Claude 계정만 허용하며 미검증 도구는 `ADAPTER_UNVERIFIED`로 거절한다. 같은 identity의 실행 가능한 바인딩 중 양수 제한이 하나라도 있으면 가장 작은 제한을 유지하고, 모두 0이면 개수로 배정을 막지 않는다. quota·인증·프로젝트·중복 재개 보호와 lease 추적은 그대로다. UI/CLI 설정 입력은 없고 현재 RPC로만 변경한다. 근거: Claude 공식 [여러 세션 병렬 실행](https://code.claude.com/docs/en/best-practices#run-multiple-claude-sessions)·[worktrees](https://code.claude.com/docs/en/worktrees).
 - 안전 여유량은 소프트 우선순위다. 하드 제약을 통과한 roomy 후보가 있으면 reserve 후보를 뒤로 보내고(`RESERVE_DEPRIORITIZED`), 없으면 남은 한도를 사용한다(`RESERVE_FALLBACK`). 100% 사용은 계속 `QUOTA_EXHAUSTED`로 제외한다. 명시 계정·프로젝트 pin·재개 제약은 유지하며 공급자 선호 pin보다 roomy 후보가 우선한다.
 - 자동 배정은 신선한 관측(`stale_after_seconds` 기본 900초)과 미래 reset이 필요하다. pinned 실행은 신선도 검사를 건너뛴다 (`scheduler.rs:259-264,319-344`).
 - 기본 모델 요청은 모델 전용 버킷이 막지 않고 우선순위만 낮춘다 (`scheduler.rs:26-42,272-298`).
@@ -68,7 +69,7 @@ SQLite `state.sqlite3`, WAL, `synchronous=FULL`, busy_timeout 5초. 테이블 `a
 |---|---|---|
 | Account.Create | ✅ | RPC account.register lib.rs:405 → Service::register lib.rs:722-836 (label validation 723-731, SESSION_BUSY guard 754-764, supersede/policy rewrite 765-832, save |
 | Account.Read | ✅ | status.read lib.rs:348 → snapshot lib.rs:255-345 (store.rs accounts(), stale-bucket marking in snapshot_with_observations lib.rs:263-290). Callers: apps/desktop |
-| Account.Update | ✅ | account.update lib.rs:406 → update_account lib.rs:690-721 (enabled; maxConcurrency 1..32 with ADAPTER_UNVERIFIED for shared-profile >1; save_account lib.rs:718) |
+| Account.Update | ✅ | account.update → update_account (enabled; maxConcurrency 0=제한 없음 또는 1..32; 공유 프로필의 0·2 이상은 검증된 Claude만 허용) |
 | Account.Delete | ⚡ | dispatch has no account.delete/remove RPC (lib.rs:346-453), and no UI/CLI caller exists. Deletion is internal only: register supersede DELETE lib.rs:774 plus po |
 | Policy/ProjectRoute.Create | ✅ | Singleton policy seeded with Policy::default at store.rs:102-104. Routes are created through policy.update lib.rs:402 → update_policy lib.rs:592-594 → routes::v |
 | Policy/ProjectRoute.Read | ✅ | Snapshot.policy (lib.rs:263-345, store.rs policy()). route.resolve/route.explain lib.rs:364-398 → routes::resolve routes.rs:189 and scheduler::decide_with sched |

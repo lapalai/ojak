@@ -752,19 +752,13 @@ impl Service {
             current.enabled = enabled;
         }
         if let Some(limit) = request.max_concurrency {
-            if limit == 0 {
-                return Err(ApiError::new(
-                    "INVALID_PARAMS",
-                    "동시 실행 상한은 1 이상이어야 합니다.",
-                ));
-            }
             if limit > 32 {
                 return Err(ApiError::new(
                     "INVALID_PARAMS",
-                    "관리 서비스의 계정별 동시 실행 상한은 32입니다.",
+                    "동시 실행 개수는 0(제한 없음) 또는 1~32로 지정해 주세요.",
                 ));
             }
-            if limit > 1 && !aam_adapters::supports_shared_profile_concurrency(&current) {
+            if limit != 1 && !aam_adapters::supports_shared_profile_concurrency(&current) {
                 return Err(ApiError::new("ADAPTER_UNVERIFIED", "이 도구는 같은 로그인으로 여러 대화를 동시에 여는 방식이 확인되지 않았어요."));
             }
             current.max_concurrency = limit;

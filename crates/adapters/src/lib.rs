@@ -94,6 +94,16 @@ fn known_tool(tool: &str) -> Result<(), ApiError> {
     }
 }
 
+/// Check inherited native auth configuration without probing or changing the login.
+pub fn check_native_auth_context(tool: &str, profile: &Path, cwd: &Path) -> Result<(), ApiError> {
+    known_tool(tool)?;
+    safety::check_settings(tool, profile, cwd)?;
+    match profile.canonicalize() {
+        Ok(canonical) => safety::check_inherited_profile(tool, &canonical),
+        Err(_) => safety::check_inherited_profile(tool, profile),
+    }
+}
+
 fn disabled(mut account: Account, error: ApiError) -> Account {
     account.can_launch = false;
     account.auth_status = if error.code == "AUTH_REQUIRED" {

@@ -1,5 +1,4 @@
 import { useEffect, useMemo, useRef, useState } from "react";
-import { getCurrentWindow, LogicalSize } from "@tauri-apps/api/window";
 import { listen, emit } from "@tauri-apps/api/event";
 import { ArrowUpRight, RefreshCw } from "lucide-react";
 import { native, updatesStatus } from "./api";
@@ -17,8 +16,6 @@ import { UPDATE_CHECK_INTERVAL_MS, updateBadgeVisible } from "./updates";
 /// 서로 다른 서비스처럼 읽히기 때문이다. 사용자가 물은 세 공급자는 항상, 그 밖의 공급자는 쓸 때만 보인다.
 const FOCUS_PROVIDERS = ["anthropic", "openai", "google"];
 const IN_USE_MS = 15 * 60_000;
-const WIDTH = 340;
-const MAX_HEIGHT = 560;
 /// 좁은 팝오버용 짧은 공급자 이름. 사용자가 부르는 이름을 쓴다.
 const SHORT_NAMES: Record<string, string> = { anthropic: "Claude", openai: "Codex", google: "Gemini", xai: "Grok", other: "Z.AI" };
 
@@ -112,6 +109,7 @@ export function Popover() {
   const { status } = useBridge(null);
   const [masked, setMasked] = useState(() => { try { return localStorage.getItem("aam.privacy") !== "visible"; } catch { return true; } });
   const root = useRef<HTMLDivElement>(null);
+  const content = useRef<HTMLDivElement>(null);
   const latest = useRef(snapshot);
   latest.current = snapshot;
 
@@ -128,13 +126,27 @@ export function Popover() {
     return () => { window.removeEventListener("keydown", onKey); void shown.then(off => off()); void refreshIfStale.then(off => off()); };
   }, [reload]);
 
-  // 내용 높이에 맞춰 창 크기를 맞춘다. 메뉴바 팝오버는 빈 공간 없이 딱 맞아야 가볍게 보인다.
+  // Send intrinsic content height to native code, which resizes and reanchors together.
   useEffect(() => {
     const element = root.current;
-    if (!element) return;
-    const observer = new ResizeObserver(() => { void getCurrentWindow().setSize(new LogicalSize(WIDTH, Math.min(MAX_HEIGHT, Math.ceil(element.scrollHeight)))); });
+    const contents = content.current;
+    if (!element || !contents) return;
+    let lastHeight = 0;
+    const measure = () => {
+      const body = contents.parentElement!;
+      const bodyLimit = parseFloat(getComputedStyle(body).maxHeight);
+      const bodyHeight = Math.min(contents.scrollHeight, Number.isFinite(bodyLimit) ? bodyLimit : Infinity);
+      const height = Math.ceil(element.getBoundingClientRect().height - body.getBoundingClientRect().height + bodyHeight);
+      if (height > 0 && height !== lastHeight) {
+        lastHeight = height;
+        void native("resize_popover", { height });
+      }
+    };
+    const observer = new ResizeObserver(measure);
     observer.observe(element);
-    return () => observer.disconnect();
+    observer.observe(contents);
+    const shown = listen("ojak://popover-shown", measure);
+    return () => { observer.disconnect(); void shown.then(off => off()); };
   }, []);
 
   const cards = useMemo(() => snapshot ? buildCards(snapshot, status?.bridge?.sessions ?? [], masked) : [], [snapshot, status, masked]);
@@ -157,7 +169,8 @@ export function Popover() {
       <span className="pop-meta">{refreshing || snapshot?.refreshing ? t("usage.refreshing") : snapshot?.lastRefreshAt ? relativeTime(snapshot.lastRefreshAt) : ""}</span>
       <button type="button" className="pop-refresh" onClick={() => { void reload(true); }} disabled={!snapshot || refreshing || snapshot.refreshing} title={t("refresh.title")} aria-label={t("refresh.aria")}><RefreshCw size={13} className={refreshing || snapshot?.refreshing ? "spinner" : undefined} /></button>
     </header>
-    {!snapshot ? <p className="pop-empty">{error ? t("popover.offline") : t("common.checking")}</p> : <div className="pop-body">
+    <div className="pop-body"><div className="pop-content" ref={content}>
+      {!snapshot ? <p className="pop-empty">{error ? t("popover.offline") : t("common.checking")}</p> : <>
       {cards.length === 0 && <p className="pop-empty">{t("popover.none")}</p>}
       {cards.map(card => <article key={card.provider} className="pop-card">
         <div className="pop-card-head">
@@ -168,7 +181,8 @@ export function Popover() {
         </div>
         {card.accounts.map(line => <Line key={line.key} line={line} reserve={reserve} />)}
       </article>)}
-    </div>}
+      </>}
+    </div></div>
     <footer className="pop-footer">
       <span>{t("popover.hint")}</span>
       <button type="button" onClick={() => { void native("open_dashboard"); }}>{t("popover.openDashboard")}<ArrowUpRight size={13} /></button>

@@ -1,6 +1,59 @@
 use super::*;
 
 #[test]
+fn unlimited_concurrency_admits_beyond_finite_limits_but_keeps_quota_and_resume_guards() {
+    let fixture = Fixture::new();
+    let now = now_ms();
+    let account = account_fixture("one", now);
+    fixture.save(&account);
+    fixture.service.dispatch("account.update", serde_json::json!({
+        "id":"one", "maxConcurrency":0,
+    })).unwrap();
+    let first = fixture.service.acquire(request("unlimited-first"), now).unwrap();
+    for index in 1..34 {
+        let grant = fixture.service.acquire(request(&format!("unlimited-{index}")), now).unwrap();
+        assert_eq!(grant.account.id, "one");
+    }
+    let mut resume = request("same-conversation");
+    resume.intent.resume_session_id = Some(first.session.id.clone());
+    assert_eq!(fixture.service.acquire(resume, now).unwrap_err().code, "SESSION_BUSY");
+    let mut exhausted = first.account;
+    exhausted.buckets[0].used_percent = Some(100.0);
+    exhausted.buckets[0].status = "exhausted".into();
+    fixture.save(&exhausted);
+    let mut blocked = request("quota-still-applies");
+    blocked.intent.account_id = Some("one".into());
+    assert_eq!(fixture.service.acquire(blocked, now).unwrap_err().code, "QUOTA_EXHAUSTED");
+}
+
+#[test]
+fn unlimited_binding_does_not_override_a_finite_limit_on_the_same_identity() {
+    let fixture = Fixture::new();
+    let now = now_ms();
+    let mut unlimited = account_fixture("unlimited", now);
+    unlimited.max_concurrency = 0;
+    fixture.save(&unlimited);
+    let grant = fixture.service.acquire(request("held"), now).unwrap();
+    let mut limited = account_fixture("limited", now);
+    limited.identity_key = unlimited.identity_key.clone();
+    let decision = scheduler::decide(&[unlimited, limited], &[grant.session], &Policy::default(), &intent(), now).unwrap();
+    assert_eq!(decision.selected_account_id, None);
+    assert!(decision.candidates.iter().all(|candidate| candidate.reasons.iter().any(|reason| reason.starts_with("CAPACITY_RESERVED:"))));
+}
+
+#[test]
+fn unverified_shared_profiles_cannot_enable_unlimited_concurrency() {
+    let fixture = Fixture::new();
+    let now = now_ms();
+    let mut account = account_fixture("codex", now);
+    account.tool = "codex".into();
+    fixture.save(&account);
+    assert_eq!(fixture.service.dispatch("account.update", serde_json::json!({
+        "id":"codex", "maxConcurrency":0,
+    })).unwrap_err().code, "ADAPTER_UNVERIFIED");
+}
+
+#[test]
 fn priority_precedes_smart_score_and_plan_partition_while_smart_ignores_saved_order() {
     let now = now_ms();
     let mut smart = account_fixture("smart", now);
