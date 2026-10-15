@@ -8,7 +8,7 @@ Mulai dari [unduhan dan penyiapan](README.id.md#unduh). Panduan ini membahas pem
 
 Ojak memilih akun saat **sesi baru yang dikelola dimulai**, bukan untuk setiap pesan. Percakapan yang sedang berjalan tetap memakai akun tersebut. Selain sisa kuota, Ojak mempertimbangkan status login, kebaruan data pemakaian, slot sesi, dan pengaturan pemilihan akun. Ojak tidak memesan kuota di sisi penyedia.
 
-Untuk akun Claude yang terverifikasi, `maxConcurrency: 0` berarti **jumlah percakapan terkelola tidak dibatasi**; nilai 1–32 menerapkan batas jumlah (bawaan 1, saat ini diatur melalui RPC `account.update`). Tanpa batas jumlah, semua percakapan tetap memakai kuota akun yang sama. Pemeriksaan login, kuota habis, dan larangan melanjutkan percakapan yang sama secara bersamaan tetap berlaku.
+Untuk akun Claude yang terverifikasi, `maxConcurrency: 0` berarti **jumlah percakapan terkelola tidak dibatasi**; nilai 1–32 menerapkan batas jumlah (bawaan 1). Pilih **Sesi paralel per akun** di pengaturan pembagian akun, atau gunakan RPC `account.update`. Nilai yang sudah ada tidak diubah otomatis. Tanpa batas jumlah, semua percakapan tetap memakai kuota akun yang sama. Pemeriksaan login, kuota habis, dan larangan melanjutkan percakapan yang sama secara bersamaan tetap berlaku.
 
 Jika terminal menampilkan `NO_ELIGIBLE_ACCOUNT` dan pesan bahwa CLI asli akan dijalankan, sesi itu **tidak dikelola Ojak** dan tidak dicatat sebagai sesi terkelola. Perilaku ini berlaku untuk perintah `claude`/`codex` yang terhubung ke Ojak; `aam run` tidak beralih ke CLI tanpa pengelolaan. Konflik autentikasi dan opsi yang tidak didukung juga tidak dilewati diam-diam.
 

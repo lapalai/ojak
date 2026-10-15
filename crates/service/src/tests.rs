@@ -643,6 +643,166 @@ fn rows_of_removed_tools_are_dropped_with_policy_references_on_scan() {
 }
 
 #[test]
+fn refresh_progress_exposes_account_updates_without_completing_or_staling_other_accounts() {
+    let fixture = Fixture::new();
+    let now = now_ms();
+    let native = account_fixture("native", now);
+    let mut observed = account_fixture("observed", now);
+    observed.tool = "omp".into();
+    observed.can_launch = false;
+    fixture.save(&native);
+    fixture.save(&observed);
+    fixture.service.refreshing.store(true, Ordering::Release);
+    let mut incoming = native.clone();
+    incoming.buckets[0].used_percent = Some(55.0);
+    incoming.last_checked_at = now + 1;
+    let published = fixture.service.publish_account(Some(&native), &incoming).unwrap().unwrap();
+    let snapshot = fixture.service.snapshot().unwrap();
+    assert!(snapshot.refreshing);
+    assert_eq!(snapshot.last_refresh_at, None);
+    assert_eq!(snapshot.accounts.iter().find(|account| account.id == "native").unwrap().buckets[0].used_percent, Some(55.0));
+    assert_eq!(snapshot.accounts.iter().find(|account| account.id == "observed").unwrap().buckets[0].status, "known");
+    fixture.service.update_account(AccountUpdate { id: native.id.clone(), enabled: Some(false), max_concurrency: None }).unwrap();
+    incoming.buckets[0].used_percent = Some(65.0);
+    fixture.service.apply_scan(vec![published, observed.clone()], aam_adapters::ScanResult {
+        accounts: vec![incoming, observed], tools: vec![], notices: vec![], merged_observation_ids: vec![],
+    }).unwrap();
+    let snapshot = fixture.service.snapshot().unwrap();
+    let native = snapshot.accounts.iter().find(|account| account.id == "native").unwrap();
+    assert_eq!(native.buckets[0].used_percent, Some(65.0));
+    assert!(!native.enabled);
+    assert!(snapshot.last_refresh_at.is_some());
+}
+
+#[test]
+fn refresh_progress_cannot_overwrite_a_concurrently_registered_identity() {
+    let fixture = Fixture::new();
+    let now = now_ms();
+    let original = account_fixture("account", now);
+    fixture.save(&original);
+    let mut changed = original.clone();
+    changed.identity_key = Some("new-registration".into());
+    changed.last_checked_at = now + 2;
+    changed.buckets[0].used_percent = Some(15.0);
+    fixture.save(&changed);
+    let mut late = original.clone();
+    late.buckets[0].used_percent = Some(99.0);
+    assert!(fixture.service.publish_account(Some(&original), &late).unwrap().is_none());
+    fixture.service.apply_scan(vec![original], aam_adapters::ScanResult {
+        accounts: vec![late], tools: vec![], notices: vec![], merged_observation_ids: vec![],
+    }).unwrap();
+    let snapshot = fixture.service.snapshot().unwrap();
+    let account = snapshot.accounts.iter().find(|account| account.id == changed.id).unwrap();
+    assert_eq!(account.identity_key, changed.identity_key);
+    assert_eq!(account.buckets[0].used_percent, Some(15.0));
+}
+
+#[test]
+fn snapshot_reads_all_held_sessions_and_only_recent_history_without_account_bodies() {
+    let fixture = Fixture::new();
+    let now = now_ms();
+    fixture.save(&account_fixture("one", now));
+    let grant = fixture.service.acquire(request("template"), now).unwrap();
+    let template = lease(&fixture.service.lock().unwrap().connection, &grant.session.id).unwrap();
+    let states = ["PREPARED", "STARTING", "ACTIVE", "SUSPECT", "ORPHANED"];
+    {
+        let store = fixture.service.lock().unwrap();
+        for index in 0..260i64 {
+            let mut record = template.clone();
+            record.session.id = format!("history-{index}");
+            record.session.request_id = format!("history-request-{index}");
+            // 용량 상태는 오래된 갱신 시각에도 모두 보여야 하고, 종료 이력은 최근 200개만 보인다.
+            let held = (index as usize) < states.len();
+            record.session.state = if held { states[index as usize].into() } else if index % 2 == 0 { "EXITED".into() } else { "SOMETHING_NEW".into() };
+            record.session.updated_at = if held { 1 } else { now + index };
+            insert_lease(&store.connection, &record, "client").unwrap();
+        }
+        // 조회에 쓰지 않는 열이 깨져 있어도 상태 조회는 읽지 않는다.
+        store.connection.execute("UPDATE leases SET account_body='not-json'", []).unwrap();
+    }
+    let snapshot = fixture.service.snapshot().unwrap();
+    let held = snapshot.sessions.iter().filter(|session| scheduler::holds_capacity(&session.state)).count();
+    // 템플릿 세션(PREPARED)과 5개 용량 상태 행이 모두 남는다.
+    assert_eq!(held, 6);
+    assert_eq!(snapshot.sessions.len() - held, 200);
+    assert!(snapshot.sessions.iter().any(|session| session.state == "SOMETHING_NEW"));
+    let newest = snapshot.sessions.iter().filter(|session| !scheduler::holds_capacity(&session.state)).map(|session| session.updated_at).min().unwrap();
+    assert_eq!(newest, now + 60);
+    assert!(snapshot.sessions.windows(2).all(|pair| pair[0].updated_at >= pair[1].updated_at));
+    // 전체 이력은 저장소에 그대로 남아 전체 조회 경로(손상된 열 포함)가 계속 그것을 읽는다.
+    let total: i64 = fixture.service.lock().unwrap().connection.query_row("SELECT COUNT(*) FROM leases", [], |row| row.get(0)).unwrap();
+    assert_eq!(total, 261);
+    assert!(leases(&fixture.service.lock().unwrap().connection).is_err());
+}
+
+#[test]
+fn reconciliation_expires_only_prepared_leases_and_ignores_unused_history() {
+    let fixture = Fixture::new();
+    let now = now_ms();
+    fixture.save(&account_fixture("one", now));
+    let grant = fixture.service.acquire(request("pending-expiry"), now).unwrap();
+    let template = lease(&fixture.service.lock().unwrap().connection, &grant.session.id).unwrap();
+    {
+        let store = fixture.service.lock().unwrap();
+        store.connection.execute("UPDATE leases SET expires_at=?2 WHERE id=?1", rusqlite::params![grant.session.id, now - 1]).unwrap();
+        let mut live = template.clone();
+        live.session.id = "uncertain-live".into();
+        live.session.request_id = "uncertain-live-request".into();
+        live.session.state = "ACTIVE".into();
+        insert_lease(&store.connection, &live, "client").unwrap();
+        let mut old = template.clone();
+        old.session.id = "old-history".into();
+        old.session.request_id = "old-history-request".into();
+        old.session.state = "EXITED".into();
+        insert_lease(&store.connection, &old, "client").unwrap();
+        store.connection.execute("UPDATE leases SET account_body='not-json' WHERE id='old-history'", []).unwrap();
+    }
+    fixture.service.reconcile(false).unwrap();
+    let store = fixture.service.lock().unwrap();
+    assert_eq!(lease(&store.connection, &grant.session.id).unwrap().session.state, "ABORTED");
+    assert!(scheduler::holds_capacity(&lease(&store.connection, "uncertain-live").unwrap().session.state));
+    assert_eq!(store.connection.query_row("SELECT COUNT(*) FROM leases WHERE id='old-history'", [], |row| row.get::<_, i64>(0)).unwrap(), 1);
+}
+
+#[test]
+fn final_merge_keeps_observation_rows_the_user_changed_or_reregistered_during_the_scan() {
+    let fixture = Fixture::new();
+    let now = now_ms();
+    let mut excluded = account_fixture("excluded-observation", now);
+    excluded.tool = "omp".into();
+    excluded.can_launch = false;
+    let mut registered = account_fixture("registered-observation", now);
+    registered.tool = "omp".into();
+    registered.can_launch = false;
+    let mut untouched = account_fixture("untouched-observation", now);
+    untouched.tool = "omp".into();
+    untouched.can_launch = false;
+    for account in [&excluded, &registered, &untouched] {
+        fixture.save(account);
+    }
+    let before = vec![excluded.clone(), registered.clone(), untouched.clone()];
+    // 조회 중 사용자가 제외하고, 다른 쪽은 재등록한다.
+    fixture.service.update_account(AccountUpdate { id: excluded.id.clone(), enabled: Some(false), max_concurrency: None }).unwrap();
+    let mut reregistered = registered.clone();
+    reregistered.identity_key = Some("new-registration".into());
+    reregistered.last_checked_at = now + 5;
+    fixture.save(&reregistered);
+    fixture.service.apply_scan(before, aam_adapters::ScanResult {
+        accounts: vec![],
+        tools: vec![],
+        notices: vec![],
+        merged_observation_ids: vec![excluded.id.clone(), registered.id.clone(), untouched.id.clone()],
+    }).unwrap();
+    let snapshot = fixture.service.snapshot().unwrap();
+    let kept = snapshot.accounts.iter().find(|account| account.id == excluded.id).unwrap();
+    assert!(!kept.enabled);
+    let kept = snapshot.accounts.iter().find(|account| account.id == registered.id).unwrap();
+    assert_eq!(kept.identity_key.as_deref(), Some("new-registration"));
+    // 바뀌지 않은 병합 관측은 지금까지처럼 제거된다.
+    assert!(snapshot.accounts.iter().all(|account| account.id != untouched.id));
+}
+
+#[test]
 fn uninstall_and_admission_are_atomic_and_permit_is_required_to_cancel() {
     let fixture = Fixture::new();
     let now = now_ms();

@@ -1,11 +1,12 @@
 mod access;
-pub use access::{native_access, NativeAccess};
+pub use access::{native_access, native_access_staged, NativeAccess, STAGES as NATIVE_ACCESS_STAGES};
 mod native;
 mod observed;
 #[cfg(any(target_os = "macos", windows))]
 mod observed_metadata;
 pub use observed::{discover_sessions, open_jsonl_writers, ObservedScan};
 mod process;
+mod profiles;
 mod quota;
 mod safety;
 mod settings;
@@ -31,6 +32,7 @@ use std::{
     fs,
     path::{Path, PathBuf},
 };
+use std::sync::Arc;
 
 /// 같은 도구·공급자에 여러 계정이 연결될 수 있으므로 확인된 이메일을 라벨에 함께 표시합니다.
 pub(crate) fn account_label(base: &str, email: Option<&str>) -> String {
@@ -46,6 +48,14 @@ pub struct ScanResult {
     pub tools: Vec<ToolStatus>,
     pub notices: Vec<Notice>,
     pub merged_observation_ids: Vec<String>,
+}
+
+enum ScanEvent {
+    Native(Result<(Option<Account>, bool), ApiError>),
+    Inventory(Result<Option<Vec<Account>>, ApiError>),
+    Omp(Result<Value, ApiError>),
+    Version(&'static str, Option<String>),
+    Failed(ApiError),
 }
 
 #[derive(Debug, Clone)]
@@ -104,16 +114,20 @@ pub fn check_native_auth_context(tool: &str, profile: &Path, cwd: &Path) -> Resu
     }
 }
 
-fn disabled(mut account: Account, error: ApiError) -> Account {
-    account.can_launch = false;
-    account.auth_status = if error.code == "AUTH_REQUIRED" {
-        "auth-required"
-    } else {
-        "error"
+fn failed_inspection(mut account: Account, error: ApiError) -> Account {
+    // 조회 프로세스의 일시 장애는 기존 로그인 폐기의 근거가 아니다. 새 로그인으로 승격하지 않고,
+    // 이미 확인한 binding만 보존한다. 실제 실행·토큰 제공 때의 identity 검사는 그대로 수행한다.
+    let preserve_binding = account.can_launch
+        && account.auth_status == "authenticated"
+        && account.verification == "preflight-verified"
+        && account.identity_key.as_ref().is_some_and(|key| !key.is_empty())
+        && matches!(error.code.as_str(), "PROBE_TIMEOUT" | "PROBE_IO" | "PROBE_START_FAILED" | "PROBE_CLOSED");
+    if !preserve_binding {
+        account.can_launch = false;
+        account.auth_status = if error.code == "AUTH_REQUIRED" { "auth-required" } else { "error" }.into();
+        account.verification = "configured".into();
     }
-    .into();
-    account.verification = "configured".into();
-    account.reason = Some(error.message);
+    account.reason = Some(format!("{} ({})", error.message, error.code));
     account.last_checked_at = now_ms();
     for bucket in &mut account.buckets {
         if bucket.used_percent.is_some() {
@@ -134,14 +148,15 @@ fn preserve_preferences(mut fresh: Account, old: &Account) -> Account {
 }
 
 /// 계정은 도구의 현재 원본 CLI 진입 경로를 따릅니다. 원본을 찾지 못하면 기존 연결을 그대로 검사합니다.
-fn refresh_bound(old: &Account, binary: Option<&Path>) -> Account {
+/// 두 번째 값은 이번 신원 조회의 성공 여부다. 정상 계정의 안내 문구(`reason`)와 구분한다.
+fn refresh_bound(old: &Account, binary: Option<&Path>) -> (Account, bool) {
     let mut bound = old.clone();
     if let Some(binary) = binary {
         bound.binary_path = Some(binary.to_string_lossy().into_owned());
     }
     let refreshed = (|| {
-        let (profile, executable) = binding_paths(&bound)?;
-        let mut fresh = inspect(&old.tool, &profile, &executable, &old.label)?;
+        let (profile, executable) = native::bound_paths(&bound)?;
+        let mut fresh = native::inspect_identity(&old.tool, &profile, &executable, &old.label)?;
         if fresh.auth_status == "auth-required" {
             return Err(ApiError::new("AUTH_REQUIRED", fresh.reason.unwrap_or_else(|| "공식 CLI에서 로그인한 뒤 다시 확인해 주세요.".into())));
         }
@@ -151,14 +166,13 @@ fn refresh_bound(old: &Account, binary: Option<&Path>) -> Account {
                 return Err(ApiError::new("IDENTITY_DRIFT", "이 프로필의 계정이 등록된 계정과 다르거나 로그아웃됐어요. 기존 연결은 바꾸지 않았어요. 공식 로그인 후 다시 등록해 주세요."));
             }
         }
-        // 미로그인 프로필은 account.register에서만 새 identity binding으로 전환합니다.
-        if old.identity_key.is_none() && fresh.identity_key.is_some() {
-            return Err(ApiError::new("REGISTRATION_REQUIRED", "공식 로그인이 끝났어요. 프로필을 등록해 새 계정 연결을 확정해 주세요."));
-        }
+        // 식별자가 없던 기본 프로필도 공식 CLI가 로그인을 확인하면 같은 행에서 연결을 확정한다.
+        // 이미 고정된 identity는 위 검사로 계속 보호한다.
         fresh.id = old.id.clone();
         fresh.omp_credential_pins = old.omp_credential_pins.clone();
         // 추가 사용량은 omp 조회에서만 오므로 이 점검이 지우지 않는다. 관측 시각이 오래되면 쓰지 않는다.
         fresh.extra_usage = old.extra_usage.clone();
+        fresh.credits = old.credits.clone();
         if fresh.buckets.is_empty() {
             fresh.buckets = old.buckets.clone();
             for bucket in &mut fresh.buckets {
@@ -178,7 +192,10 @@ fn refresh_bound(old: &Account, binary: Option<&Path>) -> Account {
         fresh.label = account_label(&fresh.label, fresh.email.as_deref());
         Ok(preserve_preferences(fresh, old))
     })();
-    refreshed.unwrap_or_else(|error| disabled(bound, error))
+    match refreshed {
+        Ok(account) => (account, true),
+        Err(error) => (failed_inspection(bound, error), false),
+    }
 }
 
 /// 이 Claude 계정의 한도가 이번 스캔의 omp 보고로 이미 신선하게 채워졌는지. 그렇다면 공식 조회를 또 하지 않는다.
@@ -201,13 +218,12 @@ fn omp_fresh(account: &Account) -> bool {
 const NATIVE_USAGE_EVERY_MS: i64 = 10 * 60_000;
 fn native_due(account: &Account) -> bool {
     let now = now_ms();
-    let official: Vec<_> = account.buckets.iter().filter(|bucket| bucket.source == quota::CLAUDE_USAGE_SOURCE).collect();
-    official.is_empty()
-        || official.iter().any(|bucket| {
-            bucket.observed_at <= 0
-                || now.saturating_sub(bucket.observed_at) >= NATIVE_USAGE_EVERY_MS
-                || bucket.resets_at.is_some_and(|reset| reset <= now)
-        })
+    let mut official = account.buckets.iter().filter(|bucket| bucket.source == quota::CLAUDE_USAGE_SOURCE);
+    let Some(first) = official.next() else { return true };
+    let due = |bucket: &QuotaBucket| bucket.observed_at <= 0
+        || now.saturating_sub(bucket.observed_at) >= NATIVE_USAGE_EVERY_MS
+        || bucket.resets_at.is_some_and(|reset| reset <= now);
+    due(first) || official.any(due)
 }
 
 /// Ojak에 연결된 공식 Claude 로그인으로 직접 한도를 조회한다. omp 로그인이 없어도 동작한다.
@@ -221,7 +237,7 @@ fn native_usage(account: &Account, existing: &[Account]) -> Result<Vec<QuotaBuck
         .as_deref()
         .filter(|_| account.tool == "claude" && account.auth_status == "authenticated" && account.can_launch)
         .ok_or_else(|| ApiError::new("AUTH_REQUIRED", "사용할 수 있는 공식 Claude 로그인이 없어요."))?;
-    let (profile, executable) = binding_paths(account)?;
+    let (profile, executable) = native::bound_paths(account)?;
     let events = process::run_ndjson(
         &executable,
         &[
@@ -265,7 +281,7 @@ fn native_usage(account: &Account, existing: &[Account]) -> Result<Vec<QuotaBuck
             "공식 Claude가 구조화된 사용량을 주지 않았어요. 이전 조회는 오래된 값으로만 남겨요.",
         ));
     }
-    let after = inspect(&account.tool, &profile, &executable, &account.label)?;
+    let after = native::inspect_identity(&account.tool, &profile, &executable, &account.label)?;
     if after.auth_status != "authenticated" || after.identity_key.as_deref() != Some(identity) {
         return Err(ApiError::new(
             "IDENTITY_DRIFT",
@@ -384,15 +400,16 @@ fn add_omp_reports(
                 if result.accounts[index].tool == "claude" {
                     result.accounts[index].extra_usage = extra_usage.clone();
                 }
-                if result.accounts[index].tool != "codex"
-                    || result.accounts[index].buckets.is_empty()
-                {
+                let current = &result.accounts[index];
+                let newer = buckets.iter().map(|bucket| bucket.observed_at).max()
+                    >= current.buckets.iter().map(|bucket| bucket.observed_at).max();
+                if current.buckets.is_empty() || (current.tool != "codex" && newer) {
                     result.accounts[index].buckets = buckets.clone();
                 }
             }
             if !existing
                 .iter()
-                .any(|a| a.id == id && a.profile_path.is_some())
+                .any(|a| a.id == id && (a.profile_path.is_some() || !a.enabled))
             {
                 result.merged_observation_ids.push(id);
                 continue;
@@ -433,33 +450,30 @@ fn add_omp_reports(
                 account.binary_path = old.binary_path.clone();
             }
         }
-        result.accounts.push(account);
+        if let Some(previous) = result.accounts.iter_mut().find(|previous| previous.id == account.id) {
+            *previous = account;
+        } else {
+            result.accounts.push(account);
+        }
     }
     if let Some(unavailable) = value.get("accountsWithoutUsage").and_then(Value::as_array) {
         for entry in unavailable {
             let Some(provider) = text(entry, "provider") else {
                 continue;
             };
-            let authorized = entry
-                .get("authorizedAt")
-                .and_then(Value::as_i64)
-                .unwrap_or(0);
-            let email = text(entry, "email");
-            let id = stable_id(&[
-                "omp-unverified",
-                &provider,
-                &authorized.to_string(),
-                email.as_deref().unwrap_or(""),
-            ]);
-            let account = Account {
-                id, provider: provider_id(&provider).into(), tool: "omp".into(), label: account_label(&format!("OMP · {provider}"), email.as_deref()), email,
-                binary_path: Some(binary.to_string_lossy().into_owned()), auth_status: "unverified".into(), verification: "observed".into(),
-                reason: Some("omp에 로그인 항목은 있지만 계정·한도 정보가 없어요. 사용량을 0으로 추정하거나 공식 CLI 로그인으로 복사하지 않아요.".into()),
-                enabled: true, max_concurrency: 1, ..Account::default()
-            };
-            result.accounts.push(account);
+            let mut account = omp_observation(&provider, entry, existing);
+            account.binary_path = Some(binary.to_string_lossy().into_owned());
+            if let Some(previous) = result.accounts.iter_mut().find(|previous| previous.id == account.id) {
+                // 명시적인 identity가 같은 경우에만 누락 응답을 연결한다. 다른 workspace는 별도 행이다.
+                if !matches!(previous.auth_status.as_str(), "auth-required" | "error") {
+                    previous.reason = Some("omp 로그인 항목은 확인했지만 현재 사용량 응답이 없어요. 사용량을 0으로 추정하지 않아요.".into());
+                }
+            } else {
+                result.accounts.push(account);
+            }
         }
     }
+    result.accounts.retain(|account| !result.merged_observation_ids.contains(&account.id));
     observed
 }
 
@@ -600,143 +614,297 @@ fn apply_omp_auth_failures(accounts: &mut [Account], usage: &Value) {
     }
 }
 
-/// `force`는 사용자가 직접 요청한 새로고침이다. 이때만 omp의 보고 캐시를 비우고 공식 Claude 조회를 다시 한다.
-/// 정기 조회는 아직 유효한 관측을 다시 묻지 않는다(공급자 `/usage` 호출량과 조회 시간 제한).
-pub fn scan(paths: &Paths, existing: &[Account], force: bool) -> Result<ScanResult, ApiError> {
-    let home = user_home()?;
-    let mut result = ScanResult {
-        accounts: Vec::new(),
-        tools: Vec::new(),
-        notices: Vec::new(),
-        merged_observation_ids: Vec::new(),
-    };
-    let mut binaries = BTreeMap::new();
-    for tool in ["claude", "codex", "omp"] {
-        let binary = process::discover(paths, tool);
-        let (name, provider, isolation, reason) = tool_details(tool);
-        let version = binary
-            .as_ref()
-            .and_then(|binary| process::version(binary, &home));
-        result.tools.push(ToolStatus {
-            id: tool.into(),
-            name: name.into(),
-            provider: provider.into(),
-            binary_path: binary.as_ref().map(|p| p.to_string_lossy().into_owned()),
-            version,
-            installed: binary.is_some(),
-            isolation: isolation.into(),
-            reason: reason.map(str::to_owned),
-        });
-        if let Some(binary) = binary {
-            binaries.insert(tool, binary);
+/// broker의 로그인 목록을 한도 조회와 분리한다. 인증 값은 결과에 옮기지 않는다.
+pub fn omp_inventory(snapshot: &Value, existing: &[Account]) -> Result<Vec<Account>, ApiError> {
+    let rows = snapshot.get("credentials").and_then(Value::as_array)
+        .ok_or_else(|| ApiError::new("OMP_SCHEMA", "omp 로그인 목록 형식을 확인하지 못했어요."))?;
+    let mut accounts: Vec<Account> = Vec::new();
+    for row in rows {
+        let Some(provider) = text(row, "provider").filter(|provider|
+            matches!(provider.as_str(), "anthropic" | "openai-codex" | "google-antigravity" | "xai-oauth" | "zai")) else { continue };
+        let Some(metadata) = row.get("credential").filter(|credential| credential["type"] == "oauth") else { continue };
+        let account = omp_observation(&provider, metadata, existing);
+        if !accounts.iter().any(|previous| previous.id == account.id) {
+            accounts.push(account);
         }
     }
-    // 실행 어댑터가 없는 도구(grok·agy)의 남은 행은 서비스가 정리하므로 다시 조회하지 않습니다.
-    for old in existing
-        .iter()
-        .filter(|a| matches!(a.tool.as_str(), "claude" | "codex"))
-    {
-        result.accounts.push(refresh_bound(old, binaries.get(old.tool.as_str()).map(PathBuf::as_path)));
-    }
-    for (tool, folder) in [("claude", ".claude"), ("codex", ".codex")] {
-        let Some(binary) = binaries.get(tool) else {
-            continue;
-        };
-        let profile = home.join(folder);
-        let Ok(profile) = safety::canonical_profile(&profile) else {
-            continue;
-        };
-        if result
-            .accounts
-            .iter()
-            .any(|a| a.tool == tool && a.profile_path.as_deref() == profile.to_str())
-        {
-            continue;
-        }
-        let label = format!("{} · 기본 프로필", tool_details(tool).0);
-        let mut account = inspect(tool, &profile, binary, &label)
-            .unwrap_or_else(|error| disabled(blank_account(tool, &profile, binary, &label), error));
-        // 자동 발견한 기본 프로필도 확인된 이메일로 구분합니다. 사용자가 지정한 라벨은 바꾸지 않습니다.
-        account.label = account_label(&label, account.email.as_deref());
-        result.accounts.push(account);
-    }
-    let mut observed_omp = BTreeSet::new();
-    let mut omp_usage = None;
-    if let Some(binary) = binaries.get("omp") {
-        if force {
-            // 리셋 직후처럼 사용자가 확인을 원하면 omp의 최대 5분 캐시를 비운다. 실패해도 일반 조회로 계속한다.
-            let _ = process::run_quiet(binary, &["usage", "invalidate"], &process::base_env(), &home);
-        }
-        match process::run_json_slow(binary, &["usage", "--json"], &process::base_env(), &home) {
-            Ok(value) => {
-                observed_omp = add_omp_reports(&mut result, &value, binary, existing);
-                omp_usage = Some(value);
-            }
-            Err(error) => result
-                .notices
-                .push(notice("OMP_USAGE_UNAVAILABLE", error.message)),
-        }
-    }
-    // omp가 이번에 신선한 한도를 주지 못한(omp 미설치·미로그인·계정 누락) 연결된 Claude 로그인은 공식 CLI로 직접 조회한다.
-    // 실패하면 기존 관측을 그대로 두어 오래된 값으로만 남기고, 조회 시각은 갱신하지 않는다.
-    let mut native_failed = false;
-    for account in result
-        .accounts
-        .iter_mut()
-        .filter(|a| a.tool == "claude" && a.auth_status == "authenticated" && a.can_launch && !omp_fresh(a) && (force || native_due(a)))
-    {
-        match native_usage(account, existing) {
-            Ok(buckets) => account.buckets = buckets,
-            Err(_) => native_failed = true,
-        }
-    }
-    if native_failed {
-        result.notices.push(notice(
-            "NATIVE_USAGE_UNAVAILABLE",
-            "일부 Claude 계정의 사용량을 공식 CLI로 조회하지 못했어요. 이전 조회는 오래된 값으로만 남겼어요.",
-        ));
-    }
-    let current: BTreeSet<_> = result.accounts.iter().map(|a| a.id.clone()).collect();
-    for old in existing
-        .iter()
-        .filter(|a| a.tool == "omp" && !current.contains(&a.id) && !observed_omp.contains(&a.id))
-    {
-        // 조회 실패와 identity 소멸을 구별할 수 없으므로 이전 관측을 stale로 남깁니다.
-        let mut stale = old.clone();
-        stale.can_launch = false;
-        stale.verification = "observed".into();
-        if stale.auth_status != "auth-required" {
-            stale.auth_status = "unverified".into();
-            stale.reason = Some("지금 omp 응답에서 이 계정을 다시 보지 못했어요. 이전 조회이며 공식 CLI 실행에 쓸 수 없어요.".into());
-        }
-        for bucket in &mut stale.buckets {
-            bucket.status = if bucket.used_percent.is_some() {
-                "stale"
-            } else {
-                "unknown"
-            }
-            .into();
-        }
-        result.accounts.push(stale);
-    }
-    if let Some(usage) = omp_usage { apply_omp_auth_failures(&mut result.accounts, &usage); }
-    Ok(result)
+    Ok(accounts)
 }
 
-fn binding_paths(account: &Account) -> Result<(PathBuf, PathBuf), ApiError> {
-    let profile = account.profile_path.as_deref().ok_or_else(|| ApiError::new("PROFILE_UNBOUND", "이 계정에 공식 프로필이 연결돼 있지 않아요. 공식 CLI에 로그인한 뒤 프로필을 등록해 주세요."))?;
-    let canonical = safety::canonical_profile(Path::new(profile))?;
-    if canonical != Path::new(profile) {
-        return Err(ApiError::new("PROFILE_BINDING_CHANGED", "등록 이후 프로필 경로가 바뀌었어요. 바로가기로 계정을 바꾸지 않아요. 다시 등록해 주세요."));
+fn omp_observation(provider: &str, metadata: &Value, existing: &[Account]) -> Account {
+    let identity = quota::identity_from_metadata(provider, metadata);
+    let email = text(metadata, "email");
+    let id = identity.as_deref().map(|identity| stable_id(&["omp", identity, "observation"]))
+        .unwrap_or_else(|| stable_id(&["omp-unverified", provider,
+            &metadata.get("authorizedAt").and_then(Value::as_i64).unwrap_or(0).to_string(),
+            email.as_deref().unwrap_or("")]));
+    let mut account = existing.iter().find(|account| account.id == id).cloned().unwrap_or_else(|| Account {
+        id, enabled: true, max_concurrency: 1, ..Account::default()
+    });
+    account.provider = provider_id(provider).into();
+    account.tool = "omp".into();
+    account.label = account_label(&format!("OMP · {provider}"), email.as_deref());
+    account.email = email;
+    account.organization = text(metadata, "orgName").or_else(|| text(metadata, "orgId")).or_else(|| text(metadata, "projectId"));
+    account.plan = text(metadata, "planType").or_else(|| text(metadata, "subscriptionType"));
+    account.identity_key = identity;
+    if !matches!(account.auth_status.as_str(), "auth-required" | "error") {
+        account.auth_status = "unverified".into();
+        account.reason = Some(OMP_GATE.into());
     }
-    let binary = account
-        .binary_path
-        .as_deref()
-        .ok_or_else(|| ApiError::new("BINARY_MISSING", "등록된 공식 CLI가 없어요."))?;
-    // 진입 경로(symlink)는 공식 업데이트로 대상이 바뀔 수 있으므로 매번 해석한 실행 파일을 씁니다.
-    let executable = process::executable(Path::new(binary))?;
-    Ok((canonical, executable))
+    account.verification = "observed".into();
+    account.can_launch = false;
+    if let Some(old) = existing.iter().find(|old| old.id == account.id) {
+        account = preserve_preferences(account, old);
+    }
+    account
 }
+
+
+/// 각 native 프로필의 인증→사용량을 이어서 실행하고, 독립 소스 결과는 완료 즉시 반영한다.
+/// CLI 조회는 최대 4개 native worker를 사용하며, 정기 조회는 신선한 관측을 재사용한다.
+pub fn scan(
+    paths: &Paths,
+    existing: &[Account],
+    force: bool,
+    inventory: impl FnOnce() -> Result<Option<Vec<Account>>, ApiError> + Send,
+    publish: impl FnMut(&Account) -> Result<(), ApiError> + Send,
+) -> Result<ScanResult, ApiError> {
+    use parking_lot::Mutex;
+    use std::sync::mpsc;
+    let home = user_home()?;
+    let started = now_ms();
+    let binaries: BTreeMap<_, _> = ["claude", "codex", "omp"].into_iter()
+        .filter_map(|tool| process::discover(paths, tool).map(|binary| (tool, binary)))
+        .collect();
+    let mut discovered = Vec::new();
+    // 등록되지 않은 폴더의 복구 검사는 명시적 새로고침/빈 카탈로그에서만 한다.
+    // 정기 사용량 갱신마다 이미 대체된 프로필까지 CLI로 재검사하지 않는다.
+    let mut candidates = if force || existing.is_empty() { profiles::managed_profiles(paths) } else { Vec::new() };
+    let managed_root = paths.profiles.canonicalize().ok();
+    for (tool, folder) in [("claude", ".claude"), ("codex", ".codex")] {
+        if let Ok(profile) = safety::canonical_profile(&home.join(folder)) {
+            candidates.push((tool.to_owned(), profile));
+        }
+    }
+    for (tool, profile) in candidates {
+        let Some(binary) = binaries.get(tool.as_str()) else { continue };
+        if existing.iter().any(|account| account.tool == tool && account.profile_path.as_deref() == profile.to_str()) {
+            continue;
+        }
+        let managed = profile.parent() == managed_root.as_deref();
+        let label = if managed { tool_details(&tool).0.to_owned() } else { format!("{} · 기본 프로필", tool_details(&tool).0) };
+        discovered.push((blank_account(&tool, &profile, binary, &label), managed));
+    }
+    let native: Vec<_> = existing.iter()
+        .filter(|account| matches!(account.tool.as_str(), "claude" | "codex"))
+        .map(|account| (account, false))
+        .chain(discovered.iter().map(|(account, managed)| (account, *managed)))
+        .collect();
+    let publisher = Mutex::new(publish);
+    let omp_cache: Mutex<Option<Arc<Value>>> = Mutex::new(None);
+    std::thread::scope(|scope| {
+        let (sender, receiver) = mpsc::channel();
+        let inventory_sender = sender.clone();
+        scope.spawn(move || { let _ = inventory_sender.send(ScanEvent::Inventory(inventory())); });
+        if let Some(binary) = binaries.get("omp") {
+            let sender = sender.clone();
+            let home = &home;
+            scope.spawn(move || {
+                if force {
+                    let _ = process::run_quiet(binary, &["usage", "invalidate"], &process::base_env(), home);
+                }
+                let _ = sender.send(ScanEvent::Omp(process::run_json_slow(binary, &["usage", "--json"], &process::base_env(), home)));
+            });
+        }
+        for (&tool, binary) in &binaries {
+            let sender = sender.clone();
+            let home = &home;
+            scope.spawn(move || { let _ = sender.send(ScanEvent::Version(tool, process::version(binary, home))); });
+        }
+        let native_sender = sender.clone();
+        let publisher_ref = &publisher;
+        let cache = &omp_cache;
+        let binaries_ref = &binaries;
+        scope.spawn(move || {
+            let result = probe_each(native, |(old, managed)| {
+                let inspect = || -> Result<(Option<Account>, bool), ApiError> {
+                    let (mut account, confirmed) = refresh_bound(old, binaries_ref.get(old.tool.as_str()).map(PathBuf::as_path));
+                    let already_bound = managed && existing.iter().any(|old| old.tool == account.tool
+                        && old.identity_key.is_some() && old.identity_key == account.identity_key);
+                    if managed && (!account.can_launch || already_bound) { return Ok((None, false)); }
+                    let cached = cache.lock().as_ref().map(Arc::clone);
+                    let omp_ready = cached.as_ref().is_some_and(|value| refresh_native_from_omp(&mut account, value, force, started).0);
+                    publisher_ref.lock()(&account)?;
+                    let mut failed = false;
+                    // binding을 보존한 일시적 신원 조회 실패 뒤에는 별도 사용량 조회를 중복 실행하지 않는다.
+                    if confirmed && account.auth_status == "authenticated" && account.can_launch {
+                        if account.tool == "claude" && !omp_ready && (force || (!omp_fresh(&account) && native_due(&account))) {
+                            let mut updated = false;
+                            match native_usage(&account, existing) {
+                                Ok(buckets) => { account.buckets = buckets; updated = true; }
+                                Err(_) => failed = true,
+                            }
+                            let cached = cache.lock().as_ref().map(Arc::clone);
+                            if let Some(value) = cached { updated |= refresh_native_from_omp(&mut account, &value, false, started).1; }
+                            if updated { publisher_ref.lock()(&account)?; }
+                        } else if account.tool == "codex" {
+                            let updated = match native::codex_usage(&account) {
+                                Ok((buckets, credits)) => { account.buckets = buckets; account.credits = credits; true }
+                                Err(_) => account.credits.take().is_some(),
+                            };
+                            if updated { publisher_ref.lock()(&account)?; }
+                        }
+                    }
+                    Ok((Some(account), failed))
+                };
+                inspect()
+            }, |result| {
+                native_sender.send(ScanEvent::Native(result))
+                    .map_err(|_| ApiError::new("PROBE_CLOSED", "계정 조회 결과의 수신 경로가 닫혔어요."))
+            });
+            if let Err(error) = result { let _ = native_sender.send(ScanEvent::Failed(error)); }
+        });
+        drop(sender);
+        let mut result = ScanResult { accounts: Vec::new(), tools: Vec::new(), notices: Vec::new(), merged_observation_ids: Vec::new() };
+        let mut versions = BTreeMap::new();
+        let mut omp_usage: Option<Arc<Value>> = None;
+        let mut observed_omp = BTreeSet::new();
+        let mut native_failed = false;
+        for event in receiver {
+            match event {
+                ScanEvent::Native(outcome) => {
+                    let (account, failed) = outcome?;
+                    native_failed |= failed;
+                    if let Some(mut account) = account {
+                        if let Some(value) = &omp_usage {
+                            if refresh_native_from_omp(&mut account, value, false, started).1 { publisher.lock()(&account)?; }
+                        }
+                        result.accounts.push(account);
+                    }
+                }
+                ScanEvent::Inventory(outcome) => match outcome {
+                    Ok(Some(accounts)) => for mut account in accounts {
+                        if let Some(current) = result.accounts.iter_mut().find(|current| current.id == account.id) {
+                            // 늦게 온 목록이 더 새로운 사용량/인증 근거를 덮지 않는다.
+                            if current.email.is_none() { current.email = account.email.take(); }
+                            if current.organization.is_none() { current.organization = account.organization.take(); }
+                            if current.plan.is_none() { current.plan = account.plan.take(); }
+                        } else {
+                            account.binary_path = binaries.get("omp").map(|binary| binary.to_string_lossy().into_owned());
+                            publisher.lock()(&account)?;
+                            result.accounts.push(account);
+                        }
+                    },
+                    Ok(None) => {},
+                    Err(error) => result.notices.push(notice("OMP_INVENTORY_UNAVAILABLE", error.message)),
+                },
+                ScanEvent::Omp(outcome) => match outcome {
+                    Ok(value) => {
+                        let value = Arc::new(value);
+                        *omp_cache.lock() = Some(Arc::clone(&value));
+                        observed_omp = add_omp_reports(&mut result, &value, &binaries["omp"], existing);
+                        for account in &result.accounts {
+                            if account.tool == "omp" || value["reports"].as_array().is_some_and(|reports| reports.iter().any(|report| matches_report(account, report))) {
+                                publisher.lock()(account)?;
+                            }
+                        }
+                        omp_usage = Some(value);
+                    }
+                    Err(error) => result.notices.push(notice("OMP_USAGE_UNAVAILABLE", error.message)),
+                },
+                ScanEvent::Version(tool, version) => { versions.insert(tool, version); },
+                ScanEvent::Failed(error) => return Err(error),
+            }
+        }
+        // 완성된 native 목록에서 같은 identity의 관측만 통합한다. 이메일-only 기록은 삭제 근거로 쓰지 않는다.
+        if let Some(value) = &omp_usage {
+            observed_omp = add_omp_reports(&mut result, value, &binaries["omp"], existing);
+        }
+        if native_failed {
+            result.notices.push(notice("NATIVE_USAGE_UNAVAILABLE", "일부 Claude 계정의 사용량을 공식 CLI로 조회하지 못했어요. 이전 관측 시각은 갱신하지 않았어요."));
+        }
+        let current: BTreeSet<_> = result.accounts.iter().map(|account| account.id.as_str()).collect();
+        let stale: Vec<_> = existing.iter()
+            .filter(|account| account.tool == "omp" && !current.contains(account.id.as_str()) && !observed_omp.contains(&account.id))
+            .map(|old| {
+                let mut stale = old.clone();
+                stale.can_launch = false;
+                stale.verification = "observed".into();
+                if !matches!(stale.auth_status.as_str(), "auth-required" | "error") {
+                    stale.auth_status = "unverified".into();
+                    stale.reason = Some("지금 omp 응답에서 이 계정을 다시 보지 못했어요. 이전 조회이며 공식 CLI 실행에 쓸 수 없어요.".into());
+                }
+                for bucket in &mut stale.buckets { bucket.status = if bucket.used_percent.is_some() { "stale" } else { "unknown" }.into(); }
+                stale
+            }).collect();
+        result.accounts.extend(stale);
+        if let Some(value) = &omp_usage { apply_omp_auth_failures(&mut result.accounts, value); }
+        for tool in ["claude", "codex", "omp"] {
+            let binary = binaries.get(tool);
+            let (name, provider, isolation, reason) = tool_details(tool);
+            result.tools.push(ToolStatus {
+                id: tool.into(), name: name.into(), provider: provider.into(),
+                binary_path: binary.map(|binary| binary.to_string_lossy().into_owned()),
+                version: versions.remove(tool).flatten(), installed: binary.is_some(),
+                isolation: isolation.into(), reason: reason.map(str::to_owned),
+            });
+        }
+        Ok(result)
+    })
+}
+
+/// 첫 값은 사용 가능한 omp 관측인지, 두 번째 값은 계정에 더 새로운 사실을 반영했는지다.
+fn refresh_native_from_omp(account: &mut Account, value: &Value, force: bool, started: i64) -> (bool, bool) {
+    if account.tool != "claude" || !account.can_launch { return (false, false); }
+    let Some(reports) = value["reports"].as_array() else { return (false, false) };
+    let mut matching = reports.iter().filter(|report| matches_report(account, report));
+    let Some(report) = matching.next() else { return (false, false) };
+    if matching.next().is_some() { return (false, false); }
+    let Some(identity) = report_identity(report) else { return (false, false) };
+    let buckets = omp_buckets(report, &identity);
+    let observed = buckets.iter().map(|bucket| bucket.observed_at).max();
+    let previous = account.buckets.iter().map(|bucket| bucket.observed_at).max();
+    let updated = !buckets.is_empty() && (observed > previous || (observed == previous && !omp_fresh(account)));
+    if updated {
+        account.buckets = buckets;
+        account.extra_usage = omp_extra_usage(report);
+        if let Some(pin) = quota::credential_pin(report) {
+            if !account.omp_credential_pins.contains(&pin) { account.omp_credential_pins.push(pin); }
+        }
+    }
+    (omp_fresh(account) && (!force || account.buckets.iter().all(|bucket| bucket.observed_at >= started)), updated)
+}
+
+/// 최대 4개의 독립 CLI 조회를 실행하고, 느린 프로필과 무관하게 완료 순서로 반영한다.
+fn probe_each<T: Send, R: Send>(
+    items: Vec<T>,
+    probe: impl Fn(T) -> R + Sync,
+    mut receive: impl FnMut(R) -> Result<(), ApiError>,
+) -> Result<(), ApiError> {
+    use parking_lot::Mutex;
+    use std::sync::mpsc;
+    let workers = items.len().min(4);
+    let next = Mutex::new(items.into_iter());
+    std::thread::scope(|scope| {
+        let (sender, receiver) = mpsc::channel();
+        for _ in 0..workers {
+            let sender = sender.clone();
+            let probe = &probe;
+            let next = &next;
+            scope.spawn(move || {
+                loop {
+                    let Some(item) = next.lock().next() else { break };
+                    if sender.send(probe(item)).is_err() { break; }
+                }
+            });
+        }
+        drop(sender);
+        for result in receiver { receive(result)?; }
+        Ok(())
+    })
+}
+
 
 pub fn verify(account: &Account) -> Result<IdentityEvidence, ApiError> {
     verify_at(account, None)
@@ -744,8 +912,8 @@ pub fn verify(account: &Account) -> Result<IdentityEvidence, ApiError> {
 
 fn verify_at(account: &Account, cwd: Option<&Path>) -> Result<IdentityEvidence, ApiError> {
     known_tool(&account.tool)?;
-    let (profile, binary) = binding_paths(account)?;
-    let fresh = native::inspect_at(
+    let (profile, binary) = native::bound_paths(account)?;
+    let fresh = native::inspect_identity_at(
         &account.tool,
         &profile,
         &binary,
@@ -832,7 +1000,7 @@ pub fn build_launch_plan(account: &Account, intent: &LaunchIntent) -> Result<Lau
             "작업 디렉터리가 없거나 접근할 수 없습니다. 기존 폴더의 절대 경로를 선택해 주세요.",
         )
     })?;
-    let (profile, binary) = binding_paths(account)?;
+    let (profile, binary) = native::bound_paths(account)?;
     safety::check_inherited_profile(&account.tool, &profile)?;
     verify_at(account, Some(&cwd))?;
     let mut args = if intent.model == NATIVE_DEFAULT_MODEL {
@@ -1098,6 +1266,34 @@ mod tests {
         account
     }
 
+    #[test]
+    fn temporary_identity_probe_failure_preserves_only_a_verified_binding() {
+        let mut verified = native_account("/fixture");
+        verified.can_launch = true;
+        verified.auth_status = "authenticated".into();
+        verified.verification = "preflight-verified".into();
+        verified.buckets.push(QuotaBucket {
+            used_percent: Some(10.0), status: "known".into(), ..Default::default()
+        });
+        for code in ["PROBE_TIMEOUT", "PROBE_IO", "PROBE_START_FAILED", "PROBE_CLOSED"] {
+            let retained = failed_inspection(verified.clone(), ApiError::new(code, "조회 실패"));
+            assert!(retained.can_launch);
+            assert_eq!(retained.auth_status, "authenticated");
+            assert_eq!(retained.verification, "preflight-verified");
+            assert_eq!(retained.identity_key, verified.identity_key);
+            assert_eq!(retained.buckets[0].status, "stale");
+        }
+        let unknown = failed_inspection(native_account("/fixture"), ApiError::new("PROBE_TIMEOUT", "조회 지연"));
+        assert!(!unknown.can_launch);
+        assert_ne!(unknown.auth_status, "authenticated");
+        for code in ["AUTH_REQUIRED", "IDENTITY_DRIFT", "AUTH_OVERRIDE_CONFLICT", "PROBE_SCHEMA"] {
+            let blocked = failed_inspection(verified.clone(), ApiError::new(code, "명시적 실패"));
+            assert!(!blocked.can_launch, "{code}");
+            assert_ne!(blocked.auth_status, "authenticated", "{code}");
+            assert_eq!(blocked.identity_key, verified.identity_key);
+        }
+    }
+
     #[cfg(unix)]
     #[test]
     fn logout_preserves_binding_and_requires_login_without_accepting_another_identity() {
@@ -1116,14 +1312,17 @@ mod tests {
         old.auth_status = "authenticated".into();
         old.can_launch = true;
         write_probe(json!({"loggedIn":false}));
-        let logged_out = refresh_bound(&old, None);
+        let (logged_out, confirmed) = refresh_bound(&old, None);
+        assert!(!confirmed);
         let authenticated = json!({"loggedIn":true,"authMethod":"claude.ai","apiProvider":"firstParty","email":"person@invalid.test","orgId":"workspace-a"});
         write_probe(authenticated.clone());
-        let restored = refresh_bound(&logged_out, None);
+        let (restored, confirmed) = refresh_bound(&logged_out, None);
+        assert!(confirmed);
         let mut different = authenticated;
         different["orgId"] = json!("workspace-b");
         write_probe(different);
-        let drifted = refresh_bound(&restored, None);
+        let (drifted, confirmed) = refresh_bound(&restored, None);
+        assert!(!confirmed);
         fs::remove_dir_all(&root).unwrap();
         assert_eq!(logged_out.auth_status, "auth-required");
         assert!(!logged_out.can_launch);
@@ -1136,6 +1335,52 @@ mod tests {
         assert!(!drifted.can_launch);
         assert_eq!(drifted.identity_key, old.identity_key);
         assert_eq!(drifted.id, old.id);
+    }
+
+    #[test]
+    fn completed_profiles_are_published_before_a_slow_profile_finishes() {
+        use parking_lot::Mutex;
+        use std::sync::mpsc;
+        use std::time::Duration;
+        let (release, gate) = mpsc::channel();
+        let gate = Mutex::new(gate);
+        let mut completed = Vec::new();
+        probe_each(vec![0, 1], |profile| {
+            if profile == 0 {
+                gate.lock().recv_timeout(Duration::from_secs(3)).unwrap();
+            }
+            profile
+        }, |profile| {
+            completed.push(profile);
+            if profile == 1 { release.send(()).unwrap(); }
+            Ok(())
+        }).unwrap();
+        assert_eq!(completed, [1, 0]);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn previously_unidentified_profile_adopts_verified_login_without_changing_preferences() {
+        use std::os::unix::fs::PermissionsExt;
+        let root = std::env::temp_dir().join(format!("aam-adopt-{}", new_id()));
+        fs::create_dir(&root).unwrap();
+        let profile = root.canonicalize().unwrap();
+        let binary = profile.join("claude");
+        fs::write(&binary, "#!/bin/sh\nprintf '%s\\n' '{\"loggedIn\":true,\"authMethod\":\"claude.ai\",\"apiProvider\":\"firstParty\",\"email\":\"person@invalid.test\",\"orgId\":\"workspace-a\"}'\n").unwrap();
+        fs::set_permissions(&binary, fs::Permissions::from_mode(0o700)).unwrap();
+        let mut old = blank_account("claude", &profile, &binary, "Personal");
+        old.auth_status = "auth-required".into();
+        old.enabled = false;
+        old.max_concurrency = 3;
+        let (fresh, confirmed) = refresh_bound(&old, None);
+        assert!(confirmed);
+        assert!(fresh.can_launch);
+        assert_eq!(fresh.auth_status, "authenticated");
+        assert_eq!(fresh.identity_key.as_deref(), Some("anthropic|email:person@invalid.test|workspace:workspace-a"));
+        assert_eq!(fresh.id, old.id);
+        assert!(!fresh.enabled);
+        assert_eq!(fresh.max_concurrency, 3);
+        fs::remove_dir_all(root).unwrap();
     }
 
     /// 공식 CLI를 흉내 내는 스크립트: `auth status`는 파일 내용을, 그 밖의 호출(`/usage`)은 이벤트 파일을 낸다.
@@ -1415,6 +1660,91 @@ mod tests {
     }
 
     #[test]
+    fn broker_inventory_preserves_known_usage_without_needing_a_usage_response_or_copying_secrets() {
+        let snapshot = json!({"credentials":[
+            {"provider":"anthropic","credential":{"type":"oauth","accountId":"subject-a","orgId":"workspace-a","email":"person@invalid.test","access":"secret-access","refresh":"secret-refresh"}},
+            {"provider":"ojak-claude","credential":{"type":"oauth","access":"bridge-only"}},
+            {"provider":"anthropic","credential":{"type":"api_key","key":"api-key"}}
+        ]});
+        let initial = omp_inventory(&snapshot, &[]).unwrap();
+        assert_eq!(initial.len(), 1);
+        let mut old = initial[0].clone();
+        old.enabled = false;
+        old.buckets = omp_buckets(&report("subject-a", "workspace-a"), old.identity_key.as_deref().unwrap());
+        let observed = old.buckets[0].observed_at;
+        let inventory = omp_inventory(&snapshot, &[old]).unwrap();
+        assert_eq!(inventory[0].email.as_deref(), Some("person@invalid.test"));
+        assert_eq!(inventory[0].identity_key.as_deref(), Some("anthropic|subject:subject-a|workspace:workspace-a"));
+        assert!(!inventory[0].enabled);
+        assert!(!inventory[0].can_launch);
+        assert_eq!(inventory[0].buckets[0].used_percent, Some(43.0));
+        assert_eq!(inventory[0].buckets[0].observed_at, observed);
+        let serialized = serde_json::to_string(&inventory).unwrap();
+        assert!(!serialized.contains("secret-access") && !serialized.contains("secret-refresh"));
+        assert!(omp_inventory(&json!({"credentials":null}), &[]).is_err());
+    }
+
+    #[test]
+    fn inventory_and_usage_share_one_row_for_the_same_identity() {
+        let inventory = omp_inventory(&json!({"credentials":[
+            {"provider":"anthropic","credential":{"type":"oauth","accountId":"subject-a","orgId":"workspace-a","email":"person@invalid.test"}}
+        ]}), &[]).unwrap();
+        let id = inventory[0].id.clone();
+        let mut result = ScanResult { accounts: inventory, tools: vec![], notices: vec![], merged_observation_ids: vec![] };
+        add_omp_reports(&mut result, &json!({"reports":[report("subject-a","workspace-a")]}), Path::new("/native/omp"), &[]);
+        assert_eq!(result.accounts.len(), 1);
+        assert_eq!(result.accounts[0].id, id);
+        assert_eq!(result.accounts[0].buckets[0].used_percent, Some(43.0));
+    }
+
+    #[test]
+    fn unavailable_usage_with_another_workspace_keeps_both_accounts() {
+        let mut result = ScanResult { accounts: vec![], tools: vec![], notices: vec![], merged_observation_ids: vec![] };
+        add_omp_reports(&mut result, &json!({
+            "reports":[report("subject-a", "workspace-a")],
+            "accountsWithoutUsage":[{"provider":"anthropic","accountId":"subject-b","orgId":"workspace-b","email":"person@invalid.test","authorizedAt":123}]
+        }), Path::new("/native/omp"), &[]);
+        assert_eq!(result.accounts.len(), 2);
+        let missing = result.accounts.iter().find(|account| account.identity_key.as_deref() == Some("anthropic|subject:subject-b|workspace:workspace-b")).unwrap();
+        assert!(!missing.can_launch);
+        assert!(missing.buckets.is_empty());
+        assert_eq!(result.accounts.iter().find(|account| account.identity_key.as_deref() == Some("anthropic|subject:subject-a|workspace:workspace-a")).unwrap().buckets[0].used_percent, Some(43.0));
+    }
+
+    #[test]
+    fn inventory_does_not_clear_auth_failure_without_successful_usage() {
+        let snapshot = json!({"credentials":[{"provider":"anthropic","credential":{"type":"oauth","accountId":"subject-a","orgId":"workspace-a","email":"person@invalid.test"}}]});
+        let mut expired = omp_inventory(&snapshot, &[]).unwrap().remove(0);
+        expired.auth_status = "auth-required".into();
+        expired.reason = Some("expired login".into());
+        let inventory = omp_inventory(&snapshot, &[expired.clone()]).unwrap();
+        assert_eq!(inventory[0].auth_status, "auth-required");
+        assert_eq!(inventory[0].reason, expired.reason);
+        let mut result = ScanResult { accounts: inventory, tools: vec![], notices: vec![], merged_observation_ids: vec![] };
+        add_omp_reports(&mut result, &json!({"reports":[report("subject-a","workspace-a")]}), Path::new("/native/omp"), &[expired]);
+        assert_eq!(result.accounts[0].auth_status, "unverified");
+        assert_eq!(result.accounts[0].buckets[0].used_percent, Some(43.0));
+    }
+
+
+    #[test]
+    fn older_omp_usage_does_not_replace_newer_official_usage() {
+        let now = now_ms();
+        let mut native = native_account("/profile/a");
+        native.buckets = vec![QuotaBucket {
+            id: "session".into(), label: "5시간".into(), model: None,
+            used_percent: Some(90.0), resets_at: Some(now + 60_000),
+            observed_at: now, source: quota::CLAUDE_USAGE_SOURCE.into(), status: "known".into(),
+        }];
+        let mut result = ScanResult { accounts: vec![native], tools: vec![], notices: vec![], merged_observation_ids: vec![] };
+        let mut cached = report("subject-a", "workspace-a");
+        cached["fetchedAt"] = json!(now - 60_000);
+        add_omp_reports(&mut result, &json!({"reports":[cached]}), Path::new("/native/omp"), &[]);
+        assert_eq!(result.accounts[0].buckets[0].used_percent, Some(90.0));
+        assert_eq!(result.accounts[0].buckets[0].observed_at, now);
+    }
+
+    #[test]
     fn equal_percentages_and_ambiguous_emails_do_not_merge_subjects() {
         let mut result = ScanResult {
             accounts: vec![native_account("/profile/a")],
@@ -1445,8 +1775,8 @@ pub fn copy_claude_transcript(source: &Account, target: &Account, native_id: &st
     if source.tool != "claude" || target.tool != "claude" || uuid::Uuid::parse_str(native_id).is_err() {
         return Err(missing());
     }
-    let (from_profile, _) = binding_paths(source)?;
-    let (to_profile, _) = binding_paths(target)?;
+    let (from_profile, _) = native::bound_paths(source)?;
+    let (to_profile, _) = native::bound_paths(target)?;
     let name = format!("{native_id}.jsonl");
     let mut found = Vec::new();
     for entry in fs::read_dir(from_profile.join("projects")).map_err(|_| missing())?.flatten().take(8192) {
@@ -1504,7 +1834,7 @@ fn codex_meta(path: &Path) -> Option<(String, PathBuf)> {
 /// 파일 경로다. 그중 이 계정 프로필의 `sessions/` 안 rollout이고 작업 폴더가 같은 대화가 정확히 하나일 때만 돌려준다.
 /// 시각·폴더만 맞는 다른 파일(같은 프로필을 쓰는 외부 Codex)은 근거가 아니므로 쓰지 않는다.
 pub fn codex_session_from(account: &Account, cwd: &str, written: &[PathBuf]) -> Option<String> {
-    let (profile, _) = binding_paths(account).ok()?;
+    let (profile, _) = native::bound_paths(account).ok()?;
     let sessions = profile.join("sessions").canonicalize().ok()?;
     let cwd = Path::new(cwd).canonicalize().ok()?;
     let mut found: Vec<String> = written
@@ -1532,7 +1862,7 @@ pub fn share_extensions(account: &Account) -> Result<(), ApiError> {
         "codex" => (&shared::CODEX, ".codex"),
         _ => return Ok(()),
     };
-    let (profile, _) = binding_paths(account)?;
+    let (profile, _) = native::bound_paths(account)?;
     shared::share(spec, &user_home()?.join(folder), &profile)
 }
 
@@ -1552,8 +1882,8 @@ fn copy_codex_rollout(source: &Account, target: &Account, native_id: &str) -> Re
     if target.tool != "codex" || uuid::Uuid::parse_str(native_id).is_err() {
         return Err(missing());
     }
-    let (from_profile, _) = binding_paths(source)?;
-    let (to_profile, _) = binding_paths(target)?;
+    let (from_profile, _) = native::bound_paths(source)?;
+    let (to_profile, _) = native::bound_paths(target)?;
     let suffix = format!("-{native_id}.jsonl");
     let files: Vec<PathBuf> = codex_rollouts(&from_profile, 62)
         .into_iter()

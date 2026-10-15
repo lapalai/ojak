@@ -3,7 +3,8 @@ import { CheckCircle2, Circle, Loader2 } from "lucide-react";
 import { ompBridgeAction, serviceRestart, serviceVersionStatus, setupCheck, setupInstall, setupStatus, toApiError } from "./api";
 import type { ServiceVersionReport, SetupStatus } from "./api";
 import { ActionFeedback, Modal } from "./components";
-import { codeText, OpenTerminal } from "./OnboardingCard";
+import { allocatableTools } from "./allocation";
+import { allocationLine, codeText, OpenTerminal } from "./OnboardingCard";
 import { preferredTool } from "./onboarding";
 import { useAction } from "./state";
 import type { ApiError, Snapshot } from "./types";
@@ -110,7 +111,7 @@ export function SetupGuide({ snapshot, onAdd, onReload, onChanged, request = 0, 
       if (!skipped || requested) setOpen(true);
     });
     return () => { active = false; };
-  }, [accountKey, Boolean(snapshot), request, suspended]);
+  }, [accountKey, Boolean(snapshot), Boolean(snapshot?.refreshing), snapshot?.lastRefreshAt ?? 0, request, suspended]);
 
   if (!open || suspended) return null;
   const skip = () => {
@@ -153,8 +154,11 @@ export function SetupGuide({ snapshot, onAdd, onReload, onChanged, request = 0, 
   const ompFailed = ompAttempted && Boolean(status.omp?.error);
   const ready = status.ready && (!ompAttempted || ompFailed || Boolean(status.omp?.broker && status.omp.bridge && status.omp.observer));
 
-  const startTool = preferredTool(accounts) ?? preferredTool(status.tools.filter(tool => tool.account).map(tool => ({ tool: tool.tool, enabled: true, canLaunch: true })));
-  return <Modal title={ready ? t("setup.doneTitle") : t("setup.title")} onClose={skip} busy={action.pending}>
+  // 터미널은 서비스가 지금 계정을 받을 수 있다고 판단한 도구로만 연다(`canLaunch`는 배정 가능을 뜻하지 않는다).
+  const startTool = preferredTool(allocatableTools(status.tools).map(tool => ({ tool, enabled: true, canLaunch: true })));
+  // 명령 연결 확인(ready)과 별개로, 서비스가 지금 새 세션을 받을 수 있다고 판단했을 때만 '준비됐어요'라고 말한다.
+  const allocatable = status.allocatable;
+  return <Modal title={ready ? t(allocatable ? "setup.doneTitle" : "setup.connectedTitle") : t("setup.title")} onClose={skip} busy={action.pending}>
     {!ready && <p className="setup-value">{codeText(t("setup.value"))}</p>}
     <ol className="setup-steps">
       {steps.map(step => <li key={step.id} className={step.done ? "done" : undefined}>
@@ -167,6 +171,7 @@ export function SetupGuide({ snapshot, onAdd, onReload, onChanged, request = 0, 
     <div className="setup-body">
       {status.tools.map(tool => <p key={tool.tool}>
         <strong>{tool.tool}</strong> · {t(!tool.account ? "setup.stepAccount" : tool.verified === true ? "setup.verified" : tool.verified === false ? "setup.verifyFailed" : tool.connected ? "setup.configured" : "setup.notConnected")}
+        {(tool.account || tool.allocation.state !== "none") && <span className={`field-help${tool.allocation.state === "allocatable" ? "" : " warning-text"}`} data-allocation={tool.allocation.state}> · {allocationLine(tool.allocation)}</span>}
       </p>)}
       <p className="field-help">{t("setup.verifyHelp")}</p>
       {status.ompDetected && status.ompSupported && <>
@@ -175,7 +180,7 @@ export function SetupGuide({ snapshot, onAdd, onReload, onChanged, request = 0, 
         {status.omp && <p className={status.omp.error ? "warning-text" : undefined}>omp · {t(status.omp.broker && status.omp.bridge && status.omp.observer ? "setup.ompConfigured" : status.omp.error ? "setup.ompFailed" : "setup.notConnected")}{status.omp.error && <> · {status.omp.error}</>}</p>}
       </>}
       {status.ompDetected && !status.ompSupported && <p className="field-help">{t("setup.ompUnsupported")}</p>}
-      {ready && <>{startTool && <OpenTerminal tool={startTool} />}<p className="field-help">{t("setup.doneHelp")}</p></>}
+      {ready && <>{allocatable && startTool && <OpenTerminal tool={startTool} />}<p className="field-help">{t(allocatable ? "setup.doneHelp" : "setup.connectedHelp")}</p></>}
     </div>
     {!ready && (installed && !hasAccount ? <div className="setup-body">
       <p>{t("setup.noAccount")}</p>

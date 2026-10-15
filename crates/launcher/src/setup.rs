@@ -1,7 +1,7 @@
 //! 첫 실행 준비. 앱의 준비 화면이 한 번의 동의로 서비스·명령 연결·터미널 PATH를 차례로 설치하고,
 //! 끝난 뒤 실제로 `claude`·`codex`가 관리 실행으로 이어지는지 점검한다.
 use crate::{install, read_snapshot, service_version};
-use aam_protocol::{ApiError, Paths};
+use aam_protocol::{call, ApiError, Decision, LaunchIntent, Paths, Snapshot, NATIVE_DEFAULT_MODEL};
 use serde::Serialize;
 #[cfg(not(windows))]
 use std::path::Path;
@@ -21,6 +21,24 @@ pub struct ToolSetup {
     /// 명시적인 설치·재점검에서만 로그인 셸을 실행한다. 미검사는 None.
     pub verified: Option<bool>,
     pub verification_error: Option<String>,
+    /// 서비스의 배정 판단(`route.explain`)을 그대로 요약한 결과. `account`·`connected`와 별개로, 지금 실제 배정이 되는지를 알린다.
+    pub allocation: Allocation,
+}
+
+/// 도구별 배정 준비 상태. 판단 규칙은 서비스의 스케줄러에만 있고 여기서는 결과를 분류만 한다.
+/// `state`: `allocatable`(지금 받을 수 있는 계정이 있다) · `pending`(첫 조회·로그인 확인이 끝나야 알 수 있다) ·
+/// `excluded`(조회가 끝났고 사유 코드가 남았다) · `none`(이 도구로 찾은 계정이 없다) · `unavailable`(서비스 판단을 읽지 못했다).
+#[derive(Debug, Clone, Serialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub struct Allocation {
+    pub state: String,
+    pub candidates: usize,
+    pub eligible: usize,
+    /// 제외된 계정의 사유 코드(`QUOTA_UNKNOWN` 등)의 합집합. 계정 정보·설명 문장은 넣지 않는다.
+    pub codes: Vec<String>,
+    /// 서비스가 오류로 답한 경우의 오류 코드.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub error_code: Option<String>,
 }
 
 /// 실패한 준비 단계의 이유와 다음 행동. `message`는 한국어이고, 화면은 `code`로 표시 언어 문장을 만든다.
@@ -42,6 +60,10 @@ pub struct SetupStatus {
     pub shell: bool,
     pub tools: Vec<ToolSetup>,
     pub configured: bool,
+    /// 어느 한 도구라도 지금 계정을 받을 수 있다(`tools[].allocation.state == "allocatable"`). `ready`·`configured`와 별개다.
+    pub allocatable: bool,
+    /// 첫 조회가 끝나지 않았거나 조회가 진행 중이라 위 판단이 바뀔 수 있다.
+    pub scan_pending: bool,
     pub omp_detected: bool,
     pub omp_supported: bool,
     /// 새 로그인 셸의 명령 연결을 확인했다. 기존 세션 전환을 의미하지 않는다.
@@ -168,6 +190,7 @@ pub fn setup_status(paths: &Paths) -> SetupStatus {
             connected: install::shim_installed(paths, tool).unwrap_or(false),
             verified: None,
             verification_error: None,
+            allocation: allocation_for(paths, snapshot.as_ref(), tool),
         })
         .collect();
     let configured = snapshot.is_some()
@@ -180,12 +203,15 @@ pub fn setup_status(paths: &Paths) -> SetupStatus {
         shell,
         tools,
         configured,
+        allocatable: false,
+        scan_pending: snapshot.as_ref().is_some_and(|snapshot| snapshot.refreshing || snapshot.last_refresh_at.is_none()),
         omp_detected,
         omp_supported: cfg!(any(unix, windows)),
         ready: false,
         notices: Vec::new(),
         service_version_mismatch: snapshot.as_ref().is_some_and(|snapshot| service_version::report_for(snapshot).mismatch),
     };
+    status.allocatable = status.tools.iter().any(|tool| tool.allocation.state == "allocatable");
     if snapshot.is_none() {
         push_notice(&mut status, "service", None, &service_missing_failure());
     }
@@ -202,6 +228,59 @@ pub fn setup_status(paths: &Paths) -> SetupStatus {
     status
 }
 
+/// 계정이 곧 확인될 수 있는 사유. 조회·로그인 확인이 끝나면 달라질 수 있어 첫 조회 중에는 '확인 중'으로 본다.
+const OBSERVATION_CODES: [&str; 5] = ["QUOTA_UNKNOWN", "QUOTA_STALE", "RESET_UNCONFIRMED", "AUTH_REQUIRED", "ADAPTER_UNVERIFIED"];
+
+/// 배정 판단은 서비스(`route.explain`)가 한 그대로 쓴다. 이 함수는 결과를 분류만 하며 정책을 다시 계산하지 않는다.
+fn classify(decision: &Decision, scanning: bool) -> Allocation {
+    let eligible = decision.candidates.iter().filter(|candidate| candidate.eligible).count();
+    let mut codes: Vec<String> = decision.candidates.iter().flat_map(|candidate| candidate.exclusion_codes()).map(str::to_owned).collect();
+    codes.sort_unstable();
+    codes.dedup();
+    // 조회가 끝나면 풀릴 수 있는 후보: 계정이 아직 없거나, 사유가 모두 관측 사유인 후보.
+    let may_resolve = decision.candidates.is_empty()
+        || decision.candidates.iter().any(|candidate| !candidate.eligible && candidate.exclusion_codes().all(|code| OBSERVATION_CODES.contains(&code)));
+    let state = if eligible > 0 {
+        "allocatable"
+    } else if scanning && may_resolve {
+        "pending"
+    } else if decision.candidates.is_empty() {
+        "none"
+    } else {
+        "excluded"
+    };
+    Allocation { state: state.into(), candidates: decision.candidates.len(), eligible, codes, error_code: None }
+}
+
+fn probe_directory() -> Option<String> {
+    ["HOME", "USERPROFILE"]
+        .into_iter()
+        .filter_map(|name| std::env::var_os(name))
+        .map(std::path::PathBuf::from)
+        .chain(std::env::current_dir().ok())
+        .find(|path| path.is_absolute() && path.is_dir())
+        .and_then(|path| path.into_os_string().into_string().ok())
+}
+
+fn allocation_for(paths: &Paths, snapshot: Option<&Snapshot>, tool: &str) -> Allocation {
+    let unavailable = |code: Option<String>| Allocation { state: "unavailable".into(), candidates: 0, eligible: 0, codes: Vec::new(), error_code: code };
+    let Some(snapshot) = snapshot else { return unavailable(None) };
+    let Some(cwd) = probe_directory() else { return unavailable(Some("INVALID_CWD".into())) };
+    let intent = LaunchIntent { tool: tool.into(), model: NATIVE_DEFAULT_MODEL.into(), cwd, ..Default::default() };
+    match call(paths, "route.explain", serde_json::json!({"intent": intent})).and_then(|value| {
+        serde_json::from_value::<Decision>(value).map_err(|_| ApiError::new("PROTOCOL_MISMATCH", "관리 서비스 응답을 읽지 못했어요."))
+    }) {
+        Ok(decision) => classify(&decision, snapshot.refreshing || snapshot.last_refresh_at.is_none()),
+        Err(error) => unavailable(Some(error.code)),
+    }
+}
+
+/// 설치된 Claude·Codex마다 실행 가능한 계정이 있다(설치된 도구가 하나도 없으면 false).
+fn discovery_settled(snapshot: &Snapshot) -> bool {
+    let installed: Vec<&str> = snapshot.tools.iter().filter(|tool| tool.installed && matches!(tool.id.as_str(), "claude" | "codex")).map(|tool| tool.id.as_str()).collect();
+    !installed.is_empty() && installed.iter().all(|tool| snapshot.accounts.iter().any(|account| account.tool == *tool && account.enabled && account.can_launch))
+}
+
 /// 빠진 단계만 순서대로 설치한다. 서비스 → (첫 도구 탐지 대기) → 명령 연결 → 터미널 PATH.
 /// 원본 CLI·로그인은 바꾸지 않는다. 이미 끝난 단계는 건너뛴다.
 /// 각 단계가 돌려준 경고는 결과에 남긴다. 성공만 알리는 문장은 넣지 않는다.
@@ -212,7 +291,8 @@ pub fn setup_install(paths: &Paths) -> Result<SetupStatus, ApiError> {
     }
     // 서비스가 막 시작했으면 도구·기본 프로필 탐지가 끝나야 어떤 명령을 연결할지 안다.
     let deadline = Instant::now() + Duration::from_secs(30);
-    while read_snapshot(paths).map_or(true, |snapshot| snapshot.refreshing) && Instant::now() < deadline {
+    // 설치된 도구마다 실행 가능한 계정이 이미 보이면 다른 공급자의 느린 조회를 더 기다리지 않는다.
+    while read_snapshot(paths).map_or(true, |snapshot| snapshot.refreshing && !discovery_settled(&snapshot)) && Instant::now() < deadline {
         std::thread::sleep(Duration::from_millis(300));
     }
     step_messages.push(("terminal", install::integration_install(paths)?));
@@ -355,6 +435,8 @@ mod tests {
             shell: true,
             tools: vec![],
             configured: true,
+            allocatable: false,
+            scan_pending: false,
             omp_detected: false,
             omp_supported: true,
             ready: false,
@@ -421,5 +503,66 @@ mod tests {
         let json = serde_json::to_string(&status).unwrap();
         assert!(json.contains("/bin/zsh"), "{json}");
         assert!(json.contains("fish_add_path"), "{json}");
+    }
+
+    fn decision(candidates: Vec<(bool, Vec<&str>)>) -> Decision {
+        Decision {
+            selected_account_id: None,
+            pin_unavailable: None,
+            candidates: candidates
+                .into_iter()
+                .enumerate()
+                .map(|(index, (eligible, reasons))| aam_protocol::Candidate {
+                    account_id: format!("a{index}"),
+                    eligible,
+                    score: None,
+                    reasons: reasons.into_iter().map(|reason| format!("{reason}: 설명")).collect(),
+                })
+                .collect(),
+            policy_revision: 1,
+        }
+    }
+
+    #[test]
+    fn a_launchable_account_with_unknown_quota_is_pending_not_allocatable() {
+        let first_scan = classify(&decision(vec![(false, vec!["QUOTA_UNKNOWN"])]), true);
+        assert_eq!(first_scan.state, "pending");
+        assert_eq!(first_scan.eligible, 0);
+        assert_eq!(first_scan.codes, vec!["QUOTA_UNKNOWN"]);
+        let settled = classify(&decision(vec![(false, vec!["QUOTA_UNKNOWN"])]), false);
+        assert_eq!(settled.state, "excluded");
+        assert_eq!(settled.codes, vec!["QUOTA_UNKNOWN"]);
+    }
+
+    #[test]
+    fn permanent_exclusions_are_not_reported_as_pending_during_a_scan() {
+        let allocation = classify(&decision(vec![(false, vec!["ACCOUNT_DISABLED"]), (false, vec!["QUOTA_EXHAUSTED", "QUOTA_STALE"])]), true);
+        assert_eq!(allocation.state, "excluded");
+        assert_eq!(allocation.codes, vec!["ACCOUNT_DISABLED", "QUOTA_EXHAUSTED", "QUOTA_STALE"]);
+        // 한 계정이라도 조회로 풀릴 수 있으면 첫 조회 중에는 확인 중이다.
+        let mixed = classify(&decision(vec![(false, vec!["ACCOUNT_DISABLED"]), (false, vec!["QUOTA_UNKNOWN"])]), true);
+        assert_eq!(mixed.state, "pending");
+    }
+
+    #[test]
+    fn a_ready_account_is_allocatable_even_while_another_account_is_still_scanning() {
+        let allocation = classify(&decision(vec![(true, vec![]), (false, vec!["QUOTA_UNKNOWN"])]), true);
+        assert_eq!(allocation.state, "allocatable");
+        assert_eq!(allocation.eligible, 1);
+    }
+
+    #[test]
+    fn no_account_is_pending_during_the_first_scan_and_none_afterwards() {
+        assert_eq!(classify(&decision(vec![]), true).state, "pending");
+        assert_eq!(classify(&decision(vec![]), false).state, "none");
+    }
+
+    #[test]
+    fn allocation_json_exposes_codes_without_account_details() {
+        let value = serde_json::to_value(classify(&decision(vec![(false, vec!["CAPACITY_RESERVED"])]), false)).unwrap();
+        assert_eq!(value["state"], "excluded");
+        assert_eq!(value["codes"][0], "CAPACITY_RESERVED");
+        assert!(value.get("errorCode").is_none());
+        assert!(!value.to_string().contains("설명"));
     }
 }

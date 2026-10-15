@@ -5,6 +5,8 @@ import { parseLoginStatus, startArgs } from "./login";
 import { parseLocalUsageReport } from "./local-usage";
 import type { LocalUsageReport, UsageRange } from "./local-usage";
 import type { LoginRequest, LoginStatus } from "./login";
+import { parseAllocation } from "./allocation";
+import type { ToolAllocation } from "./allocation";
 
 export function toApiError(value: unknown): ApiError {
   let candidate = value;
@@ -118,15 +120,24 @@ export interface SetupNotice {
 }
 export interface SetupStatus {
   service: boolean; shell: boolean; configured: boolean; ready: boolean; ompDetected: boolean; ompSupported: boolean;
-  tools: { tool: string; account: boolean; connected: boolean; verified: boolean | null; verificationError: string | null }[];
+  /// 어느 도구든 지금 계정을 받을 수 있다. `ready`(명령 연결 확인)와 별개이며, 값은 서비스의 배정 판단에서 온다.
+  allocatable: boolean;
+  /// 첫 조회가 끝나지 않았거나 조회 중이라 배정 판단이 바뀔 수 있다.
+  scanPending: boolean;
+  tools: { tool: string; account: boolean; connected: boolean; verified: boolean | null; verificationError: string | null; allocation: ToolAllocation }[];
   notices?: SetupNotice[];
   /// 실행 중인 서비스가 앱과 버전이 다르거나 알 수 없다. 이 기능 이전 서비스는 필드가 없을 수 있다.
   serviceVersionMismatch?: boolean;
   omp?: { broker: boolean; bridge: boolean; observer: boolean; error: string | null; futureLaunchesOnly: boolean };
 }
-export const setupStatus = () => native<SetupStatus>("setup_status");
-export const setupCheck = () => native<SetupStatus>("setup_install", { check: true, withOmp: false });
-export const setupInstall = (withOmp = false) => native<SetupStatus>("setup_install", { check: false, withOmp });
+/// 이 기능 이전 CLI는 배정 필드가 없다. 없으면 '읽지 못함'이며 배정 가능으로 보지 않는다.
+export function parseSetupStatus(raw: SetupStatus): SetupStatus {
+  const tools = (raw.tools ?? []).map(tool => ({ ...tool, allocation: parseAllocation((tool as { allocation?: unknown }).allocation) }));
+  return { ...raw, tools, allocatable: tools.some(tool => tool.allocation.state === "allocatable"), scanPending: raw.scanPending === true };
+}
+export const setupStatus = async () => parseSetupStatus(await native<SetupStatus>("setup_status"));
+export const setupCheck = async () => parseSetupStatus(await native<SetupStatus>("setup_install", { check: true, withOmp: false }));
+export const setupInstall = async (withOmp = false) => parseSetupStatus(await native<SetupStatus>("setup_install", { check: false, withOmp }));
 export const openHomepage = () => native<{ opened: boolean }>("open_homepage");
 export const getAutostart = () => native<boolean>("get_autostart");
 export const setAutostart = (enabled: boolean) => native<boolean>("set_autostart", { enabled });

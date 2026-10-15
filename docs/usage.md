@@ -8,7 +8,7 @@ Start with the [download and setup steps](../README.md#download). This guide cov
 
 Ojak selects an account for a new managed CLI session, not for every message. A running conversation stays with that account. Available quota is not the only condition: login status, fresh usage data, concurrency slots, and your allocation settings also matter. This is not a reservation of quota with the provider.
 
-For a verified Claude account, `maxConcurrency: 0` means **no managed-conversation count limit**; values 1–32 apply a finite limit (default 1, currently set through the `account.update` RPC). Removing the count limit does not remove shared quota, authentication checks, or protection against resuming the same conversation concurrently.
+For a verified Claude account, `maxConcurrency: 0` means **no managed-conversation count limit**; values 1–32 apply a finite limit (default 1). Choose **Parallel sessions per account** in the allocation settings, or use the `account.update` RPC. Existing values are not changed automatically. Removing the count limit does not remove shared quota, authentication checks, or protection against resuming the same conversation concurrently.
 
 If the terminal reports `NO_ELIGIBLE_ACCOUNT` and says it is running the original CLI, that launch is **not managed by Ojak** and will not appear as a managed session. This fallback applies to the connected `claude`/`codex` commands; `aam run` does not fall back to an unmanaged launch. Authentication overrides and unsupported options are not silently bypassed.
 

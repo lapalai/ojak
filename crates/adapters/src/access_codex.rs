@@ -1,9 +1,9 @@
-use super::NativeAccess;
+use super::{ensure_deadline, NativeAccess};
 use aam_protocol::{now_ms, Account, ApiError};
 use base64::{engine::general_purpose::URL_SAFE_NO_PAD, Engine};
 use serde::Deserialize;
 use serde_json::json;
-use std::{io::Read, path::Path};
+use std::{io::Read, path::Path, time::Instant};
 
 #[derive(Deserialize)]
 struct Store {
@@ -119,7 +119,14 @@ fn read(profile: &Path) -> Result<NativeAccess, ApiError> {
     parse(&bytes(&profile.join("auth.json"))?)
 }
 
-pub(super) fn load(account: &Account, refresh: bool) -> Result<NativeAccess, ApiError> {
+pub(super) fn load(
+    account: &Account,
+    refresh: bool,
+    deadline: Instant,
+    stage: &mut dyn FnMut(&'static str),
+) -> Result<NativeAccess, ApiError> {
+    stage("credential-read");
+    ensure_deadline(deadline)?;
     let profile = Path::new(
         account
             .profile_path
@@ -129,6 +136,7 @@ pub(super) fn load(account: &Account, refresh: bool) -> Result<NativeAccess, Api
     .canonicalize()
     .map_err(|_| ApiError::new("PROFILE_UNVERIFIED", "Codex 프로필을 확인하지 못했어요."))?;
     let access = read(&profile)?;
+    ensure_deadline(deadline)?;
     let bound = account
         .identity_key
         .as_deref()
@@ -146,17 +154,19 @@ pub(super) fn load(account: &Account, refresh: bool) -> Result<NativeAccess, Api
     if !refresh && access.expires > now_ms() + 60_000 {
         return Ok(access);
     }
+    stage("cli-refresh");
     let binary = crate::process::executable(Path::new(
         account
             .binary_path
             .as_deref()
             .ok_or_else(|| ApiError::new("CLI_NOT_FOUND", "Codex 실행 경로가 없어요."))?,
     ))?;
-    let mut server = crate::process::Probe::spawn(
+    let mut server = crate::process::Probe::spawn_until(
         &binary,
         &["app-server", "--listen", "stdio://"],
         &crate::native::profile_env("codex", &profile),
         &profile,
+        deadline,
     )?;
     let initialized = server.request(1, "initialize", json!({"clientInfo":{"name":"aam_auth","title":"Ojak","version":env!("CARGO_PKG_VERSION")},"capabilities":{"experimentalApi":true}}))?;
     let reported = initialized["codexHome"]
@@ -176,7 +186,9 @@ pub(super) fn load(account: &Account, refresh: bool) -> Result<NativeAccess, Api
             "Codex 공식 CLI에서 구독 로그인을 갱신하지 못했어요.",
         ));
     }
+    stage("credential-reread");
     let renewed = read(&profile)?;
+    ensure_deadline(deadline)?;
     if renewed.account_id != access.account_id {
         return Err(ApiError::new(
             "PROFILE_IDENTITY_MISMATCH",

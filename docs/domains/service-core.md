@@ -11,11 +11,18 @@
 
 ## RPC 메서드 (`lib.rs:346-452`)
 `status.read`의 Snapshot은 `serviceVersion`(서비스 실행 파일의 `CARGO_PKG_VERSION`)을 담는다. 앱·`aam`이 자기 버전과 비교해 덮어쓴 앱 뒤에 남은 예전 서비스를 찾는 데 쓴다. 이 필드가 없던 서비스는 응답에 빠져 있고, 받는 쪽은 '알 수 없음'(재시작 필요)으로 본다. `service.prepareUninstall`은 `aam service restart`도 쓰는 lease 검사 창구다.
-`status.read`에 `{"observe": false}`를 주면 omp 프로세스 관측(`discover_sessions`)을 건너뛰고 저장된 상태만 돌려준다(`observedSessions`가 비고 관측 알림도 없다). 관측은 Windows에서 조회 한 번에 수십~수백 ms라, 관측 세션을 쓰지 않는 트레이·회복 감시의 5초 조회는 이 옵션을 쓴다. 이 매개변수를 모르는 예전 서비스는 무시하고 전체 스냅샷을 돌려준다.
+`status.read`·`quota.refresh`에 `{"observe": false}`를 주면 omp 프로세스 관측(`discover_sessions`)을 건너뛰고 저장된 상태만 돌려준다(`observedSessions`가 비고 관측 알림도 없다). 관측은 Windows에서 조회 한 번에 수십~수백 ms라, 관측 세션을 쓰지 않는 트레이·회복 감시·팝오버 조회는 이 옵션을 쓴다. 이 매개변수를 모르는 예전 서비스는 무시하고 전체 스냅샷을 돌려준다.
 `status.read`, `quota.refresh`, `service.prepareUninstall`, `service.cancelUninstall`, `service.resumeAdmission`, `route.resolve`, `route.explain`, `takeover.adopt`, `takeover.release`, `lease.validate-child`, `policy.update`, `bridge.status`, `diagnostics.export`, `account.register`, `account.update`, `lease.acquire`, `lease.starting`, `lease.started`, `lease.heartbeat`, `lease.release`, `lease.abort`. 나머지는 `METHOD_NOT_FOUND`.
+`bridge.status`는 기존 gateway·세션·차단 목록 외에 `connections{totalLimit,public,native,modelQueue}`, `authRefresh{active,waiting,limit}`, `nativeAuth[]`, `nativeErrors`를 돌려준다. 연결 lane은 `active/limit`, `longActive/longLimit`, `rejected`, `listening`, `port`, 모델 대기열은 대기·만료·본문 예약 수를 담는다. `nativeAuth`의 익명 키·실패 코드·실제 단계·소요 시간·회복 횟수로 연결 혼잡과 공식 CLI 인증 작업 실패를 구분한다. 상세 예산·deadline·로그 규약은 [omp-bridge](omp-bridge.md)를 따른다.
+native 인증 요청의 사전검증은 해당 계정 한 행만 읽고, 전체 계정·한도 JSON을 매번 다시 해석하지 않는다. 미확인 인증 상태는 503, 명시적인 로그인 필요는 401, 배정 제외·프로필 연결 변경은 409로 구분하며, 캐시된 자격 증명으로 검증을 건너뛰지 않는다.
 
 ## 저장소 (`store.rs:62-104`)
 SQLite `state.sqlite3`, WAL, `synchronous=FULL`, busy_timeout 5초. 테이블 `accounts`, `metadata`, `leases`. `user_version` 1보다 크면 거부.
+- 계정 새로고침은 DB 잠금 밖에서 병렬 조회하고 `publish_account`로 완료된 계정부터 짧게 저장한다. 진행 중 `refreshing`은 유지하며, 다른 계정을 stale로 바꾸거나 `lastRefreshAt`을 완료로 기록하지 않는다. 마지막 `apply_scan`에서 전체 조회 결과·안내·시각을 반영한다.
+- 진행 결과를 저장한 값을 다음 병합의 비교 기준으로 써서 새 사용량을 자기 진행 결과와 충돌시키지 않는다. 조회 중 사용자 재등록·identity 변경은 덮지 않으며, 최신 배정 포함 여부·동시 실행 설정·사용자 라벨을 유지한다.
+- `snapshot_sessions`는 SQLite에서 용량 보유 상태 전체와 최근 종료 이력 200개만 고르고 세션 본문만 해석한다. 계정 사본·capability·전체 종료 이력을 읽지 않으며, 스냅샷 가공은 DB 잠금 밖에서 수행한다. 최근 이력·용량 보유 상태에 partial index, lease의 `account_id`에 인덱스를 둔다.
+- reconcile은 용량 보유 lease만, 예약 만료 확인은 `PREPARED`만 읽는다. 전체 이력은 보존하고, 재개·멱등성·진단 등 전체 기록이 필요한 경로는 기존 조회를 유지한다. 슬롯 반환 조건과 `synchronous=FULL`은 완화하지 않는다.
+- 사용자 설정을 보존한 계정 결과가 현재 행과 같으면 계정 쓰기를 생략한다. native에 명시적으로 병합된 omp 관측을 정리할 때도 최신 행이 조회 기준과 일치하고 배정 포함 상태인지 확인하므로, 조회 도중 제외·동시 실행 수 변경·재등록한 행을 삭제하지 않는다.
 
 ## Lease 상태기계
 - 용량을 점유하는 상태: `PREPARED`, `STARTING`, `ACTIVE`, `SUSPECT`, `ORPHANED` (`scheduler.rs:11-16`). 종료: `EXITED`, `ABORTED`, `FAILED`.
@@ -28,9 +35,11 @@ SQLite `state.sqlite3`, WAL, `synchronous=FULL`, busy_timeout 5초. 테이블 `a
 
 ## 배정 (`scheduler.rs`)
 - 동시성은 identity 그룹(같은 provider + identity_key 또는 omp credential pin) 단위로 센다 (`scheduler.rs:181-210`).
-- `Account.maxConcurrency`는 기본 1이며 `account.update`로 1~32 또는 0(개수 제한 없음)을 지정한다. 0·2 이상은 `supports_shared_profile_concurrency`가 확인한 Claude 계정만 허용하며 미검증 도구는 `ADAPTER_UNVERIFIED`로 거절한다. 같은 identity의 실행 가능한 바인딩 중 양수 제한이 하나라도 있으면 가장 작은 제한을 유지하고, 모두 0이면 개수로 배정을 막지 않는다. quota·인증·프로젝트·중복 재개 보호와 lease 추적은 그대로다. UI/CLI 설정 입력은 없고 현재 RPC로만 변경한다. 근거: Claude 공식 [여러 세션 병렬 실행](https://code.claude.com/docs/en/best-practices#run-multiple-claude-sessions)·[worktrees](https://code.claude.com/docs/en/worktrees).
+- `Account.maxConcurrency`는 기본 1이며 `account.update` 또는 사용 현황 → 배정 설정에서 1~32 또는 0(개수 제한 없음)을 지정한다. 0·2 이상은 `supports_shared_profile_concurrency`가 확인한 Claude 계정만 허용하며 미검증 도구는 `ADAPTER_UNVERIFIED`로 거절한다. 같은 identity의 실행 가능한 바인딩 중 양수 제한이 하나라도 있으면 가장 작은 제한을 유지하고, 모두 0이면 개수로 배정을 막지 않는다. 화면은 표시 그룹과 별개로 정확한 identity/pin별 연결을 나눠 변경하며, 기존 값은 사용자가 선택하기 전까지 유지한다. quota·인증·프로젝트·중복 재개 보호와 lease 추적은 그대로다. 근거: Claude 공식 [여러 세션 병렬 실행](https://code.claude.com/docs/en/best-practices#run-multiple-claude-sessions)·[worktrees](https://code.claude.com/docs/en/worktrees).
 - 안전 여유량은 소프트 우선순위다. 하드 제약을 통과한 roomy 후보가 있으면 reserve 후보를 뒤로 보내고(`RESERVE_DEPRIORITIZED`), 없으면 남은 한도를 사용한다(`RESERVE_FALLBACK`). 100% 사용은 계속 `QUOTA_EXHAUSTED`로 제외한다. 명시 계정·프로젝트 pin·재개 제약은 유지하며 공급자 선호 pin보다 roomy 후보가 우선한다.
 - 자동 배정은 신선한 관측(`stale_after_seconds` 기본 900초)과 미래 reset이 필요하다. pinned 실행은 신선도 검사를 건너뛴다 (`scheduler.rs:259-264,319-344`).
+- `lease.acquire`의 `readiness`는 계정 없음·미확인/빈 한도·오래된 한도에 조회를 시작한다. 배정 가능 여부는 기존 `scheduler::decide_with`를 재사용하며, 실제 선택 가능한 계정이 있으면 다른 공급자의 조회를 기다리지 않는다. 필요한 조회만 최대 20초 기다리고 미확인 상태의 배정발 조회는 마지막 시도부터 15초 간격으로 합친다. 마지막 전체 scan 직후 첫 실행도 한도 복구를 시도할 수 있다.
+- 새 배정의 대기 판단은 용량 보유 세션 본문만 읽는다. 재개는 기존 `normalize_resume`·라우팅으로 원래 계정을 확정하고 그 계정의 한도 회복을 기다린다. 이미 처리한 요청 ID는 새 조회 없이 기존 멱등 결과를 사용한다. 배정 실패 메시지는 계정 정보 없이 제외 코드만 추가하며, `NO_ELIGIBLE_ACCOUNT`와 실행기의 기존 원본 통과 계약은 유지한다.
 - 기본 모델 요청은 모델 전용 버킷이 막지 않고 우선순위만 낮춘다 (`scheduler.rs:26-42,272-298`).
 - `quota_summary.rs`가 계정 그룹별 `available/reserve/partial/resting/excluded/login/unknown`을 `Snapshot.quotaSummaries`로 제공한다. 최신 bucket과 실제 bridge 차단을 합치되, 이메일 근거가 여러 workspace에 걸치면 차단을 억지로 붙이지 않는다. 모델별 한도만 있는 공급자도 지원한다. 모델·프로젝트·슬롯이 없는 요약이므로 배정 허용은 별도 scheduler 판단이다.
 - bridge 차단의 `quota` 구분을 요약에 유지한다. 오래된 버킷 때문에 소진된 한도의 이름을 특정하지 못하더라도 실제 사용량 제한을 요청 속도 제한으로 바꾸지 않으며, 공급자가 지정한 차단 시각은 그대로 유지한다.
@@ -110,7 +119,7 @@ stateDiagram-v2
 
 | Entity | Create | Read | Update | Delete |
 |---|---|---|---|---|
-| Account | ✅ account.register | ✅ status.read | ✅ account.update (maxConcurrency has no UI) | ⚡ internal only |
+| Account | ✅ account.register | ✅ status.read | ✅ account.update (Claude maxConcurrency exposed in AllocationSettings) | ⚡ internal only |
 | Policy/ProjectRoute | ✅ seed + policy.update | ✅ status.read, route.resolve/explain | ✅ policy.update (CAS) | ✅ policy.update filtered list |
 | Lease/Session | ✅ lease.acquire | ✅ status.read, validate-child, diagnostics | ✅ starting/started/heartbeat + reconcile | ✅ release/abort (soft, rows kept) |
 | Takeover | ✅ takeover.adopt (CLI) | ✅ status.read, aam takeover list | ❌ none (adopt = upsert) | ✅ takeover.release (CLI) |
@@ -120,7 +129,6 @@ stateDiagram-v2
 - [high] Account.Create: [INFERENCE, not run] register() supersede runs DELETE FROM accounts WHERE id=?1 (lib.rs:774) without the NOT EXISTS leases guard that apply_scan uses (lib.rs:1427). leases.account_id REFERENCES accounts(id) (store.rs:84)
 - [medium] Lease/Session.Delete: Lease rows are never pruned: store.rs has no DELETE FROM leases, and the snapshot only trims what it displays to 200 terminal leases (lib.rs:298). expire() (lib.rs:221-232), snapshot, acquire, and the 2s reconcile all do
 - [low] Account.Delete: No user-initiated account removal RPC. Disconnected or unobserved identities build up as unverified rows (lib.rs:1435-1443) and are only removed through internal supersede/obsolete paths.
-- [low] Account.Update: maxConcurrency is validated in the backend (update_account lib.rs:690-721) but has no UI or CLI caller. PolicyView.tsx:47 only sends enabled.
 - [low] Policy/ProjectRoute.Update: projectAllowlist and autoTakeover can be set via policy.update (lib.rs:503-607) but have no UI setter (only declared in apps/desktop/src/types.ts:74,77) and no CLI command.
 - [low] Takeover.Create: Takeover adopt/list/release is CLI-only (crates/launcher/src/main.rs:428-459). The desktop app neither allowlists takeover.* nor renders snapshot.takeovers.
 
@@ -128,4 +136,4 @@ stateDiagram-v2
 - [ ] Account: guard the supersede DELETE at lib.rs:774 like apply_scan (NOT EXISTS leases) or re-point historical leases before deleting; add a test for re-login when the old binding has EXITED lease history.
 - [ ] Lease: add retention that prunes terminal leases past N rows or an age limit, and index/filter holds_capacity states so expire/reconcile do not scan all history.
 - [ ] Account: decide whether an explicit account.remove RPC (reusing forget_account lib.rs:191-200) is wanted, and wire it to the UI if so.
-- [ ] UI: expose maxConcurrency, projectAllowlist, and autoTakeover, or document them as CLI/raw-RPC only; add takeover list/release to the desktop if intended.
+- [ ] UI: expose projectAllowlist and autoTakeover, or document them as CLI/raw-RPC only; add takeover list/release to the desktop if intended.

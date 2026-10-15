@@ -12,7 +12,20 @@
 - 재귀 방지: 이름이 `aam`/`aam-*`, 경로에 `shims`, `AAM_`·`aam run`을 담은 `#!` 스크립트는 거부 (`process.rs:61-89`).
 - Windows의 `bin/<tool>.cmd`는 `"<aam.exe>" --shim <tool> %*` 한 줄 배치이고, 배치 본문의 `aam.exe" --shim ` 흔적으로 거부한다. 이전 버전의 `bin/<tool>.exe`(launcher 복사본)도 다른 AAM_HOME이라도 상위 `integration.json`의 앱 owner와 `shims` 목록으로 확인되면 `SHIM_RECURSION`으로 거부한다. 명령 이름·bin 폴더만으로 원본을 거부하지 않으며, manifest는 링크를 따라가지 않고 64 KiB로 제한해 읽는다.
 - 계정의 `binary_path`도 진입 경로를 저장한다. `scan`의 `refresh_bound`가 현재 탐지 경로로 갱신한다.
+- `version()`: 성공한 `--version` 응답만 진입 경로·canonical 경로·파일 메타데이터 기준으로 캐시한다. 원본 교체·symlink 대상 변경 시 다시 확인하며, 실패는 캐시하지 않는다. 확인 중 파일이 바뀌면 그 결과도 캐시에 넣지 않는다.
+- `native_access(account, refresh, deadline)`는 전후 identity 확인·Claude 키체인/`/usage`·Codex app-server에 같은 `Instant` deadline을 전달한다. `Probe::spawn_until`은 이미 만료된 작업을 시작하지 않고, 후속 RPC도 만료 후에는 보내거나 캐시된 성공으로 처리하지 않는다. 등록 프로필 경로는 `bound_paths`로 검증하고 원본 CLI 진입 경로는 사용할 때 해석한다. 이 deadline은 native broker 인증 작업용이며, 일반 계정·한도 scan의 개별 조회 제한과는 별개다.
 - Windows 외부 OMP 관측은 `observed_windows.rs`에서 정확한 실행 파일·동일 사용자 SID·프로세스 생성 시각·열린 쓰기 디스크 핸들을 확인한다. argv/env/PEB의 대화 내용을 읽거나 경로 선언만으로 소유 세션을 추정하지 않는다. 메타데이터 읽기 전후 identity·파일 객체를 다시 확인한다.
+
+## 계정·사용량 조회 (`scan`)
+- 공식 프로필 검사는 최대 4개씩 병렬로 실행하며, 각 프로필에서 identity를 먼저 확인·발행하고 한도를 조회한다. 전체 identity 검사 완료를 기다린 뒤 한도를 조회하는 단계 장벽은 없다. omp 사용량·broker 로그인 목록·CLI 버전 조회도 별도 작업으로 실행하고 도착한 결과부터 `publish` 콜백으로 반영한다.
+- 등록된 경로와 기본 `~/.claude`·`~/.codex` 외에, 강제 새로고침 또는 등록 계정이 없는 최초 조회에서 `profiles.rs`가 `AAM_HOME/profiles` 바로 아래 Ojak이 만든 `claude-<UUIDv4>`·`codex-<UUIDv4>` 디렉터리를 찾는다. 링크·다른 이름·파일은 제외하고 공식 CLI가 확인한 로그인만 복구한다. 같은 identity로 이미 등록된 프로필과 로그인 전 빈 폴더는 새 계정으로 만들지 않는다.
+- identity가 없었던 기본 프로필은 공식 CLI가 로그인을 확인하면 기존 계정 ID·배정 설정을 유지한 채 정보를 채운다. 이미 고정된 identity가 바뀌면 계속 배정을 차단한다.
+- 이전에 `authenticated`·`preflight-verified`·`canLaunch`와 identity가 확인된 계정의 `PROBE_TIMEOUT/PROBE_IO/PROBE_START_FAILED/PROBE_CLOSED`는 로그인 폐기로 간주하지 않는다. binding을 보존하고 기존 한도를 stale로 표시하며, 실패 코드와 안내를 남긴다. 초기 미검증 계정을 승격하거나 명시 로그아웃·identity 변경·인증 덮어쓰기·스키마 오류를 무시하지 않는다.
+- 신원 조회의 성공 여부는 계정의 `reason`과 별도로 전달한다. 조회 실패 뒤에는 별도 한도 조회를 중복 실행하지 않지만, workspace ID 없는 정상 Codex 계정의 안내 문구는 한도 조회를 막지 않는다. 실행·토큰 제공 경로의 실제 identity 재검증은 생략하지 않는다.
+- 연결된 omp broker의 `/v1/snapshot`에서 `omp_inventory`가 공급자·이메일·계정/조직/프로젝트 정보만 추출한다. 사용량 응답이 없어도 로그인 목록은 남고, 토큰·API key·Ojak 브릿지 로그인은 계정 결과로 옮기지 않는다. inventory 콜백은 `Result<Option<Vec<Account>>, ApiError>`로 미연결(`None`)과 실패를 구분한다. 실패는 `OMP_INVENTORY_UNAVAILABLE` 안내로 남기고 기존 사용량 경로·관측은 보존한다.
+- 로그인 목록과 사용량 보고가 같은 identity이면 같은 계정 행을 갱신한다. 현재 사용량이 누락됐다는 이유로 확인한 identity를 이메일-only 행으로 바꾸지 않으며, 다른 subject·workspace의 `accountsWithoutUsage`는 별도로 유지한다. 더 오래된 omp 보고가 새 공식 한도를 덮지 않는다.
+- 과거 identity 없는 omp 관측은 이메일만으로 병합·삭제하지 않는다. 로그인 목록만 다시 확인한 것은 인증 복구 근거가 아니므로 기존 `auth-required`·`error`와 이유를 보존한다. 정상 사용량·공식 identity 확인이 있어야 상태를 복구한다.
+
 
 ## shim 우회 (`inspect_cli`)
 서비스 없이 원본 CLI를 바로 실행하는 경우. 인증 명령은 넘기지 않는다.
@@ -26,6 +39,8 @@
 ## identity (`src/native.rs`)
 - Claude: `authMethod=claude.ai`, `apiProvider=firstParty` 필수. `identity_key = anthropic|subject:<id>|workspace:<orgId>` (`native.rs:54-61`).
 - Codex: `account.type=chatgpt` 필수. `app-server`가 보고한 codexHome이 프로필과 같아야 한다.
+- `inspect_identity`는 Codex identity 확인에서 한도를 읽지 않는다. `codex_usage`는 한도 조회 전·후에 고정된 identity를 확인하고, 빈 한도 응답이나 identity 변경을 성공으로 처리하지 않는다. 이전 버킷의 관측 시각은 실패로 갱신하지 않으며, 확인하지 못한 크레딧은 제거한다.
+- native broker의 `inspect_identity_until`도 같은 신원 검사만 수행한다. 인증 갱신 전후 확인 때문에 Codex 한도 API를 추가로 호출하지 않는다.
 - identity를 얻어야만 `preflight-verified` + `can_launch=true` (`native.rs:63-72`).
 - omp 계정은 관측 전용(`OMP_GATE`, `native.rs:10-12`). Ojak이 omp를 직접 실행하지 않는다.
 - `omp usage --json.disabledCredentials`의 `invalid_grant`·`invalid_token`은 기존 관측 계정과 공급자·subject/workspace identity가 정확히 일치할 때만 `auth-required`로 반영한다. 원문 오류는 저장하지 않는다. 같은 identity의 현재 보고서와 정상 native 로그인은 무효화하지 않으며, 단순 조회 누락·타임아웃·429·503은 인증 만료 근거가 아니다.
@@ -52,7 +67,7 @@
 ```text
 aam-adapters v0.1.0 (crates/adapters/src/lib.rs)
 ├── [crate root] lib.rs
-│   ├── scan(paths: &Paths, existing: &[Account]) -> Result<ScanResult, ApiError>  :393  ← service/lib.rs:1363
+│   ├── scan(paths: &Paths, existing: &[Account], force: bool, inventory: impl FnOnce() -> Result<Option<Vec<Account>>, ApiError> + Send, publish: impl FnMut(&Account) -> Result<(), ApiError> + Send) -> Result<ScanResult, ApiError>  ← service/lib.rs
 │   ├── verify(account: &Account) -> Result<IdentityEvidence, ApiError>  :501  ← launcher/lib.rs:569
 │   ├── build_launch_plan(account: &Account, intent: &LaunchIntent) -> Result<LaunchPlan, ApiError>  :544  ← launcher/lib.rs:511
 │   ├── register(paths: &Paths, tool: &str, label: &str, profile_path: &str) -> Result<Account, ApiError>  :614  ← service/lib.rs:733

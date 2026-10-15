@@ -6,6 +6,7 @@ import { canonicalProvider, groupAccounts, isCurrentGroup, privacyText, projectN
 import type { AccountGroup } from "./state";
 import { PROVIDER_ORDER } from "./types";
 import type { Account, Policy, ProjectRoute, Snapshot } from "./types";
+import { MAX_CONCURRENCY, concurrencyRows, concurrencyUpdateIds, concurrencyValue } from "./allocation";
 import { t } from "./i18n";
 
 function groupTitle(group: AccountGroup, masked: boolean): string {
@@ -64,6 +65,22 @@ export function AllocationSettings({ snapshot, online, masked, onReload }: { sna
     if (!Object.keys(patch).length) return;
     void action.run(() => update(patch), saved => t("policy.expiringSaved", { hours: saved.expiringWindowHours ?? 48, percent: saved.expiringMinPercent ?? 30 }));
   }
+  // 동시 세션 수는 실제 실행 identity마다 따로 바꾼다. 화면 묶음은 같은 워크스페이스·사용자만 같아도 합치므로 거기서 다시 나눈다.
+  // 공식 확인을 마친 Claude Code 연결만 넣고 Codex·관측 전용 omp 행은 넣지 않는다.
+  const parallel = ordered.flatMap(group => concurrencyRows(group.members).map(targets => ({ group, targets })));
+  const rowName = (group: AccountGroup, targets: Account[]) => {
+    const identity = targets.find(target => target.email)?.email ?? targets[0].label;
+    const organization = targets.find(target => target.organization)?.organization;
+    return `${providerNames[canonicalProvider(group.primary.provider)]}, ${privacyText(identity, masked)}${organization ? ` · ${privacyText(organization, masked)}` : ""}`;
+  };
+  const rowNames = parallel.map(({ group, targets }) => rowName(group, targets));
+  function setConcurrency(targets: Account[], value: number) {
+    const ids = concurrencyUpdateIds(targets, value);
+    if (!ids.length) return;
+    void action.run(async () => {
+      try { for (const id of ids) await rpc<Account>("account.update", { id, maxConcurrency: value }); } finally { await onReload(); }
+    }, () => value === 0 ? t("policy.concurrencySavedUnlimited") : t("policy.concurrencySaved", { count: value }));
+  }
   return <div className="allocation-settings">
     <p className="sub">{t("policy.subtitle")}</p>
     <div className="panel">
@@ -96,6 +113,24 @@ export function AllocationSettings({ snapshot, online, masked, onReload }: { sna
       })}</ul> : <div className="empty">{t("policy.noAccounts")}</div>}
       <div className="row-actions"><span className="hint">{mode === "priority" ? t("policy.orderHint.priority") : t("policy.orderHint.smart")}</span></div>
     </div>
+    {parallel.length > 0 && <div className="panel">
+      <header><h2>{t("policy.concurrency")}</h2><span className="aside">{t("policy.concurrencyHint")}</span></header>
+      <div className="rules">{parallel.map(({ targets }, index) => {
+        const value = concurrencyValue(targets);
+        // 이름이 같은 행이 또 있으면 번호로 구분한다(같은 화면 이름이라도 서로 다른 실행 identity다).
+        const base = rowNames[index];
+        const name = rowNames.filter(other => other === base).length > 1 ? `${base} (${rowNames.slice(0, index).filter(other => other === base).length + 1})` : base;
+        return <div className="rule" key={targets[0].id} data-concurrency={String(value)}>
+          <div className="t">{name}</div>
+          <div className="d">{value === 0 ? t("policy.concurrencyUnlimited") : value === "mixed" ? "—" : String(value)}</div>
+          <div className="ctl"><select aria-label={t("policy.concurrencyAria", { name })} value={String(value)} disabled={!online || action.pending} onChange={event => setConcurrency(targets, Number(event.target.value))}>
+            {value === "mixed" && <option value="mixed" disabled>—</option>}
+            <option value="0">{t("policy.concurrencyUnlimited")}</option>
+            {Array.from({ length: MAX_CONCURRENCY }, (_, index) => index + 1).map(count => <option key={count} value={count}>{count}</option>)}
+          </select></div>
+        </div>;
+      })}</div>
+    </div>}
     <ActionFeedback error={action.error} message={action.message} />
     <ProjectRoutesEditor policy={policy} accounts={snapshot.accounts} online={online} masked={masked} onReload={onReload} />
   </div>;

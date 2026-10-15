@@ -13,6 +13,7 @@ Tauri 2 + React 19/Vite 메뉴바 앱(제품명 Ojak, bundle id `ai.aam.desktop`
 로그인·다시 로그인은 모두 앱이 소유하는 작업이다(`LoginDialog.tsx`의 `LoginPanel`, `login.ts` 순수 규칙). 사용자가 [공식 로그인 열기]를 누르면 `start_provider_login({provider, accountId?, label?, settingsDigest?})`가 작업을 만들고, 화면은 `provider_login_status({id})`를 1초마다 읽어 시작 중→브라우저 대기→계정 확인→한도·omp 반영→성공/실패/취소를 구분해 보인다. 브라우저를 열었다는 사실은 성공이 아니며, 성공(`succeeded`)은 네이티브가 정확한 계정을 확인한 뒤에만 오고 그때에만 스냅샷을 다시 읽는다. 창을 닫아도 작업은 계속된다. 다시 열면 `list_provider_logins`에서 `findLoginJob`이 같은 공급자·대상 계정(`targetAccountId`, 새 계정은 `null`끼리)의 가장 최근 작업을 고른다: ① 진행 중인 작업이 있으면 그것 ② 없으면 끝난 작업 중 가장 최근 것의 결과(성공·실패·취소 그대로, 오래된 성공이 새 실패를 덮지 않고 그 반대도 같다). 그 최신 결과를 이미 화면에서 봤으면(`seenResults`, 앱 프로세스 동안 유지) 새 로그인 화면이며 더 오래된 못 본 결과는 되살리지 않는다. 못 본 결과는 시간 제한 없이 앱이 살아 있는 동안 복원된다. 결과 화면을 한 번 보여 주면 그 작업은 본 것으로 기록되므로, 같은 공급자의 새 계정을 일부러 추가할 때 예전 작업이 막지 않는다. 다른 공급자·다른 대상 계정의 작업은 섞이지 않는다(같은 공급자의 다른 계정 작업이 진행 중이면 시작이 네이티브 `LOGIN_BUSY`로 막힌다). 계정 추가 창(`autoStart`)과 [다시 시도]·[다시 시작]은 이어 붙지 않고 항상 새 작업을 시작한다(같은 대상의 진행 중 작업만 네이티브가 그대로 돌려준다). 취소(`cancel_provider_login`)는 창의 버튼으로만 한다. 진입점: 계정 행·연결 화면의 [다시 로그인](omp 전용 만료 계정 포함), 계정 추가 창의 새 Claude·Codex 로그인(이름·설정 가져오기 확정 뒤 같은 진행 화면), 연결 화면 omp 패널의 xAI·Google 로그인. 오래된 `/login` 안내 모달과 `login_account` 호출은 없다.
 공식 Claude 조회가 미로그인을 반환하면 등록된 identity는 보존한 채 `auth-required`로 갱신하므로 이 버튼을 사용할 수 있다. 같은 identity로 다시 로그인하면 복구되고, 다른 identity로 바뀌면 기존 바인딩을 자동 교체하지 않는다.
 공통: `App.tsx`, `state.ts`(`useSnapshot`, `useBridge`, `useAction`, 공급자 별칭), `api.ts`, `types.ts`, `dialogs.tsx`, `components.tsx`, `i18n.ts`.
+- `useSnapshot(observe = true)`는 상태 조회·강제 새로고침에 같은 관측 옵션을 전달한다. `Popover.tsx`는 외부 세션을 표시하지 않으므로 `useSnapshot(false)`로 프로세스 관측을 생략하고 저장된 계정·사용량만 읽는다. 본 창은 기존 관측을 유지한다.
 Windows는 `tauri-plugin-single-instance`를 다른 플러그인보다 먼저 등록한다. 두 번째 실행은 기존 `main` 창을 다시 표시·포커스하고 종료하며, 자동 시작 인수로 들어온 중복 실행은 창을 열지 않는다. macOS의 기존 `Reopen` 처리는 유지한다.
 
 ## 글꼴·조판 (`styles.css`)
@@ -27,6 +28,7 @@ Windows는 `tauri-plugin-single-instance`를 다른 플러그인보다 먼저 �
 
 ## 처음 설치·설정
 - `SetupGuide`는 서비스·shell PATH·계정 보유 도구의 shim 설치와 실제 명령 검증을 구분한다. 수동으로 다시 열거나 상태를 조회한 직후에는 ‘설정 적용됨 · 실제 명령은 아직 미확인’으로 표시한다. 실패한 단계 아래에는 `notices`의 이유와 다음 행동을 표시 언어로 보여 준다. 툴팁만 쓰지 않는다.
+- 도구별 `allocation` 줄은 명령 연결과 별개로 지금 배정 가능·조회 중·제외·계정 없음·조회 불가를 보여 준다. 조회가 끝나면 다시 읽고, 실제 배정 가능한 도구가 있을 때만 ‘준비됐어요’와 해당 도구의 터미널 열기를 보여 준다. 명령만 확인됐으면 ‘명령은 연결됐어요’로 구분한다. 시작하기 카드도 같은 서비스 판단을 사용한다.
 - 상태 조회는 `aam setup --status`로 셸을 실행하지 않는다. ‘다시 점검’은 Unix에서 새 로그인 셸의 시작 파일을 실행하고, Windows에서는 PowerShell을 띄우지 않고 저장된 시스템·사용자 PATH를 직접 해석한다. ‘시작하기’는 누락된 설치와 명령 검사를 진행한다. 명령별 최대 5초이며 기존 터미널·IDE의 적용 여부를 보장하지 않는다.
 - 계정 추가 대화상자 등 다른 대화상자가 열리면 준비 안내를 숨기고, 닫힌 뒤 상태를 다시 확인한다. 계정 표시는 가림 설정을 따른다.
 - ‘나중에’로 닫아도 사이드바의 ‘Ojak 시작하기’로 다시 열 수 있다. 감지된 omp는 체크박스(기본 꺼짐)로 사용자가 직접 동의했을 때만 broker·bridge·observer를 함께 연결한다. README의 "omp 브릿지 기본 꺼짐" 고지와 같아야 한다. 연결 오류를 표시하며, omp 재실행/확장 재로드·기존 역할 모델 선택이 필요할 수 있음을 알린다. 설정 완료와 실요청 경유 관측은 별개다.
@@ -43,6 +45,7 @@ Windows는 `tauri-plugin-single-instance`를 다른 플러그인보다 먼저 �
 - 경로 확인 불가는 재시작만으로 해결된다고 약속하지 않는다. 새 기록에서도 지속되면 연결 화면의 진단 내보내기로 점검하도록 안내한다.
 - 계정 목록은 `AccountRow`의 접힌 요약 행이 기본이다. 별칭/이메일·상태·핵심 공용 한도·다음 시점을 보여 주고, `overview.ts`가 소진 시 가장 늦게 풀리는 공용 한도를 우선한다. 모델별 한도는 공용 잔여율에 섞지 않는다. 순서는 사용량 대신 이름 기준이며, 펼침은 구성원 ID로 유지한다.
 - 사용 현황의 한도 배지는 `snapshot.quotaSummaries`를 사용한다. 배정 정책은 변경하지 않으며, `available` 중 공용 잔여량이 30% 이하면 ‘사용 가능 · 잔여량 적음’으로 표현한다. 여유분 안쪽은 ‘다른 계정 우선’이다. 모델·프로젝트·동시 슬롯이 없는 한도 요약이므로 특정 실행을 보장하지 않는다.
+- 배정 설정의 ‘계정당 동시 세션’은 검증된 Claude native 연결만 0(제한 없음) 또는 1–32로 바꾼다. 표시용 계정 그룹보다 좁은 provider+정확한 identity/공통 credential pin 단위로 행을 나누므로 같은 조직의 다른 사용자·다른 workspace까지 쓰기가 전파되지 않는다. 같은 identity의 기존 값이 다르면 `—`를 표시하고 사용자가 고르기 전에는 변경하지 않는다. Codex·관측 전용 omp 행은 쓰기 대상에서 제외한다.
 - 과거 한도·전체 리셋 날짜·관측 출처·계정별 요청 기록은 펼친 상세에 표시한다. 차단된 계정의 남은 한도는 회색으로 낮춘다. 요약에는 짧은 다음 시점, 상세에는 정확한 날짜를 쓰고 시간대는 공통 하단에 한 번 표시한다. 요청 순위와 연결 기록은 계정 아래 접힌 이력 영역에 둔다.
 - 서비스 `quota_summary.rs`와 `state.ts`는 공급자별 workspace/subject, OAuth pin, workspace 없는 이메일 근거로 그룹을 만든다. 신원 없는 관측은 동일 이메일의 확인된 그룹이 하나일 때만 붙인다. 요약은 모든 `accountIds`를 반환하고 화면은 대표 계정 ID로 찾는다. 같은 bucket ID는 최신 관측을 쓰며 소진·모델 제한·차단은 구분한다.
 - 오래된 한도는 `limits.ts::quotaReading`으로 마지막 확인값과 관측 시각을 분리해 회색으로 표시한다. `unknown` 배지는 확인 작업이 진행 중이거나 계정 사용이 허용·차단된다고 단정하지 않는다. 제한 시각은 ‘다시 사용’ 보장이 아닌 ‘재확인’으로 안내하고, 버킷 라벨이 없는 사용량 제한도 일반 사용량 제한 문구로 설명한다.
@@ -150,7 +153,7 @@ graph TD
 - [medium] accounts · Delete: Users cannot remove a registered account from the desktop app (no UI and no service RPC). They can only exclude it (account.update enabled=false, AllocationSettings.tsx:47). Stale accounts pile up in lists and in the Policy sele
 - [medium] sessions · Delete: The app cannot stop a managed session or dismiss an ORPHANED/FAILED one. While occupied>0 the service stop button is disabled (ConnectionsView.tsx:152), so a stuck session also blocks stopping the service.
 - [low] sessions · Update: Resume only works for Claude sessions in EXITED state that have a nativeSessionId (SessionsView.tsx:58). Codex sessions have no resume path.
-- [low] accounts · Update: AccountUpdate.maxConcurrency (crates/service/src/lib.rs:131) is supported by the backend but not exposed in the UI (⚡). Account labels cannot be renamed.
+- [low] accounts · Update: Account labels cannot be renamed.
 - [low] connections · Delete: ompBrokerAction('disconnect') is typed in api.ts:60, but OmpPanel disconnect only calls ompBridgeAction('disconnect') (ConnectionsView.tsx:42). The broker link cannot be removed from the UI.
 - [low] connections · Create: The omp_observer_action Tauri command is registered (src-tauri/src/main.rs:427, :999) but has no frontend caller. It is a dead or backend-only (⚡) surface.
 - [low] connections · Update: There is no way to edit connection settings (shim dir, bridge port, broker config). The only option is reinstalling or reconnecting.
@@ -158,7 +161,6 @@ graph TD
 ### 다음 할 일
 - [ ] accounts · Delete: add an account.remove service method that refuses when leases exist and reuses forget_account (lib.rs:191), add it to the rpc allowlist (main.rs:37-44), and put a Remove button with a confirm modal in ToolPanel (ConnectionsView.tsx:77).
 - [ ] sessions · Delete: expose a session stop/dismiss RPC for ORPHANED/FAILED/ACTIVE sessions and add the action to the SessionsView inspector (SessionsView.tsx:57-59).
-- [ ] accounts · Update: add a maxConcurrency input to the PolicyView order row, using account.update.
 - [ ] connections: either wire omp broker disconnect and omp_observer_action into OmpPanel, or remove the unused omp_observer_action handler and the 'disconnect' union member.
 - [ ] sessions · Update: extend resume to Codex once the launcher supports --resume-session for codex.
 

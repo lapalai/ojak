@@ -19,6 +19,7 @@ toml = "0.8"
 time = { version = "0.3", default-features = false, features = ["parsing"] }
 base64 = "0.22"
 unicode-normalization = "0.1"
+parking_lot = "0.12"
 
 [target.'cfg(windows)'.dependencies]
 windows-sys = { version = "0.59", features = [

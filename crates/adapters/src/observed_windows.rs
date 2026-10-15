@@ -162,22 +162,53 @@ mod tests {
     use super::*;
     #[test]
     fn only_open_writable_single_link_files_are_observed() {
+        use std::{io::{BufRead, BufReader}, process::{Command, Stdio}, sync::mpsc};
         let directory = std::env::temp_dir().join(format!("aam-writers-{}", aam_protocol::new_id()));
         aam_protocol::secure::restrict_dir(&directory).unwrap();
         let writable = directory.join("writable.jsonl");
         let readonly = directory.join("readonly.jsonl");
         std::fs::write(&readonly, b"read-only").unwrap();
-        let read_handle = File::open(&readonly).unwrap();
-        let write_handle = std::fs::OpenOptions::new().create_new(true).append(true).open(&writable).unwrap();
-        let expected = winutil::file_identity(&write_handle).unwrap();
-        let read_id = winutil::file_identity(&read_handle).unwrap();
-        let (files, _) = writers(std::process::id());
-        assert!(files.iter().any(|file| (file.device, file.inode) == expected));
+        // 전체 test runner를 관측하면 병렬 테스트의 핸들 증감과 복사 중인 exe까지 잡는다.
+        // 두 파일만 유지하는 별도 자식을 관측해 테스트 간 파일 삭제 경합도 만들지 않는다.
+        let powershell = PathBuf::from(std::env::var_os("SystemRoot").unwrap())
+            .join("System32/WindowsPowerShell/v1.0/powershell.exe");
+        let script = r#"
+$ErrorActionPreference = 'Stop'
+$share = [IO.FileShare]::ReadWrite -bor [IO.FileShare]::Delete
+$write = [IO.File]::Open([IO.Path]::Combine($env:AAM_WRITER_FIXTURE_DIR, 'writable.jsonl'), [IO.FileMode]::CreateNew, [IO.FileAccess]::ReadWrite, $share)
+$read = [IO.File]::Open([IO.Path]::Combine($env:AAM_WRITER_FIXTURE_DIR, 'readonly.jsonl'), [IO.FileMode]::Open, [IO.FileAccess]::Read, $share)
+$inputReader = [Console]::In
+$outputWriter = [Console]::Out
+$outputWriter.WriteLine('ready')
+$outputWriter.Flush()
+$null = $inputReader.ReadLine()
+$write.Dispose()
+$read.Dispose()
+"#;
+        let mut command = Command::new(powershell);
+        command.args(["-NoLogo", "-NoProfile", "-NonInteractive", "-Command", script])
+            .env("AAM_WRITER_FIXTURE_DIR", &directory)
+            .stdin(Stdio::piped()).stdout(Stdio::piped()).stderr(Stdio::null());
+        let (mut child, job) = aam_protocol::spawn_in_job(&mut command, true, true, false).unwrap();
+        let stdout = child.stdout.take().unwrap();
+        let (sender, ready) = mpsc::channel();
+        let reader = std::thread::spawn(move || {
+            let mut line = String::new();
+            let result = BufReader::new(stdout).read_line(&mut line).map(|_| line);
+            let _ = sender.send(result);
+        });
+        assert_eq!(ready.recv_timeout(Duration::from_secs(10)).unwrap().unwrap().trim(), "ready");
+        reader.join().unwrap();
+        let expected = winutil::file_identity(&File::open(&writable).unwrap()).unwrap();
+        let read_id = winutil::file_identity(&File::open(&readonly).unwrap()).unwrap();
+        let (files, partial) = writers(child.id());
+        assert!(files.iter().any(|file| (file.device, file.inode) == expected), "write handle missing; partial={partial}");
         assert!(!files.iter().any(|file| (file.device, file.inode) == read_id));
         std::fs::hard_link(&writable, directory.join("alias.jsonl")).unwrap();
-        assert!(!writers(std::process::id()).0.iter().any(|file| (file.device, file.inode) == expected));
-        drop(write_handle);
-        drop(read_handle);
+        assert!(!writers(child.id()).0.iter().any(|file| (file.device, file.inode) == expected));
+        drop(child.stdin.take());
+        assert!(child.wait().unwrap().success());
+        drop(job);
         std::fs::remove_dir_all(directory).unwrap();
     }
 }

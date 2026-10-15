@@ -13,14 +13,29 @@ Claude·Codex는 Ojak에 등록된 기존 공식 CLI 로그인과 omp의 원래 
 - omp 확장: `integrations/omp/aam-accounts.js` (설치 위치 `${PI_CODING_AGENT_DIR:-~/.omp/agent}/extensions/aam-accounts`)
 - 모델 목록(`aam-accounts.js`, 테스트 `node --test integrations/omp/aam-accounts.test.mjs`): ① `fetchDynamicModels`가 브릿지 `GET /v1/models`에서 해당 원래 공급자(`owned_by`) 행만 받아 `provider/` 접두어를 떼고 Ojak 공급자 목록으로 쓴다. omp가 `models.db`에 24시간 캐시하므로 다음 실행부터 시작 즉시 보인다. ② `modifyModels`는 원래 공급자 행이 있으면 같은 id를 그 정보(thinking 단계·비용)로 덮어쓰고, 없으면 ①의 행을 남긴다. 예전에는 ②만 있어서 새 omp 시작 직후 원래 공급자 채팅 모델이 오기 전에 복사돼 이미지·TTS 모델만 보이는 일이 있었다(2026-10-03).
 
-## HTTP (`bridge.rs:571-587`)
-| 경로 | 인증 |
+## HTTP
+| Listener / 경로 | 인증 |
 |---|---|
-| `GET /healthz` | 없음 |
-| `GET /v1/models`, `GET /v1/providers`, `POST /v1/pi/stream` | `Bearer <AAM_HOME/bridge.token>`, 꺼져 있으면 503 |
-| `/native/<account-id>/v1/*` | 별도 `bridge-native.token`. 공개 `bridge.token`으로 인증 정보 조회 불가. 매 요청 등록·활성·identity·프로필·원본 CLI 경로 확인 |
+| 공개 `127.0.0.1:4020` · `GET /healthz` | 없음 |
+| 공개 `127.0.0.1:4020` · `GET /v1/models`, `GET /v1/providers`, `POST /v1/pi/stream` | `Bearer <AAM_HOME/bridge.token>`, 꺼져 있으면 503 |
+| 내부 `127.0.0.1:<OS 할당 포트>` · `/native/<account-id>/v1/*` | 별도 `bridge-native.token`. 공개 토큰으로 인증 정보 조회 불가. 매 요청 등록·활성·identity·프로필·원본 CLI 경로 확인 |
 
 네이티브 소스는 omp 18.8.3의 snapshot/ETag/long-poll·refresh·disable·block 규약을 따른다. SSE snapshot은 404로 공식 long-poll fallback을 사용한다. `refresh: "__remote__"`는 원격 갱신 표식이며 실제 refresh token이 아니다. 거절된 access token은 같은 값인 동안 격리하고, 공식 갱신으로 값이 바뀐 경우에만 다시 쓴다.
+
+공개 listener의 `/native` 경로는 404이며 내부 listener로 대신 전달하지 않는다. gateway는 자신을 띄울 때의 내부 포트를 사용하고, 내부 listener가 준비되지 않으면 공개 포트로 대체하지 않는다. 계정 제외·재등록은 캐시가 신선해도 검사하며, 갱신 결과와 long-poll 응답을 내보내기 전에 최신 DB 연결을 다시 확인한다.
+
+### 인증 갱신과 연결 예산
+- 공식 CLI·키체인·DB·소켓 I/O 중에는 인증 상태 mutex를 잡지 않는다. 같은 Source의 동시 갱신은 성공·실패 결과를 공유하며, 실패 후 3초 동안 같은 실패를 재사용한다. 프로필 경로는 등록 때의 canonical 경로를 유지하며, Source를 재생성해도 같은 프로필 worker를 겹쳐 띄우지 않는다.
+- 인증 worker는 전역 최대 4개다. 소스마다 전역 슬롯 대기자는 하나이며 FIFO로 최대 10초(요청 마감 이내) 기다린다. 만료·취소된 요청은 새 worker를 시작하지 않는다. 시작한 worker의 전후 identity 검사·키체인·공식 CLI 갱신에는 같은 20초 deadline을 전달한다. 대기자 취소·요청 마감은 이미 공유 중인 worker를 취소하지 않는다. OS 동기 작업이 남으면 프로필 점유·permit을 유지하고 늦은 결과를 버려 시간 초과 뒤 중복 갱신을 막는다.
+- 헤더 수신은 30초, 모델 대기 뒤 본문 수신은 별도 30초다. native 요청은 헤더 수신부터 합계 45초, long-poll은 그 안에서 최대 25초다. 정상 TCP write-half-close는 취소가 아니며 reset 등 명백한 오류는 대기만 중단한다. 모델 SSE에는 전체 마감을 적용하지 않고 기존 upstream 300초 idle timeout을 유지한다.
+- `AAM_BRIDGE_MAX_CONNECTIONS`는 전체 상한(64–512, 기본 256)이다. native 프로필 수 `P`에 따라 짧은 내부 요청은 `min(P + 4, 16)`, long-poll은 `min(2P, 24)`를 예약한다. 공개 몫 `U`에서는 제어용 `max(8, U/16)`과 대기용 `max(4, U/8)`을 빼고 모델 스트림을 받는다. 상한은 초당 요청 수가 아니라 열린 연결 수이며 기존 스트림은 끊지 않는다.
+- accept·인증 전에는 기다리지 않는다. 인증된 모델 요청만 FIFO에서 `AAM_BRIDGE_MODEL_WAIT_MS`(0–120000ms, 기본 20000ms)까지 기다리고, 자리를 얻기 전 본문을 읽지 않는다. 대기열 가득 참은 `BRIDGE_BUSY`, 대기 만료는 `BRIDGE_QUEUE_TIMEOUT`(HTTP 503)이다. 새 모델 요청의 upstream 재전송을 추가하지 않는다.
+- 요청당 본문 상한은 64 MiB다. `AAM_BRIDGE_BODY_BUDGET_MB`(512–8192 MiB, 기본 2048 MiB)는 선언 길이의 8배를 예약하는 가중 본문 예산이며 JSON 파싱까지 포함한 실제 RSS의 엄밀한 상한은 아니다. 예산 부족도 모델 대기 한도 내에서 기다린다. 원본 바이트와 파싱 객체가 해제된 뒤에만 gateway로 보낼 본문 길이로 예약을 줄이고, 연결 종료·오류·취소 시 RAII로 반환한다. 환경 변수는 서비스 시작 때 읽는다.
+- 내부 연결 혼잡은 `AUTH_BROKER_BUSY`, 인증 갱신은 `AUTH_REFRESH_BUSY` / `AUTH_REFRESH_TIMEOUT` / `AUTH_REFRESH_UNAVAILABLE`로 구분한다. 공식 Claude `/usage`의 `is_error`는 로그인 폐기가 확인되지 않은 `NATIVE_AUTH_UNAVAILABLE`(503), 예상과 다른 실제 추론은 `NATIVE_REFRESH_UNEXPECTED`로 차단한다. 복구 시각을 모르면 `Retry-After`를 만들지 않으며 혼잡을 한도·속도 제한 차단으로 기록하지 않는다.
+- 같은 binding의 기존 gateway는 명시적으로 분류한 일시 실패로 종료하지 않는다. 계정 제외·로그인 거절·identity/프로필/인증 덮어쓰기 충돌·자격 증명 형식 오류는 계속 차단한다. 계정 scan의 일시적인 프로세스 장애도 검증된 binding만 보존하고 한도는 stale로 표시한다.
+- `bridge.status`는 `connections`(lane별 수·상한·거절·listener/port), `connections.modelQueue`(대기·만료·본문 예약), `authRefresh`(active/waiting/limit), `nativeAuth[]`(익명 accountKey, 현재 단계·경과 시간, 마지막 실패 코드·단계·소요 시간, 실패·회복 횟수)를 제공한다. 단계는 실제 binding·identity·인증 환경·credential 읽기·CLI 갱신·재검증 경계에서 기록한다.
+- `bridge/native outcome=auth-failure`와 `outcome=auth-recovered` 로그는 익명 키·공급자·코드·단계·시간만 남긴다. 같은 실패의 반복 로그는 억제하고 회복 때 한 번 기록한다. `outcome=`이며 `->`가 없으므로 기존 데스크톱 사용량 파서는 이 줄을 제외한다. 토큰·이메일·프로필 경로·프롬프트·CLI 원문 출력은 넣지 않는다.
+
 
 ## 공급자 ID
 - 현재: `ojak-claude`→`anthropic`, `ojak-codex`→`openai-codex`, `ojak-antigravity`→`google-antigravity`, `ojak-grok`→`xai-oauth`, `ojak-zai`→`zai` (`bridge.rs:33-39`)
@@ -51,10 +66,11 @@ Claude·Codex는 Ojak에 등록된 기존 공식 CLI 로그인과 omp의 원래 
 
 ## 주의
 - gateway는 상속된 `OMP_*`/`PI_*` 환경을 지우고 전용 `PI_CODING_AGENT_DIR=<AAM_HOME>/bridge/agent`로 띄운다. 안 그러면 사용자 설정이 요청을 다시 브릿지로 돌려 루프가 된다 (`bridge.rs:946-973`).
-- `logs/bridge.log` 줄 형식은 데스크톱 사용량 화면이 그대로 파싱한다 (`apps/desktop/src-tauri/src/main.rs`의 `parse_usage_line`). 형식을 바꾸면 그 파서도 고친다. 줄 종류는 셋이고 사용량은 `->`가 있는 요청 줄만 센다.
+- `logs/bridge.log` 줄 형식은 데스크톱 사용량 화면이 그대로 파싱한다 (`apps/desktop/src-tauri/src/main.rs`의 `parse_usage_line`). 형식을 바꾸면 그 파서도 고친다. 줄 종류는 요청·차단·거절·포화이며, 사용량은 `->`가 있는 요청 줄만 센다.
   - 요청: `<ms> <provider>/<model> session=<끝8자> turn=<bool> tools=<n> -> <계정별칭12hex> [reserve-fallback]`
   - 차단(한도 응답을 받아 계정을 막을 때): `<ms> <provider>/<model> session=<끝8자> outcome=blocked account=<별칭> kind=<quota|rate> scope=<모델범위|-> until=<ms>:<provider|estimate>`
   - 거절(모든 후보가 못 받아 429/503으로 끝낼 때): `<ms> <provider>/<model> session=<끝8자> outcome=rejected reset=<ms>:<provider|estimate>|- causes=<별칭>:<코드>[:<until ms>],…`. 코드는 `quota`(관측 소진+공급자 리셋) / `cooldown`(리셋 모르고 Ojak이 건 30분 대기) / `rate`(속도 제한 차단) / `down`(gateway 중단) / `disabled` / `ready`. `reset=-`은 한도가 아닌 이유가 섞여 시각을 말할 수 없다는 뜻이다.
+  - 포화: `<ms> bridge/overload session=- outcome=overload scope=<public|native> class=<connection|model|poll> active=<n> limit=<n> suppressed=<n>`. 같은 종류는 5초에 한 줄만 기록하고 생략한 횟수를 다음 줄에 합친다. 기존 `outcome=` 제외 규칙으로 사용량·한도 차단 집계에 포함하지 않는다.
   - 이메일·조직·토큰·프롬프트는 어느 줄에도 넣지 않는다. 데스크톱 파서는 `outcome=` 칸이 있는 줄을 요청으로 세지 않는다.
 - 사용 현황의 미경유 판정은 observer의 요청별 경로 근거를 사용한다. `bridge.status.sessions`는 계정 고정·프로젝트 표시용이고, 로그와 연결할 폴더가 없다는 이유로 미경유를 확정하지 않는다. 보조 세션 폴더용 `folders` 상태는 제거했다.
 - `protocol/src/lib.rs:77`, `bridge.rs:104` 주석의 "models.yml `!cat`"은 옛 방식이다. 지금 확장은 `bridge.token` 파일을 직접 읽는다.
@@ -88,7 +104,7 @@ graph TD
   TICK -->|"sync ~60s: GET /v1/snapshot"| BRK
   TICK -->|"upload missing ojak-*"| BRK
   TICK -->|"spawn_gateway per identity"| GW["omp auth-gateway :4101-4199<br/>pool = 1 account"]
-  TICK -->|"verified native profile"| NAT["Official CLI access-only source<br/>refresh stays with native CLI"]
+  TICK -->|"verified native profile"| NAT["Internal broker: OS-assigned loopback port<br/>Official CLI owns refresh"]
   CFG --> EXT["install aam-accounts.js<br/>enabledModels / modelRoles"]
   EXT --> MODEL["/model ojak-claude/*"]
   MODEL -->|"POST /v1/pi/stream"| BR["Bridge :4020"]

@@ -4,7 +4,9 @@ import { CheckCircle2, Terminal, X } from "lucide-react";
 import { ActionFeedback, Dot } from "./components";
 import { openPrefilledTerminal, setupStatus } from "./api";
 import type { SetupStatus } from "./api";
-import { isWindows, t } from "./i18n";
+import { errorCodeText, isWindows, t } from "./i18n";
+import { allocatableTools } from "./allocation";
+import type { ToolAllocation } from "./allocation";
 import { launchableAccounts, nextFirstSuccessStage, onboardingProgress, onboardingSteps, parseFirstSuccessStage, preferredTool, serviceReady, shouldShowFirstSuccess, terminalReady } from "./onboarding";
 import type { LaunchTool, OnboardingStep } from "./onboarding";
 import { toolNames, useAction } from "./state";
@@ -20,6 +22,15 @@ function readStorage(key: string): string | null {
 }
 function writeStorage(key: string, value: string | null): void {
   try { if (value === null) localStorage.removeItem(key); else localStorage.setItem(key, value); } catch { /* 저장소가 막혀도 이번 창에서는 동작한다. */ }
+}
+
+/// 도구별 배정 준비 한 줄. 제외 사유는 서비스가 준 코드를 기존 오류 코드 문장으로 바꿔 보여 준다(모르는 코드는 코드 그대로).
+export function allocationLine(allocation: ToolAllocation): string {
+  if (allocation.state === "excluded") {
+    const reasons = allocation.codes.map(code => errorCodeText(code) ?? code).join(t("setup.alloc.reasonJoin"));
+    return t("setup.alloc.excluded", { reasons: reasons || (allocation.errorCode ?? "NO_ELIGIBLE_ACCOUNT") });
+  }
+  return t(`setup.alloc.${allocation.state}`);
 }
 
 /// 번역 문장 안의 `백틱` 구간을 코드 모양으로 그린다.
@@ -92,7 +103,8 @@ function stepText(step: OnboardingStep): string {
 export function OnboardingCard({ snapshot, request, revision, onAdd, onSetup }: { snapshot: Snapshot; request: number; revision: number; onAdd: (tool: string) => void; onSetup: () => void }) {
   const accounts = launchableAccounts(snapshot.accounts);
   const accountKey = accounts.map(account => account.id).join(",");
-  const { status, failed } = useSetupStatus(accountKey, revision);
+  // 한도 조회가 끝나면 배정 준비 상태가 바뀔 수 있어 조회 시각도 다시 읽는 기준에 넣는다.
+  const { status, failed } = useSetupStatus(`${accountKey}|${snapshot.refreshing}|${snapshot.lastRefreshAt ?? ""}`, revision);
   const [dismissed, setDismissed] = useState(() => readStorage(DISMISS_KEY) === "1");
   useEffect(() => {
     if (request <= handledRequest) return;
@@ -107,7 +119,8 @@ export function OnboardingCard({ snapshot, request, revision, onAdd, onSetup }: 
     terminal: status ? terminalReady(status) : false,
     accountCount: accounts.length,
     sessionCount: snapshot.sessions.length,
-    tools: accounts.map(account => account.tool),
+    // 첫 실행 터미널은 서비스가 지금 받을 수 있다고 판단한 도구로만 권한다. 상태를 못 읽었으면 권하지 않는다.
+    tools: status ? allocatableTools(status.tools) : [],
     installed: snapshot.tools.filter(tool => tool.installed).map(tool => tool.id),
   });
   const { done, total, complete } = onboardingProgress(steps);
@@ -116,7 +129,7 @@ export function OnboardingCard({ snapshot, request, revision, onAdd, onSetup }: 
     <Dot color="var(--good)" /><span>{t("onboarding.complete", { done, total })}</span>
     <button type="button" className="icon-button" aria-label={t("onboarding.dismiss")} title={t("onboarding.dismiss")} onClick={() => { writeStorage(DISMISS_KEY, "1"); setDismissed(true); }}><X size={14} /></button>
   </div>;
-  const tool = preferredTool(accounts);
+  const tool = preferredTool(allocatableTools(status?.tools ?? []).map(id => ({ tool: id, enabled: true, canLaunch: true })));
   return <section className="getting-started" aria-label={t("onboarding.title")}>
     <header><h2>{t("onboarding.title")}</h2><span className="aside">{done}/{total}</span></header>
     <ol className="gs-steps">{steps.map(step => <li key={step.id} className={step.state}>
@@ -126,6 +139,7 @@ export function OnboardingCard({ snapshot, request, revision, onAdd, onSetup }: 
         {step.action?.kind === "setup" && <button type="button" className="button" onClick={onSetup}>{t("onboarding.setup")}</button>}
         {step.action?.kind === "login" && step.action.tools.map(login => <button type="button" className="button" key={login} onClick={() => onAdd(login)}>{t("setup.login", { tool: loginNames[login] })}</button>)}
       </div>
+      {step.id === "account" && step.state === "done" && status && !status.allocatable && <p className="field-help warning-text gs-sub">{status.tools.filter(item => item.account).map(item => `${loginNames[item.tool as LaunchTool] ?? item.tool}: ${allocationLine(item.allocation)}`).join(" · ")}</p>}
       {step.action?.kind === "login" && step.action.tools.length === 0 && <p className="field-help gs-sub">{t("setup.noTool")}</p>}
       {step.id === "first" && step.state === "todo" && (step.action?.kind === "terminal" && tool ? <div className="gs-sub"><OpenTerminal tool={tool} /></div> : <p className="field-help gs-sub">{t("onboarding.first.waiting")}</p>)}
     </li>)}</ol>

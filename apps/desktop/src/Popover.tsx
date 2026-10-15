@@ -105,7 +105,7 @@ function Line({ line, reserve }: { line: AccountLine; reserve: number }) {
 }
 
 export function Popover() {
-  const { snapshot, error, reload, refreshing } = useSnapshot();
+  const { snapshot, error, reload, refreshing } = useSnapshot(false);
   const { status } = useBridge(null);
   const [masked, setMasked] = useState(() => { try { return localStorage.getItem("aam.privacy") !== "visible"; } catch { return true; } });
   const root = useRef<HTMLDivElement>(null);

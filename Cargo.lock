@@ -4,11 +4,12 @@ version = 4
 
 [[package]]
 name = "aam-adapters"
-version = "0.9.3"
+version = "0.10.1"
 dependencies = [
  "aam-protocol",
  "base64 0.22.1",
  "libc",
+ "parking_lot",
  "serde",
  "serde_json",
  "sha2",
@@ -21,7 +22,7 @@ dependencies = [
 
 [[package]]
 name = "aam-launcher"
-version = "0.9.3"
+version = "0.10.1"
 dependencies = [
  "aam-adapters",
  "aam-protocol",
@@ -38,7 +39,7 @@ dependencies = [
 
 [[package]]
 name = "aam-protocol"
-version = "0.9.3"
+version = "0.10.1"
 dependencies = [
  "libc",
  "serde",
@@ -49,12 +50,13 @@ dependencies = [
 
 [[package]]
 name = "aam-service"
-version = "0.9.3"
+version = "0.10.1"
 dependencies = [
  "aam-adapters",
  "aam-protocol",
  "fs2",
  "libc",
+ "parking_lot",
  "rusqlite",
  "serde",
  "serde_json",
@@ -91,7 +93,7 @@ dependencies = [
 
 [[package]]
 name = "ai-account-manager"
-version = "0.9.3"
+version = "0.10.1"
 dependencies = [
  "aam-launcher",
  "aam-protocol",
