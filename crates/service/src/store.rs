@@ -99,6 +99,16 @@ impl Store {
                 )
                 .map_err(db_error)?;
         }
+        // 계정별 lease 참조 조회(계정 삭제의 외래키·이력 보존 검사)용 색인. 컬럼과 스키마 버전은 그대로다.
+        connection
+            .execute_batch(
+                "CREATE INDEX IF NOT EXISTS leases_account_id ON leases(account_id);
+                 CREATE INDEX IF NOT EXISTS leases_capacity_snapshot ON leases(json_extract(body,'$.updatedAt') DESC,id)
+                   WHERE COALESCE(json_extract(body,'$.state'),'') IN ('PREPARED','STARTING','ACTIVE','SUSPECT','ORPHANED');
+                 CREATE INDEX IF NOT EXISTS leases_recent_history ON leases(json_extract(body,'$.updatedAt') DESC,id)
+                   WHERE COALESCE(json_extract(body,'$.state'),'') NOT IN ('PREPARED','STARTING','ACTIVE','SUSPECT','ORPHANED');",
+            )
+            .map_err(db_error)?;
         if metadata::<Policy>(&connection, "policy")?.is_none() {
             set_metadata(&connection, "policy", &Policy::default())?;
         }
@@ -223,6 +233,52 @@ pub(crate) fn leases(connection: &Connection) -> Result<Vec<LeaseRecord>, ApiErr
     let mut statement = connection.prepare("SELECT body,capability,payload_hash,policy_revision,binding_hash,account_body,expires_at,heartbeat_at,manual FROM leases ORDER BY id").map_err(db_error)?;
     let rows = statement.query_map([], row_record).map_err(db_error)?;
     rows.map(|row| unpack(row.map_err(db_error)?)).collect()
+}
+
+/// 생존 확인에 필요한 용량 보유 lease만 읽는다. 종료 이력은 이 경로에 들어오지 않는다.
+pub(crate) fn capacity_leases(connection: &Connection) -> Result<Vec<LeaseRecord>, ApiError> {
+    let mut statement = connection.prepare(
+        "SELECT body,capability,payload_hash,policy_revision,binding_hash,account_body,expires_at,heartbeat_at,manual
+         FROM leases WHERE COALESCE(json_extract(body,'$.state'),'') IN ('PREPARED','STARTING','ACTIVE','SUSPECT','ORPHANED')
+         ORDER BY id",
+    ).map_err(db_error)?;
+    let rows = statement.query_map([], row_record).map_err(db_error)?;
+    rows.map(|row| unpack(row.map_err(db_error)?)).collect()
+}
+
+/// 미실행 예약의 만료 확인만 한다. 실행 중·불확실 세션은 시간 초과만으로 반환하지 않는다.
+pub(crate) fn prepared_leases(connection: &Connection) -> Result<Vec<LeaseRecord>, ApiError> {
+    let mut statement = connection.prepare(
+        "SELECT body,capability,payload_hash,policy_revision,binding_hash,account_body,expires_at,heartbeat_at,manual
+         FROM leases WHERE COALESCE(json_extract(body,'$.state'),'') IN ('PREPARED','STARTING','ACTIVE','SUSPECT','ORPHANED')
+           AND json_extract(body,'$.state')='PREPARED' ORDER BY id",
+    ).map_err(db_error)?;
+    let rows = statement.query_map([], row_record).map_err(db_error)?;
+    rows.map(|row| unpack(row.map_err(db_error)?)).collect()
+}
+
+/// 상태 조회용 세션 목록. 용량을 쥔 세션은 모두, 종료 이력은 최근 `history`개만 DB에서 고른다.
+/// 세션 본문(`body`)만 읽으므로 계정 사본·capability 등 조회에 쓰지 않는 열은 해석하지 않는다.
+/// 용량 상태 목록은 `scheduler::holds_capacity`와 같아야 하며, 알 수 없는 상태는 종료 이력으로 취급한다.
+/// 정렬은 기존과 같이 `updatedAt` 내림차순, 같으면 id 오름차순이다.
+pub(crate) fn snapshot_sessions(connection: &Connection, history: usize) -> Result<Vec<Session>, ApiError> {
+    let mut statement = connection
+        .prepare(
+            "SELECT body FROM (
+                SELECT body,id,json_extract(body,'$.updatedAt') AS u FROM leases
+                  WHERE COALESCE(json_extract(body,'$.state'),'') IN ('PREPARED','STARTING','ACTIVE','SUSPECT','ORPHANED')
+                UNION ALL
+                SELECT body,id,json_extract(body,'$.updatedAt') AS u FROM (
+                  SELECT body,id FROM leases
+                    WHERE COALESCE(json_extract(body,'$.state'),'') NOT IN ('PREPARED','STARTING','ACTIVE','SUSPECT','ORPHANED')
+                    ORDER BY json_extract(body,'$.updatedAt') DESC,id ASC LIMIT ?1))
+             ORDER BY u DESC,id ASC",
+        )
+        .map_err(db_error)?;
+    let rows = statement
+        .query_map([history as i64], |row| row.get::<_, String>(0))
+        .map_err(db_error)?;
+    rows.map(|row| decode(&row.map_err(db_error)?)).collect()
 }
 pub(crate) fn save_lease(connection: &Connection, record: &LeaseRecord) -> Result<(), ApiError> {
     connection

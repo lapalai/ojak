@@ -6,6 +6,8 @@
 
 #[path = "bridge_native.rs"]
 mod native;
+#[path = "bridge_admission.rs"]
+mod admission;
 
 use crate::{scheduler, store::{accounts, policy}, Service};
 use aam_protocol::{now_ms, Account, ApiError, Paths, QuotaBucket};
@@ -20,10 +22,10 @@ use std::{
     path::{Path, PathBuf},
     process::{Child, Command, Stdio},
     sync::{
-        atomic::{AtomicBool, Ordering},
+        atomic::{AtomicBool, AtomicU16, Ordering},
         Arc, Mutex, MutexGuard,
     },
-    time::Duration,
+    time::{Duration, Instant},
 };
 
 pub const PORT: u16 = aam_protocol::BRIDGE_PORT;
@@ -31,9 +33,12 @@ const GATEWAY_FIRST_PORT: u16 = 4101;
 const GATEWAY_LAST_PORT: u16 = 4199;
 const BROKER_URL: &str = "http://127.0.0.1:8765";
 const BROKER_PORT: u16 = 8765;
-/// 인증 전 자원 소모 상한. 동시 연결 수와 한 요청의 읽기·쓰기 대기 시간.
-const MAX_CONNECTIONS: usize = 64;
+/// 인증 전 자원 소모 상한: 한 요청(헤더+본문)을 받는 전체 마감. 연결 수 상한은 `admission`이 관리한다.
 const REQUEST_TIMEOUT: Duration = Duration::from_secs(30);
+/// native broker 요청 하나의 전체 마감(헤더 수신부터). long-poll 최대 25초에 인증 확인 여유를 더한다.
+const NATIVE_REQUEST_DEADLINE: Duration = Duration::from_secs(45);
+/// 같은 종류의 포화 로그 최소 간격.
+const OVERLOAD_LOG_INTERVAL_MS: i64 = 5_000;
 /// gateway 응답 대기. 긴 추론에서도 토큰 사이 간격은 이보다 짧다.
 const UPSTREAM_READ_TIMEOUT: Duration = Duration::from_secs(300);
 /// omp 확장(integrations/omp/aam-accounts.js)이 `/login`에 등록하는 Ojak 공급자와 원래 공급자.
@@ -135,9 +140,6 @@ fn native_omp() -> Option<PathBuf> {
 }
 fn read_secret(path: PathBuf) -> Option<String> {
     fs::read_to_string(path).ok().map(|text| text.trim().to_owned()).filter(|text| !text.is_empty())
-}
-fn gateway_token() -> Option<String> {
-    read_secret(user_home()?.join(".omp/auth-gateway.token"))
 }
 fn broker_token() -> Option<String> {
     read_secret(user_home()?.join(".omp/auth-broker.token"))
@@ -442,6 +444,8 @@ struct Gateway {
     org: String,
     /// None: omp broker owns this credential. Some: native CLI owns refresh.
     native_account: Option<String>,
+    /// 공식 CLI 계정 gateway가 spawn될 때 쓴 내부 listener 포트. broker 계정은 0.
+    native_port: u16,
     port: u16,
     child: Option<(Child, GatewayJob)>,
     spawned_at: i64,
@@ -524,6 +528,90 @@ pub struct BlockStatus {
 }
 #[derive(Debug, Serialize)]
 #[serde(rename_all = "camelCase")]
+pub struct ConnectionLane {
+    pub active: usize,
+    pub limit: usize,
+    /// 장기 연결(공개: 모델 스트림, native: long-poll)이 쥔 몫과 그 한도.
+    pub long_active: usize,
+    pub long_limit: usize,
+    /// 서비스가 뜬 뒤 예산 초과로 거절한 연결 수.
+    pub rejected: u64,
+    pub listening: bool,
+    pub port: u16,
+}
+impl ConnectionLane {
+    fn idle(limit: usize, long_limit: usize, port: u16) -> Self {
+        Self { active: 0, limit, long_active: 0, long_limit, rejected: 0, listening: false, port }
+    }
+}
+#[derive(Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ConnectionsStatus {
+    pub total_limit: usize,
+    pub public: ConnectionLane,
+    pub native: ConnectionLane,
+    pub model_queue: ModelQueueStatus,
+}
+/// 모델 몫 대기열과 요청 본문 메모리 예산. 인증을 통과한 모델 요청만 기다리며, 기다리는 동안 본문은 읽지 않는다.
+#[derive(Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ModelQueueStatus {
+    pub waiting: usize,
+    pub waiting_limit: usize,
+    /// 기다린 끝에 몫을 얻은 누적 수와 시간이 지나 거절된 누적 수.
+    pub waited: u64,
+    pub timeouts: u64,
+    pub max_wait_ms: u64,
+    /// 지금 본문을 읽는 중인 모델 요청들이 예약한 메모리와 그 한도(바이트).
+    pub body_bytes: usize,
+    pub body_limit: usize,
+}
+#[derive(Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct AuthRefreshStatus {
+    pub active: usize,
+    pub limit: usize,
+    /// 전역 갱신 자리를 순서대로 기다리는 프로필 수.
+    pub waiting: usize,
+}
+/// 프로필의 공식 CLI 인증 확인 진단. 별칭·코드·단계·시간·횟수만 담는다(토큰·이메일·경로·CLI 출력 없음).
+#[derive(Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct NativeAuthStatus {
+    pub provider: String,
+    /// `logs/bridge.log`의 계정 칸과 같은 값. identity sha256의 앞 12 hex.
+    pub account_key: String,
+    /// `unknown`(아직 확인 전) / `ok`(마지막 확인 성공) / `failing`(마지막 확인 실패).
+    pub state: &'static str,
+    /// 지금 도는 인증 확인이 있으면 그 단계와 경과 시간.
+    pub activity: Option<NativeActivity>,
+    pub last_failure: Option<NativeFailure>,
+    pub last_success_at: Option<i64>,
+    pub failures: u64,
+    pub recoveries: u64,
+    pub consecutive_failures: u64,
+    /// 전역 갱신 자리가 나지 않아 거절된 누적 수.
+    pub busy_rejections: u64,
+}
+#[derive(Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct NativeActivity {
+    pub stage: &'static str,
+    pub elapsed_ms: u64,
+}
+#[derive(Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct NativeFailure {
+    pub code: String,
+    /// 실패했을 때 마지막으로 시작한 단계. adapters의 `NATIVE_ACCESS_STAGES`와 서비스의 `state-check`/`state-recheck` 중 하나다.
+    pub stage: &'static str,
+    pub duration_ms: u64,
+    pub at: i64,
+    /// 일시적인 실패라 실행 중인 gateway를 내리지 않는 코드인지.
+    pub transient: bool,
+}
+#[derive(Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
 pub struct Status {
     pub enabled: bool,
     pub listening: bool,
@@ -532,10 +620,43 @@ pub struct Status {
     pub gateways: Vec<GatewayStatus>,
     pub sessions: Vec<SessionStatus>,
     pub blocks: Vec<BlockStatus>,
+    pub connections: ConnectionsStatus,
+    pub auth_refresh: AuthRefreshStatus,
+    /// 프로필별 공식 CLI 인증 진단(별칭순).
+    pub native_auth: Vec<NativeAuthStatus>,
+    /// 동기화가 마지막으로 정한 공급자별 차단 코드. 일시 실패로 gateway를 유지한 프로필은 여기 없다.
+    pub native_errors: BTreeMap<String, String>,
 }
 impl Status {
     pub fn inactive() -> Self {
-        Self { enabled: false, listening: false, port: PORT, error: None, gateways: vec![], sessions: vec![], blocks: vec![] }
+        let config = admission::Config::default();
+        let limits = admission::Limits::derive(0, config.total);
+        Self {
+            enabled: false,
+            listening: false,
+            port: PORT,
+            error: None,
+            gateways: vec![],
+            sessions: vec![],
+            blocks: vec![],
+            connections: ConnectionsStatus {
+                total_limit: limits.total,
+                public: ConnectionLane::idle(limits.public, limits.models, PORT),
+                native: ConnectionLane::idle(limits.native, limits.polls, 0),
+                model_queue: ModelQueueStatus {
+                    waiting: 0,
+                    waiting_limit: limits.waiting,
+                    waited: 0,
+                    timeouts: 0,
+                    max_wait_ms: config.model_wait.as_millis() as u64,
+                    body_bytes: 0,
+                    body_limit: config.body_budget,
+                },
+            },
+            auth_refresh: AuthRefreshStatus { active: 0, limit: admission::REFRESH_PARALLELISM, waiting: 0 },
+            native_auth: vec![],
+            native_errors: BTreeMap::new(),
+        }
     }
 }
 
@@ -544,28 +665,107 @@ pub struct Bridge {
     paths: Paths,
     state: Mutex<State>,
     enabled: AtomicBool,
+    /// 공개 모델 listener(`PORT`)가 열려 있는지.
     listening: AtomicBool,
-    connections: std::sync::atomic::AtomicUsize,
+    /// 내부 native broker listener(loopback, OS 할당 포트)가 열려 있는지와 그 포트.
+    native_listening: AtomicBool,
+    native_port: AtomicU16,
+    admission: Arc<admission::Admission>,
+    refresh_budget: Arc<native::RefreshBudget>,
+    /// 한 요청(헤더+본문)을 받는 전체 마감과 응답 쓰기 timeout.
+    request_timeout: Duration,
+    /// 포화 로그 throttle: (listener, 종류) → (마지막 기록 시각, 그 뒤 건너뛴 수).
+    overload_log: parking_lot::Mutex<HashMap<(&'static str, &'static str), (i64, u64)>>,
     native_sources: Mutex<HashMap<String, Arc<native::Source>>>,
+    /// omp gateway에 거는 토큰 파일. 운영은 사용자 홈의 `.omp/auth-gateway.token`이고 테스트는 임시 경로를 쓴다.
+    gateway_token_path: Option<PathBuf>,
 }
 
 impl Bridge {
     pub fn start(service: &Arc<Service>) -> Arc<Self> {
-        let bridge = Arc::new(Self {
-            service: Arc::clone(service),
-            paths: service.paths.clone(),
-            state: Mutex::new(State::default()),
-            enabled: AtomicBool::new(false),
-            listening: AtomicBool::new(false),
-            connections: std::sync::atomic::AtomicUsize::new(0),
-            native_sources: Mutex::new(HashMap::new()),
-        });
+        let bridge = Self::with_config(service, REQUEST_TIMEOUT, admission::Config::from_env(), user_home().map(|home| home.join(".omp/auth-gateway.token")));
         let worker = Arc::clone(&bridge);
         std::thread::spawn(move || loop {
             worker.tick();
             std::thread::sleep(Duration::from_secs(2));
         });
         bridge
+    }
+
+    /// listener도 감독 스레드도 띄우지 않은 Bridge. `serve`로 listener를 붙인다.
+    fn with_config(service: &Arc<Service>, request_timeout: Duration, config: admission::Config, gateway_token_path: Option<PathBuf>) -> Arc<Self> {
+        Arc::new(Self {
+            service: Arc::clone(service),
+            paths: service.paths.clone(),
+            state: Mutex::new(State::default()),
+            enabled: AtomicBool::new(false),
+            listening: AtomicBool::new(false),
+            native_listening: AtomicBool::new(false),
+            native_port: AtomicU16::new(0),
+            admission: admission::Admission::with_config(config),
+            refresh_budget: Arc::new(native::RefreshBudget::new(admission::REFRESH_PARALLELISM)),
+            request_timeout,
+            overload_log: parking_lot::Mutex::new(HashMap::new()),
+            native_sources: Mutex::new(HashMap::new()),
+            gateway_token_path,
+        })
+    }
+
+    fn gateway_token(&self) -> Option<String> {
+        read_secret(self.gateway_token_path.clone()?)
+    }
+
+    /// native source가 실패·복구 한 줄을 bridge.log에 남기는 곳. 잠금을 쥔 채 부르지 않는다.
+    fn native_log_sink(&self) -> native::LogSink {
+        let home = self.paths.home.clone();
+        Arc::new(move |line| append_log_line(&home, line))
+    }
+
+    fn native_port(&self) -> u16 {
+        self.native_port.load(Ordering::SeqCst)
+    }
+
+    /// listener 하나를 받아 연결마다 예산(`admission`)을 확인하고 처리 스레드를 띄운다.
+    fn serve(self: &Arc<Self>, listener: TcpListener, scope: admission::Scope) {
+        match scope {
+            admission::Scope::Public => self.listening.store(true, Ordering::SeqCst),
+            admission::Scope::Native => {
+                self.native_port.store(listener.local_addr().map_or(0, |address| address.port()), Ordering::SeqCst);
+                self.native_listening.store(true, Ordering::SeqCst);
+            }
+        }
+        let bridge = Arc::clone(self);
+        std::thread::spawn(move || {
+            for stream in listener.incoming() {
+                match stream {
+                    Ok(stream) => bridge.accept(stream, scope),
+                    Err(_) => std::thread::sleep(Duration::from_millis(50)),
+                }
+            }
+            match scope {
+                admission::Scope::Public => bridge.listening.store(false, Ordering::SeqCst),
+                admission::Scope::Native => bridge.native_listening.store(false, Ordering::SeqCst),
+            }
+        });
+    }
+
+    /// 인증 전 자원 소모를 막는다: 연결 종류별 예산, 요청 수신 전체 마감, 스레드 생성 실패 시 panic 없이 그 연결만 거절.
+    /// 예산은 신규 admission에만 적용하며 이미 받은 연결을 끊지 않는다.
+    fn accept(self: &Arc<Self>, mut stream: TcpStream, scope: admission::Scope) {
+        let permit = match self.admission.admit(scope) {
+            Ok(permit) => permit,
+            Err(overload) => {
+                let _ = stream.set_write_timeout(Some(Duration::from_secs(1)));
+                // 방금 도착한 요청 바이트를 한 번만 비운다(최대 20ms). 읽지 않은 채 닫으면 RST로 503 응답이 사라질 수 있다.
+                let _ = stream.set_read_timeout(Some(Duration::from_millis(20)));
+                let _ = stream.read(&mut [0u8; 4096]);
+                return self.refuse(&mut stream, overload);
+            }
+        };
+        let _ = stream.set_write_timeout(Some(self.request_timeout));
+        let worker = Arc::clone(self);
+        // spawn이 실패하면 클로저와 함께 permit이 버려져 예산이 돌아온다.
+        let _ = std::thread::Builder::new().name("bridge-conn".into()).spawn(move || worker.handle_connection(stream, permit, scope));
     }
 
     fn state(&self) -> MutexGuard<'_, State> {
@@ -636,34 +836,19 @@ impl Bridge {
             self.state().error = Some(format!("Ojak 연결 토큰을 만들지 못했어요: {error}"));
             return;
         }
+        if !self.native_listening.load(Ordering::SeqCst) {
+            // 내부 인증 broker는 loopback의 OS 할당 포트를 쓴다. gateway는 이 포트를 URL에 받는다.
+            match TcpListener::bind(("127.0.0.1", 0)) {
+                Ok(listener) => self.serve(listener, admission::Scope::Native),
+                Err(error) => {
+                    self.state().error = Some(format!("Ojak 내부 인증 연결을 열지 못했어요: {error}"));
+                    return;
+                }
+            }
+        }
         if !self.listening.load(Ordering::SeqCst) {
             match TcpListener::bind(("127.0.0.1", PORT)) {
-                Ok(listener) => {
-                    self.listening.store(true, Ordering::SeqCst);
-                    let bridge = Arc::clone(self);
-                    std::thread::spawn(move || {
-                        for mut stream in listener.incoming().flatten() {
-                            // 인증 전 자원 소모를 막는다: 동시 연결 상한, 요청 전체 데드라인(읽기·쓰기 타임아웃),
-                            // 스레드 생성 실패 시 panic으로 리스너를 잃지 않고 그 연결만 거절.
-                            if bridge.connections.load(Ordering::SeqCst) >= MAX_CONNECTIONS {
-                                respond(&mut stream, 503, &json!({ "error": "Ojak 연결이 너무 많아요." }));
-                                continue;
-                            }
-                            let _ = stream.set_read_timeout(Some(REQUEST_TIMEOUT));
-                            let _ = stream.set_write_timeout(Some(REQUEST_TIMEOUT));
-                            bridge.connections.fetch_add(1, Ordering::SeqCst);
-                            let worker = Arc::clone(&bridge);
-                            let spawned = std::thread::Builder::new().name("bridge-conn".into()).spawn(move || {
-                                worker.handle(stream);
-                                worker.connections.fetch_sub(1, Ordering::SeqCst);
-                            });
-                            if spawned.is_err() {
-                                bridge.connections.fetch_sub(1, Ordering::SeqCst);
-                            }
-                        }
-                        bridge.listening.store(false, Ordering::SeqCst);
-                    });
-                }
+                Ok(listener) => self.serve(listener, admission::Scope::Public),
                 Err(error) => {
                     self.state().error = Some(format!("Ojak 연결 포트 {PORT}를 열지 못했어요: {error}"));
                     return;
@@ -691,8 +876,8 @@ impl Bridge {
 
     /// Combine broker accounts with native profiles without transferring refresh ownership.
     fn sync(&self, now: i64) {
+        let native_port = self.native_port();
         let mut failures = Vec::new();
-        let mut native_errors = BTreeMap::new();
         let snapshot = match broker_identities() {
             Ok(value) => {
                 self.state().broker_known = Some(value.clone());
@@ -716,6 +901,7 @@ impl Bridge {
             .filter(|(provider, _)| ALIASES.iter().any(|(_, original)| original == provider))
             .cloned().map(|key| (key, None)).collect();
         let mut native_ids = BTreeSet::new();
+        let mut native_errors = BTreeMap::new();
         for account in registered {
             let native_provider = match account.tool.as_str() {
                 "claude" => Some("anthropic"),
@@ -725,7 +911,7 @@ impl Bridge {
             if let Some(provider) = native_provider {
                 let code = if !account.enabled { Some("ACCOUNT_DISABLED") }
                     else if account.auth_status == "auth-required" { Some("AUTH_REQUIRED") }
-                    else if account.auth_status != "authenticated" { Some("NATIVE_AUTH_UNAVAILABLE") }
+                    else if account.auth_status != "authenticated" { Some("AUTH_STATUS_UNCONFIRMED") }
                     else { None };
                 if let Some(code) = code {
                     native_errors.entry(provider.to_owned()).or_insert_with(|| code.to_owned());
@@ -741,13 +927,17 @@ impl Bridge {
             let key = (provider.to_owned(), identity.clone());
             if desired.contains_key(&key) { continue; }
             let id = account.id.clone();
-            let source = {
+            let (source, binding_changed) = {
                 let mut sources = self.native_sources.lock().unwrap_or_else(|e| e.into_inner());
-                if sources.get(&id).is_some_and(|old| old.account.identity_key != account.identity_key
-                    || old.account.profile_path != account.profile_path || old.account.binary_path != account.binary_path) {
+                let changed = sources.get(&id).is_some_and(|old| old.account.identity_key != account.identity_key
+                    || old.account.profile_path != account.profile_path || old.account.binary_path != account.binary_path);
+                if changed {
                     sources.remove(&id);
                 }
-                Arc::clone(sources.entry(id.clone()).or_insert_with(|| Arc::new(native::Source::new(account, provider, identity))))
+                let source = Arc::clone(sources.entry(id.clone()).or_insert_with(|| {
+                    Arc::new(native::Source::new(account, provider, identity, Arc::downgrade(&self.service), Arc::clone(&self.refresh_budget)).with_log(self.native_log_sink()))
+                }));
+                (source, changed)
             };
             native_ids.insert(id.clone());
             match source.ready() {
@@ -756,12 +946,24 @@ impl Bridge {
                 }
                 Err(error) => {
                     let (_, message) = native::failure(&error.code);
-                    failures.push(format!("{provider}: {message}"));
-                    native_errors.insert(provider.to_owned(), error.code);
+                    let has_gateway = self.state().gateways.iter().any(|gateway| {
+                        gateway.provider == key.0 && gateway.identity == key.1
+                            && gateway.native_account.as_deref() == Some(id.as_str()) && gateway.native_port == native_port
+                    });
+                    if keep_gateway_on_failure(&error.code, binding_changed, has_gateway) {
+                        // 일시 오류만으로 살아 있는 gateway와 그 stream을 끊지 않는다. 요청은 계속 source가 최신 상태로 검증한다.
+                        failures.push(format!("{provider}: {message} 기존 연결은 유지해요."));
+                        desired.insert(key, Some(id));
+                    } else {
+                        failures.push(format!("{provider}: {message}"));
+                        native_errors.insert(provider.to_owned(), error.code);
+                    }
                 }
             }
         }
         self.native_sources.lock().unwrap_or_else(|e| e.into_inner()).retain(|id, _| native_ids.contains(id));
+        // 이후 신규 연결 admission의 내부 예약량에만 쓰인다. 이미 받은 연결은 끊지 않는다.
+        self.admission.set_native_profiles(native_ids.len());
         let mut state = self.state();
         state.synced_at = now_ms();
         state.error = None;
@@ -769,14 +971,7 @@ impl Bridge {
         let mut providers = snapshot.providers.clone();
         providers.extend(desired.keys().map(|(provider, _)| provider.clone()));
         state.authenticated_providers = (state.broker_known.is_some() || !native_ids.is_empty()).then(|| providers.clone());
-        state.gateways.retain_mut(|gateway| {
-            let keep = desired.get(&(gateway.provider.clone(), gateway.identity.clone()))
-                .is_some_and(|source| source == &gateway.native_account);
-            if !keep {
-                gateway.stop();
-            }
-            keep
-        });
+        retain_gateways(&mut state.gateways, &desired, native_port);
         for ((provider, identity), native_account) in &desired {
             if state.gateways.iter().any(|gateway| &gateway.provider == provider && &gateway.identity == identity) {
                 continue;
@@ -793,6 +988,7 @@ impl Bridge {
                 email,
                 org,
                 native_account: native_account.clone(),
+                native_port: native_account.as_ref().map_or(0, |_| native_port),
                 port,
                 child: None,
                 spawned_at: 0,
@@ -833,6 +1029,12 @@ impl Bridge {
 
     pub fn status(&self) -> Status {
         let enabled = self.enabled.load(Ordering::SeqCst);
+        // source 상태 잠금은 짧게 값만 복사한다. bridge 상태 잠금을 잡기 전에 모아 두 잠금을 겹치지 않는다.
+        let mut native_auth: Vec<NativeAuthStatus> = {
+            let sources: Vec<_> = self.native_sources.lock().unwrap_or_else(|e| e.into_inner()).values().cloned().collect();
+            sources.iter().map(|source| source.auth_status()).collect()
+        };
+        native_auth.sort_by(|left, right| (&left.provider, &left.account_key).cmp(&(&right.provider, &right.account_key)));
         let mut state = self.state();
         let now = now_ms();
         let owner = |gateways: &[Gateway], key: &str| {
@@ -881,6 +1083,7 @@ impl Bridge {
                 BlockStatus { provider, email, scope: block.scope.clone(), until: block.until, reason: block.reason.clone(), quota: block.quota }
             })
             .collect();
+        let snapshot = self.admission.snapshot();
         Status {
             enabled,
             listening: self.listening.load(Ordering::SeqCst),
@@ -889,71 +1092,187 @@ impl Bridge {
             gateways,
             sessions,
             blocks,
+            connections: ConnectionsStatus {
+                total_limit: snapshot.limits.total,
+                public: ConnectionLane {
+                    active: snapshot.counts.public,
+                    limit: snapshot.limits.public,
+                    long_active: snapshot.counts.models,
+                    long_limit: snapshot.limits.models,
+                    rejected: snapshot.rejected_public,
+                    listening: self.listening.load(Ordering::SeqCst),
+                    port: PORT,
+                },
+                native: ConnectionLane {
+                    active: snapshot.counts.native,
+                    limit: snapshot.limits.native,
+                    long_active: snapshot.counts.polls,
+                    long_limit: snapshot.limits.polls,
+                    rejected: snapshot.rejected_native,
+                    listening: self.native_listening.load(Ordering::SeqCst),
+                    port: self.native_port(),
+                },
+                model_queue: ModelQueueStatus {
+                    waiting: snapshot.counts.waiting,
+                    waiting_limit: snapshot.limits.waiting,
+                    waited: snapshot.waited,
+                    timeouts: snapshot.wait_timeouts,
+                    max_wait_ms: snapshot.model_wait.as_millis() as u64,
+                    body_bytes: snapshot.body_bytes,
+                    body_limit: snapshot.body_limit,
+                },
+            },
+            auth_refresh: AuthRefreshStatus { active: self.refresh_budget.active(), limit: self.refresh_budget.limit(), waiting: self.refresh_budget.waiting() },
+            native_auth,
+            native_errors: state.native_errors.clone(),
         }
     }
 
     // ───────────────────────────── HTTP 처리 ─────────────────────────────
 
-    fn handle(&self, mut client: TcpStream) {
+    /// 연결 하나를 끝까지 처리한다. `permit`은 이 함수가 어떻게 끝나든(오류·조기 반환·unwind) 예산으로 돌아간다.
+    fn handle_connection(&self, mut client: TcpStream, mut permit: admission::Permit, scope: admission::Scope) {
+        let started = Instant::now();
+        let deadline = started + self.request_timeout;
         // 헤더만 먼저 읽고 토큰을 확인한 뒤에 본문(최대 64 MiB)을 읽는다. 인증 없는 연결이 메모리를 잡지 못하게.
-        let (request, rest) = match read_head(&mut client) {
+        let (request, rest) = match read_head(&mut client, deadline) {
             Ok(head) => head,
             Err(message) => return respond(&mut client, 400, &json!({ "error": message })),
         };
+        match scope {
+            admission::Scope::Public => self.handle_public(&mut client, &mut permit, request, rest, deadline),
+            admission::Scope::Native => self.handle_native(&mut client, &mut permit, request, rest, deadline, started + NATIVE_REQUEST_DEADLINE),
+        }
+    }
+
+    /// 포화 응답. 503에 구조화 코드를 달고 비밀 없는 한 줄을 남긴다. 복구 시각을 모르므로 Retry-After는 붙이지 않는다.
+    fn refuse(&self, client: &mut TcpStream, overload: admission::Overload) {
+        self.log_overload(overload);
+        respond(client, 503, &json!({ "error": overload.message(), "code": overload.code() }));
+    }
+
+    /// 포화 한 줄: `<ms> bridge/overload session=- outcome=overload scope=<public|native> class=<connection|model|queue|queue_timeout|payload|poll> active=<n> limit=<n> suppressed=<n>`.
+    /// 사용량(`->`) 줄이 아니고 `outcome=blocked`도 아니라 집계와 한도 차단 표시에 들어가지 않는다. 같은 종류는 5초에 한 줄만 남긴다.
+    fn log_overload(&self, overload: admission::Overload) {
+        let now = now_ms();
+        let suppressed = {
+            let mut seen = self.overload_log.lock();
+            let entry = seen.entry((overload.scope.name(), overload.class)).or_insert((i64::MIN / 2, 0));
+            if now - entry.0 < OVERLOAD_LOG_INTERVAL_MS {
+                entry.1 += 1;
+                return;
+            }
+            let suppressed = entry.1;
+            *entry = (now, 0);
+            suppressed
+        };
+        self.write_log_line(&format_overload_line(now, overload, suppressed));
+    }
+
+    fn handle_public(&self, client: &mut TcpStream, permit: &mut admission::Permit, request: Request, rest: Vec<u8>, deadline: Instant) {
         if request.method == "GET" && request.path == "/healthz" {
-            return respond(&mut client, 200, &json!({ "ok": true, "enabled": self.enabled.load(Ordering::SeqCst) }));
+            return respond(client, 200, &json!({ "ok": true, "enabled": self.enabled.load(Ordering::SeqCst) }));
+        }
+        // 공식 CLI broker는 내부 listener에만 있다. 공개 listener의 옛 /native 진입은 인증 전에 같은 응답으로 거절한다.
+        if request.path == "/native" || request.path.starts_with("/native/") {
+            return respond(client, 404, &json!({ "error": "Ojak은 pi-native 요청만 처리해요." }));
         }
         if !self.enabled.load(Ordering::SeqCst) {
-            return respond(&mut client, 503, &json!({ "error": "Ojak 계정 연결이 꺼져 있어요." }));
-        }
-        if let Some(native_path) = request.path.strip_prefix("/native/") {
-            let Some((id, suffix)) = native_path.split_once('/') else {
-                return respond(&mut client, 404, &json!({"error":"Unknown native profile."}));
-            };
-            if request.method == "GET" && suffix == "v1/healthz" {
-                return respond(&mut client, 200, &json!({"ok":true}));
-            }
-            let token = read_secret(self.paths.home.join("bridge-native.token"));
-            let presented = request.header("authorization").and_then(|s| s.strip_prefix("Bearer ")).unwrap_or("");
-            if token.as_deref().is_none_or(|secret| !constant_eq(presented, secret)) {
-                return respond(&mut client, 401, &json!({"error":"Native broker authentication failed."}));
-            }
-            let source = self.native_sources.lock().unwrap_or_else(|e| e.into_inner()).get(id).cloned();
-            let Some(source) = source else { return respond(&mut client, 404, &json!({"error":"Native profile is unavailable."})); };
-            // Enforce removal/disable immediately, not only at the next sync.
-            let valid = self.service.lock().and_then(|store| accounts(&store.connection)).is_ok_and(|accounts|
-                accounts.iter().any(|a| a.id == source.account.id && a.enabled
-                    && a.auth_status == "authenticated" && a.identity_key == source.account.identity_key
-                    && a.profile_path == source.account.profile_path && a.binary_path == source.account.binary_path));
-            if !valid { return respond(&mut client, 401, &json!({"error":"Native profile is no longer enabled."})); }
-            // 쿼리를 함께 넘긴다. 빠지면 long-poll의 `wait=`가 0이 되어 omp gateway가 쉬지 않고 다시 요청한다.
-            let route = if request.query.is_empty() { format!("/{suffix}") } else { format!("/{suffix}?{}", request.query) };
-            let request = match read_body(&mut client, request, rest) {
-                Ok(request) => request,
-                Err(_) => return respond(&mut client, 400, &json!({"error":"Invalid native broker request."})),
-            };
-            return source.handle(&mut client, &request, &route);
+            return respond(client, 503, &json!({ "error": "Ojak 계정 연결이 꺼져 있어요." }));
         }
         let expected = read_secret(self.paths.bridge_token());
         let presented = request.header("authorization").and_then(|value| value.strip_prefix("Bearer ")).map(str::trim);
         if expected.is_none() || !constant_eq(presented.unwrap_or(""), expected.as_deref().unwrap_or("")) {
-            return respond(&mut client, 401, &json!({ "error": "Ojak 연결 인증에 실패했어요." }));
+            return respond(client, 401, &json!({ "error": "Ojak 연결 인증에 실패했어요." }));
         }
-        let request = match read_body(&mut client, request, rest) {
+        // 모델 스트림만 장기 연결 몫을 쓴다. 짧은 제어 요청(models·providers)은 몫이 차도 남은 공개 연결 안에서 처리된다.
+        if request.method == "POST" && request.path == "/v1/pi/stream" {
+            return self.handle_model_request(client, permit, request, rest);
+        }
+        let request = match read_body(client, request, rest, deadline) {
             Ok(request) => request,
-            Err(message) => return respond(&mut client, 400, &json!({ "error": message })),
+            Err(message) => return respond(client, 400, &json!({ "error": message })),
         };
         match (request.method.as_str(), request.path.as_str()) {
-            ("GET", "/v1/models") => self.models(&mut client),
-            ("GET", "/v1/providers") => self.providers(&mut client),
-            ("POST", "/v1/pi/stream") => self.stream(&mut client, &request),
-            _ => respond(&mut client, 404, &json!({ "error": "Ojak은 pi-native 요청만 처리해요." })),
+            ("GET", "/v1/models") => self.models(client),
+            ("GET", "/v1/providers") => self.providers(client),
+            _ => respond(client, 404, &json!({ "error": "Ojak은 pi-native 요청만 처리해요." })),
         }
+    }
+
+    /// 인증을 통과한 모델 요청. 순서가 계약이다.
+    /// 1) 선언된 본문 길이만 검사한다(본문은 읽지 않는다). 2) 모델 몫을 얻는다 — 없으면 유한한 FIFO 대기열에서 기다리고,
+    /// 기다리는 동안 소켓이 끊기면 접는다. 3) 합계 본문 메모리 예산을 예약한 뒤에야 본문을 읽는다.
+    /// 대기 중에는 본문 바이트·JSON을 하나도 잡지 않는다. 모든 거절은 구조화된 503이며 upstream 호출은 일어나지 않았다.
+    fn handle_model_request(&self, client: &mut TcpStream, permit: &mut admission::Permit, request: Request, rest: Vec<u8>) {
+        let length = match declared_length(&request) {
+            Ok(length) => length,
+            Err(message) => return respond(client, 400, &json!({ "error": message })),
+        };
+        if let Err(denied) = permit.promote_wait(&|| native::client_gone(client)) {
+            match denied {
+                // 기다리는 동안 상대가 떠났다. 응답할 곳이 없다.
+                admission::Denied::Cancelled => return,
+                admission::Denied::Overload(overload) => return self.refuse(client, overload),
+            }
+        }
+        // 가중 본문 예산도 모자라면 같은 대기 시간 안에서 기다린다. 기다리는 동안 본문은 읽지 않는다.
+        let mut reservation = match self.admission.reserve_body(length, &|| native::client_gone(client)) {
+            Ok(reservation) => reservation,
+            Err(admission::Denied::Cancelled) => return,
+            Err(admission::Denied::Overload(overload)) => return self.refuse(client, overload),
+        };
+        // 기다린 시간은 본문 수신 마감에 넣지 않는다. 몫을 얻은 시점부터 새로 잰다.
+        let request = match read_body(client, request, rest, Instant::now() + self.request_timeout) {
+            Ok(request) => request,
+            Err(message) => return respond(client, 400, &json!({ "error": message })),
+        };
+        // 모델 스트림에는 요청 전체 마감을 걸지 않는다. 응답은 upstream 읽기 idle timeout 기준으로만 끊긴다.
+        self.stream(client, request, &mut reservation)
+    }
+
+    fn handle_native(&self, client: &mut TcpStream, permit: &mut admission::Permit, request: Request, rest: Vec<u8>, read_deadline: Instant, request_deadline: Instant) {
+        let Some((id, suffix)) = request.path.strip_prefix("/native/").and_then(|path| path.split_once('/')) else {
+            return respond(client, 404, &json!({"error":"Unknown native profile."}));
+        };
+        if request.method == "GET" && suffix == "v1/healthz" {
+            return respond(client, 200, &json!({"ok":true}));
+        }
+        if !self.enabled.load(Ordering::SeqCst) {
+            return respond(client, 503, &json!({ "error": "Ojak 계정 연결이 꺼져 있어요." }));
+        }
+        let token = read_secret(self.paths.home.join("bridge-native.token"));
+        let presented = request.header("authorization").and_then(|s| s.strip_prefix("Bearer ")).unwrap_or("");
+        if token.as_deref().is_none_or(|secret| !constant_eq(presented, secret)) {
+            return respond(client, 401, &json!({"error":"Native broker authentication failed."}));
+        }
+        let source = self.native_sources.lock().unwrap_or_else(|e| e.into_inner()).get(id).cloned();
+        let Some(source) = source else { return respond(client, 404, &json!({"error":"Native profile is unavailable."})); };
+        // 해당 계정 한 행만 읽는다. 모든 계정·한도 JSON을 매 인증 요청마다 다시 해석하지 않는다.
+        if let Err(error) = source.validate() {
+            let (status, message) = native::failure(&error.code);
+            return respond(client, status, &json!({"code":error.code,"error":message}));
+        }
+        // `wait=`가 있는 snapshot만 오래 붙잡는 long-poll이다. 나머지(refresh·disable·block·healthz)는 짧은 제어 요청이다.
+        let long_poll = request.method == "GET" && suffix == "v1/snapshot" && wait_ms(&request.query) > 0;
+        if long_poll {
+            if let Err(overload) = permit.promote() {
+                return self.refuse(client, overload);
+            }
+        }
+        // 쿼리를 함께 넘긴다. 빠지면 long-poll의 `wait=`가 0이 되어 omp gateway가 쉬지 않고 다시 요청한다.
+        let route = if request.query.is_empty() { format!("/{suffix}") } else { format!("/{suffix}?{}", request.query) };
+        let request = match read_body(client, request, rest, read_deadline.min(request_deadline)) {
+            Ok(request) => request,
+            Err(_) => return respond(client, 400, &json!({"error":"Invalid native broker request."})),
+        };
+        // 헤더 수신부터 같은 마감을 쓴다. 본문을 늦게 보낸 요청에 처리 시간을 새로 부여하지 않는다.
+        source.handle(client, &request, &route, request_deadline)
     }
 
     fn models(&self, client: &mut TcpStream) {
         let ports: Vec<u16> = self.state().gateways.iter_mut().filter_map(|gateway| gateway.running().then_some(gateway.port)).collect();
-        let token = gateway_token().unwrap_or_default();
+        let token = self.gateway_token().unwrap_or_default();
         let mut seen = BTreeSet::new();
         let mut data = Vec::new();
         for port in ports {
@@ -1000,8 +1319,9 @@ impl Bridge {
             .collect()
     }
 
-    fn stream(&self, client: &mut TcpStream, request: &Request) {
-        let body: Value = match serde_json::from_slice(&request.body) {
+    fn stream(&self, client: &mut TcpStream, mut request: Request, reservation: &mut admission::BodyReservation) {
+        let raw = std::mem::take(&mut request.body);
+        let body: Value = match serde_json::from_slice(&raw) {
             Ok(value) => value,
             Err(_) => return respond(client, 400, &json!({ "error": "요청 본문이 JSON이 아니에요." })),
         };
@@ -1012,6 +1332,10 @@ impl Bridge {
         let tools = body.pointer("/context/tools").and_then(Value::as_array).map_or(0, Vec::len);
         let cwd = body.pointer("/options/cwd").and_then(Value::as_str).map(str::to_owned);
         let upstream_body = for_gateway(body, &provider, &model);
+        // 원본 바이트(`raw`)와 파싱한 `Value`(`for_gateway`가 소비)가 모두 해제된 뒤에야 예약을 줄인다.
+        // 스트림이 이어지는 동안은 재시도용 게이트웨이 본문 하나만 쥔다.
+        drop(raw);
+        reservation.shrink_to(upstream_body.len());
         // 저장소를 못 읽었을 때 빈 계정 목록으로 고르면 모든 계정이 여유 있어 보인다. 마지막 값을 쓰고, 없으면 거절한다.
         let fresh = self
             .service
@@ -1030,7 +1354,7 @@ impl Bridge {
                 None => return respond(client, 503, &json!({ "error": "Ojak이 계정 한도를 아직 읽지 못했어요. 잠시 뒤 다시 시도해 주세요." })),
             },
         };
-        let Some(token) = gateway_token() else {
+        let Some(token) = self.gateway_token() else {
             return respond(client, 503, &json!({ "error": "omp 로그인 연결 토큰이 없어요." }));
         };
         let mut tried = Vec::new();
@@ -1104,7 +1428,7 @@ impl Bridge {
             };
             let (candidate, port) = &candidates[index];
             tried.push(candidate.key.clone());
-            let mut upstream = match forward(*port, &token, request, &upstream_body) {
+            let mut upstream = match forward(*port, &token, &request, &upstream_body) {
                 Ok(stream) => stream,
                 Err(_) => {
                     self.mark_unhealthy(&candidate.key, now);
@@ -1184,12 +1508,7 @@ impl Bridge {
 
     /// 요청 요약 한 줄. 이메일·조직·프롬프트·토큰은 기록하지 않는다.
     fn write_log_line(&self, line: &str) {
-        let path = self.paths.home.join("logs/bridge.log");
-        rotate_log(&path);
-        if let Ok(mut file) = aam_protocol::secure::private_options(fs::OpenOptions::new().create(true).append(true)).open(&path) {
-            // 줄과 줄바꿈을 한 번에 쓴다. `writeln!`은 두 번에 나눠 써서 동시 요청의 줄이 한 줄로 붙었다.
-            let _ = file.write_all(format!("{line}\n").as_bytes());
-        }
+        append_log_line(&self.paths.home, line);
     }
 
     /// 최근 10초 안에 띄운 gateway가 있으면 참.
@@ -1252,6 +1571,16 @@ pub(crate) fn for_gateway(mut body: Value, provider: &str, model: &str) -> Vec<u
         options_model.insert("provider".into(), Value::String(provider.to_owned()));
     }
     serde_json::to_vec(&body).unwrap_or_default()
+}
+
+/// `logs/bridge.log`에 한 줄을 덧붙인다. 줄과 줄바꿈을 한 번에 쓴다(`writeln!`은 두 번에 나눠 써서 동시 요청의 줄이 한 줄로 붙었다).
+fn append_log_line(home: &Path, line: &str) {
+    let path = home.join("logs/bridge.log");
+    if let Some(parent) = path.parent() { let _ = fs::create_dir_all(parent); }
+    rotate_log(&path);
+    if let Ok(mut file) = aam_protocol::secure::private_options(fs::OpenOptions::new().create(true).append(true)).open(&path) {
+        let _ = file.write_all(format!("{line}\n").as_bytes());
+    }
 }
 
 fn tail(id: &str) -> &str {
@@ -1340,6 +1669,16 @@ fn broker_identities() -> Result<BrokerIdentities, String> {
     parse_broker_identities(&body)
 }
 
+/// 원격 사용량 조회 없이 broker 로그인 목록의 비밀 없는 계정 정보만 읽는다.
+/// 연결 토큰이 없으면 broker를 쓰지 않는 환경이므로 `Ok(None)`, 토큰은 있는데 읽기·해석에 실패하면 고정 문구의 오류다.
+/// 오류에는 HTTP 응답·토큰·본문을 넣지 않는다.
+pub(crate) fn account_inventory(existing: &[Account]) -> Result<Option<Vec<Account>>, ApiError> {
+    let Some(token) = broker_token() else { return Ok(None) };
+    let body = http_get(BROKER_PORT, "/v1/snapshot", &token)
+        .map_err(|_| ApiError::new("OMP_INVENTORY_UNAVAILABLE", "omp 로그인 목록에 닿지 못했어요."))?;
+    aam_adapters::omp_inventory(&body, existing).map(Some)
+}
+
 fn parse_broker_identities(body: &Value) -> Result<BrokerIdentities, String> {
     let rows = body.get("credentials").and_then(Value::as_array)
         .ok_or_else(|| "omp 로그인 연결의 계정 목록 형식을 확인하지 못했어요.".to_owned())?;
@@ -1364,15 +1703,44 @@ fn parse_broker_identities(body: &Value) -> Result<BrokerIdentities, String> {
     Ok(BrokerIdentities { oauth, providers })
 }
 
+/// gateway가 쓸 broker URL과 토큰. 공식 CLI 계정은 서비스의 내부 loopback listener를 가리킨다.
+/// 내부 포트를 아직 열지 못했으면 공개 포트로 대신하지 않고 실패한다.
+fn gateway_broker(paths: &Paths, gateway: &Gateway) -> Result<(String, String), String> {
+    if let Some(id) = &gateway.native_account {
+        if gateway.native_port == 0 {
+            return Err("공식 CLI 인증 연결 포트가 아직 준비되지 않았어요.".into());
+        }
+        let token = ensure_secret(&paths.home.join("bridge-native.token"))
+            .map_err(|_| "공식 CLI 연결 토큰을 만들지 못했어요.".to_owned())?;
+        Ok((format!("http://127.0.0.1:{}/native/{id}", gateway.native_port), token))
+    } else {
+        Ok((BROKER_URL.to_owned(), broker_token().ok_or("omp 로그인 연결 토큰을 읽지 못했어요.")?))
+    }
+}
+
+/// 이번 동기화의 desired와 맞지 않거나 내부 포트가 바뀐 gateway는 멈추고 뺀다.
+fn retain_gateways(gateways: &mut Vec<Gateway>, desired: &BTreeMap<(String, String), Option<String>>, native_port: u16) {
+    gateways.retain_mut(|gateway| {
+        let keep = desired
+            .get(&(gateway.provider.clone(), gateway.identity.clone()))
+            .is_some_and(|source| source == &gateway.native_account)
+            && (gateway.native_account.is_none() || gateway.native_port == native_port);
+        if !keep {
+            gateway.stop();
+        }
+        keep
+    });
+}
+
+/// native probe가 실패했을 때 이미 떠 있는 같은 binding의 gateway를 유지할지.
+/// 일시 오류(CLI 바쁨·timeout 등)만 유지하고, 명시 disable·인증 거절·identity·override 충돌은 차단을 유지한다.
+fn keep_gateway_on_failure(code: &str, binding_changed: bool, has_gateway: bool) -> bool {
+    has_gateway && !binding_changed && native::transient_failure(code)
+}
+
 fn spawn_gateway(paths: &Paths, gateway: &Gateway, providers: &BTreeSet<String>) -> Result<(Child, GatewayJob), String> {
     let omp = native_omp().ok_or("원래 omp 실행 파일 경로를 확인하지 못했어요.")?;
-    let (broker_url, broker) = if let Some(id) = &gateway.native_account {
-        let token = ensure_secret(&paths.home.join("bridge-native.token"))
-            .map_err(|_| "공식 CLI 연결 토큰을 만들지 못했어요.")?;
-        (format!("http://127.0.0.1:{PORT}/native/{id}"), token)
-    } else {
-        (BROKER_URL.to_owned(), broker_token().ok_or("omp 로그인 연결 토큰을 읽지 못했어요.")?)
-    };
+    let (broker_url, broker) = gateway_broker(paths, gateway)?;
     let root = paths.home.join("bridge");
     let agent = root.join("agent");
     let pools = root.join("pools");
@@ -1564,8 +1932,17 @@ fn head_end(bytes: &[u8]) -> Option<usize> {
     bytes.windows(4).position(|window| window == b"\r\n\r\n").map(|index| index + 4)
 }
 
-/// 요청 줄과 헤더만 읽는다. 헤더 뒤에 딸려 온 본문 바이트는 그대로 돌려준다.
-fn read_head(stream: &mut TcpStream) -> Result<(Request, Vec<u8>), String> {
+/// 남은 전체 시간만큼만 다음 read를 기다리게 한다. read마다 timeout을 새로 주면 조금씩 흘리는 연결이 마감을 무력화한다.
+fn arm_read(stream: &TcpStream, deadline: Instant) -> Result<(), String> {
+    let left = deadline.saturating_duration_since(Instant::now());
+    if left.is_zero() {
+        return Err("요청을 받는 제한 시간이 지났습니다.".into());
+    }
+    stream.set_read_timeout(Some(left)).map_err(|_| "요청을 읽지 못했습니다.".to_owned())
+}
+
+/// 요청 줄과 헤더만 읽는다. 헤더 뒤에 딸려 온 본문 바이트는 그대로 돌려준다. `deadline`은 헤더를 다 받기까지의 전체 마감이다.
+fn read_head(stream: &mut TcpStream, deadline: Instant) -> Result<(Request, Vec<u8>), String> {
     let mut buffer = Vec::new();
     let mut chunk = [0u8; 16 * 1024];
     let end = loop {
@@ -1575,12 +1952,16 @@ fn read_head(stream: &mut TcpStream) -> Result<(Request, Vec<u8>), String> {
         if buffer.len() > MAX_HEAD {
             return Err("요청 헤더가 너무 큽니다.".into());
         }
+        arm_read(stream, deadline)?;
         let read = stream.read(&mut chunk).map_err(|_| "요청을 읽지 못했습니다.".to_owned())?;
         if read == 0 {
             return Err("요청이 끝나기 전에 연결이 닫혔습니다.".into());
         }
         buffer.extend_from_slice(&chunk[..read]);
     };
+    if end > MAX_HEAD {
+        return Err("요청 헤더가 너무 큽니다.".into());
+    }
     let head = String::from_utf8_lossy(&buffer[..end]).into_owned();
     let mut lines = head.split("\r\n");
     let mut first = lines.next().unwrap_or_default().split(' ');
@@ -1597,8 +1978,8 @@ fn read_head(stream: &mut TcpStream) -> Result<(Request, Vec<u8>), String> {
     Ok((Request { method, path, query, headers, body: Vec::new() }, rest))
 }
 
-/// 인증이 끝난 뒤 본문을 읽는다.
-fn read_body(stream: &mut TcpStream, request: Request, mut body: Vec<u8>) -> Result<Request, String> {
+/// 헤더가 선언한 본문 길이. 본문을 읽기 전에 형식과 상한만 검사한다.
+fn declared_length(request: &Request) -> Result<usize, String> {
     if request.header("transfer-encoding").is_some_and(|value| value.to_ascii_lowercase().contains("chunked")) {
         return Err("chunked 요청 본문은 지원하지 않습니다.".into());
     }
@@ -1606,9 +1987,16 @@ fn read_body(stream: &mut TcpStream, request: Request, mut body: Vec<u8>) -> Res
     if length > MAX_BODY {
         return Err("요청 본문이 너무 큽니다.".into());
     }
+    Ok(length)
+}
+
+/// 인증이 끝난 뒤 본문을 읽는다. `deadline`은 본문을 다 받기까지의 전체 마감이다(요청 수신 전체와 같은 시각).
+fn read_body(stream: &mut TcpStream, request: Request, mut body: Vec<u8>, deadline: Instant) -> Result<Request, String> {
+    let length = declared_length(&request)?;
     let mut chunk = [0u8; 16 * 1024];
     body.reserve(length.saturating_sub(body.len()));
     while body.len() < length {
+        arm_read(stream, deadline)?;
         let read = stream.read(&mut chunk).map_err(|_| "요청 본문을 읽지 못했습니다.".to_owned())?;
         if read == 0 {
             return Err("요청 본문이 끝나기 전에 연결이 닫혔습니다.".into());
@@ -1785,6 +2173,23 @@ pub(crate) fn format_reject_line(at: i64, provider: &str, model: &str, session: 
         sanitize_log_token(session),
         if causes.is_empty() { "-" } else { causes.as_str() }
     )
+}
+
+/// 연결 예산 초과 한 줄. 데스크톱 사용량 파서는 `outcome=`가 있는 줄을 건너뛰고, 차단·거절 집계(`blocked`/`rejected`)에도 들어가지 않는다.
+/// `<ms> bridge/overload session=- outcome=overload scope=<public|native> class=<connection|model|queue|queue_timeout|payload|poll> active=<n> limit=<n> suppressed=<n>`
+fn format_overload_line(at: i64, overload: admission::Overload, suppressed: u64) -> String {
+    format!(
+        "{at} bridge/overload session=- outcome=overload scope={} class={} active={} limit={} suppressed={suppressed}",
+        overload.scope.name(),
+        overload.class,
+        overload.active,
+        overload.limit
+    )
+}
+
+/// native snapshot 쿼리의 `wait=`(ms). 없거나 해석하지 못하면 0이고 0이면 즉시 응답하는 짧은 요청이다.
+fn wait_ms(query: &str) -> u64 {
+    query.split('&').find_map(|value| value.strip_prefix("wait=")).and_then(|value| value.parse().ok()).unwrap_or(0)
 }
 
 /// 한도 응답을 받아 계정을 막은 한 줄. 사용량 파서는 건너뛴다.
@@ -2000,6 +2405,10 @@ fn limit_signal(head: &[u8], peek: &[u8]) -> Option<Limit> {
     let head = String::from_utf8_lossy(head);
     let status: u16 = head.split(' ').nth(1).and_then(|code| code.parse().ok()).unwrap_or(0);
     let text = String::from_utf8_lossy(peek).to_ascii_lowercase();
+    // Ojak 자신의 연결·인증 포화 응답은 공급자 한도가 아니다. 계정을 막거나 한도 소진으로 기록하지 않는다.
+    if ["bridge_busy", "bridge_queue_timeout", "auth_broker_busy", "auth_refresh_"].iter().any(|code| text.contains(code)) {
+        return None;
+    }
     let usage = ["usage_limit", "usage limit", "quota", "limit has been reached", "hit your limit", "limit reached"]
         .iter()
         .any(|marker| text.contains(marker));
@@ -2103,33 +2512,15 @@ mod tests {
 
     #[test]
     fn public_model_token_cannot_read_native_credentials() {
-        let home = std::env::temp_dir().join(format!("ojak-native-auth-{}", uuid::Uuid::new_v4()));
-        fs::create_dir_all(&home).unwrap();
-        let paths = Paths { socket: home.join("service.sock"), database: home.join("state.db"), profiles: home.join("profiles"), home: home.clone() };
-        let public_token = ensure_token(&paths).unwrap();
-        ensure_secret(&home.join("bridge-native.token")).unwrap();
-        let bridge = Arc::new(Bridge {
-            service: Service::open(paths.clone()).unwrap(), paths,
-            state: Mutex::new(State::default()), enabled: AtomicBool::new(true),
-            listening: AtomicBool::new(false), connections: std::sync::atomic::AtomicUsize::new(0),
-            native_sources: Mutex::new(HashMap::new()),
-        });
-        let listener = TcpListener::bind(("127.0.0.1", 0)).unwrap();
-        let address = listener.local_addr().unwrap();
-        let worker = std::thread::spawn(move || {
-            let (socket, _) = listener.accept().unwrap();
-            socket.set_read_timeout(Some(Duration::from_secs(2))).unwrap();
-            bridge.handle(socket);
-        });
-        let mut client = TcpStream::connect(address).unwrap();
-        client.set_read_timeout(Some(Duration::from_secs(2))).unwrap();
-        write!(client, "GET /native/account/v1/snapshot HTTP/1.1\r\nHost: localhost\r\nAuthorization: Bearer {public_token}\r\n\r\n").unwrap();
-        let mut response = String::new();
-        client.read_to_string(&mut response).unwrap();
-        assert!(response.starts_with("HTTP/1.1 401 "));
-        worker.join().unwrap();
-        fs::remove_dir_all(home).unwrap();
+        let h = harness(Duration::from_secs(5));
+        // 공개 listener는 /native 경로를 인증 전에 거부하고, 공개 토큰은 내부 listener에서 통하지 않는다.
+        let public = get(h.public, "/native/account/v1/snapshot", Some(&h.public_token));
+        assert!(public.starts_with("HTTP/1.1 404 "), "{public}");
+        let internal = get(h.native, "/native/account/v1/snapshot", Some(&h.public_token));
+        assert!(internal.starts_with("HTTP/1.1 401 "), "{internal}");
+        wait_idle(&h.bridge);
     }
+
 
     #[test]
     fn broker_logins_without_identity_are_not_registered_again() {
@@ -2708,7 +3099,7 @@ mod tests {
     fn subject_scoped_grok_account_respects_exclusion_and_manual_pin() {
         let gateway = Gateway {
             provider: "xai-oauth".into(), identity: "account:subject-a".into(),
-            email: "account:subject-a".into(), org: String::new(), native_account: None,
+            email: "account:subject-a".into(), org: String::new(), native_account: None, native_port: 0,
             port: 0, child: None, spawned_at: 0, unhealthy_until: 0,
         };
         let account = Account {
@@ -2727,6 +3118,532 @@ mod tests {
         assert!(!pinned);
     }
 
+    // ───────────── 연결 예산·내부 broker listener (loopback, 임시 AAM_HOME, 실제 CLI 없음) ─────────────
+
+    use std::net::SocketAddr;
+
+    struct Harness {
+        bridge: Arc<Bridge>,
+        public: SocketAddr,
+        native: SocketAddr,
+        home: PathBuf,
+        public_token: String,
+        native_token: String,
+    }
+    impl Drop for Harness {
+        fn drop(&mut self) {
+            for gateway in &mut self.bridge.state().gateways {
+                gateway.stop();
+            }
+            let _ = fs::remove_dir_all(&self.home);
+        }
+    }
+
+    /// 운영 포트(4020/8765)와 사용자 홈의 토큰은 건드리지 않는다. listener는 모두 OS 할당 포트다.
+    fn harness(request_timeout: Duration) -> Harness {
+        harness_with(request_timeout, admission::Config::default())
+    }
+
+    fn harness_with(request_timeout: Duration, config: admission::Config) -> Harness {
+        let home = std::env::temp_dir().join(format!("ojak-bridge-budget-{}", uuid::Uuid::new_v4()));
+        fs::create_dir_all(&home).unwrap();
+        let paths = Paths { socket: home.join("service.sock"), database: home.join("state.db"), profiles: home.join("profiles"), home: home.clone() };
+        let public_token = ensure_token(&paths).unwrap();
+        let native_token = ensure_secret(&home.join("bridge-native.token")).unwrap();
+        let service = Service::open(paths).unwrap();
+        ensure_secret(&home.join("gateway.token")).unwrap();
+        let bridge = Bridge::with_config(&service, request_timeout, config, Some(home.join("gateway.token")));
+        bridge.enabled.store(true, Ordering::SeqCst);
+        let public = TcpListener::bind(("127.0.0.1", 0)).unwrap();
+        let native = TcpListener::bind(("127.0.0.1", 0)).unwrap();
+        let (public_addr, native_addr) = (public.local_addr().unwrap(), native.local_addr().unwrap());
+        bridge.serve(public, admission::Scope::Public);
+        bridge.serve(native, admission::Scope::Native);
+        Harness { bridge, public: public_addr, native: native_addr, home, public_token, native_token }
+    }
+
+    /// 이 계정 하나를 DB에 저장하고 native source로 등록한다. 요청 검증(최신 DB binding)을 통과하는 최소 계정이다.
+    fn register_native(harness: &Harness, id: &str) {
+        let account = Account {
+            id: id.into(), tool: "claude".into(), provider: "anthropic".into(), enabled: true, auth_status: "authenticated".into(),
+            email: Some("native@example.test".into()),
+            identity_key: Some("anthropic|email:native@example.test|workspace:org-a".into()),
+            profile_path: Some("/nonexistent/profile".into()), binary_path: Some("/nonexistent/claude".into()),
+            ..Account::default()
+        };
+        {
+            let store = harness.bridge.service.lock().unwrap();
+            crate::store::save_account(&store.connection, &account).unwrap();
+        }
+        let (provider, identity) = native::identity(&account).unwrap();
+        let source = Arc::new(native::Source::new(account, provider, identity, Arc::downgrade(&harness.bridge.service), Arc::clone(&harness.bridge.refresh_budget)));
+        let mut sources = harness.bridge.native_sources.lock().unwrap();
+        sources.insert(id.into(), source);
+        harness.bridge.admission.set_native_profiles(sources.len());
+    }
+
+    fn exchange(address: SocketAddr, request: &str) -> String {
+        let mut client = TcpStream::connect(address).unwrap();
+        client.set_read_timeout(Some(Duration::from_secs(5))).unwrap();
+        let _ = client.write_all(request.as_bytes());
+        let mut response = String::new();
+        let _ = client.read_to_string(&mut response);
+        response
+    }
+    fn get(address: SocketAddr, path: &str, token: Option<&str>) -> String {
+        let auth = token.map_or(String::new(), |token| format!("Authorization: Bearer {token}\r\n"));
+        exchange(address, &format!("GET {path} HTTP/1.1\r\nHost: localhost\r\n{auth}Connection: close\r\n\r\n"))
+    }
+    fn post(address: SocketAddr, path: &str, token: &str, body: &str) -> String {
+        exchange(address, &format!("POST {path} HTTP/1.1\r\nHost: localhost\r\nAuthorization: Bearer {token}\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}", body.len()))
+    }
+    fn wait_idle(bridge: &Bridge) {
+        for _ in 0..100 {
+            let counts = bridge.admission.snapshot().counts;
+            if counts.public == 0 && counts.native == 0 && counts.models == 0 && counts.polls == 0 {
+                return;
+            }
+            std::thread::sleep(Duration::from_millis(50));
+        }
+        panic!("permits were not returned: {:?}", bridge.admission.snapshot().counts);
+    }
+
+    #[test]
+    fn native_broker_uses_its_own_ephemeral_listener_and_public_rejects_native_paths() {
+        let h = harness(Duration::from_secs(5));
+        register_native(&h, "acc");
+        assert_ne!(h.native.port(), PORT);
+        assert_ne!(h.native.port(), h.public.port());
+        assert_eq!(h.bridge.native_port(), h.native.port());
+        // 공개 listener에는 옛 /native 진입이 없다. 어떤 토큰이어도 같은 거절이다.
+        for token in [None, Some(h.public_token.as_str()), Some(h.native_token.as_str())] {
+            let response = get(h.public, "/native/acc/v1/snapshot", token);
+            assert!(response.starts_with("HTTP/1.1 404 "), "{response}");
+            assert!(!response.contains("credentials"));
+        }
+        // 내부 listener: 미인증·공개 토큰은 거부, 공개 모델 경로는 없다.
+        assert!(get(h.native, "/native/acc/v1/snapshot", None).starts_with("HTTP/1.1 401 "));
+        assert!(get(h.native, "/native/acc/v1/snapshot", Some(&h.public_token)).starts_with("HTTP/1.1 401 "));
+        assert!(get(h.native, "/v1/models", Some(&h.public_token)).starts_with("HTTP/1.1 404 "));
+        // 공개 모델 토큰은 반대로 공개 listener에서만 통하고 native 토큰은 거부된다.
+        assert!(get(h.public, "/v1/providers", Some(&h.native_token)).starts_with("HTTP/1.1 401 "));
+        assert!(get(h.public, "/v1/providers", Some(&h.public_token)).starts_with("HTTP/1.1 200 "));
+        // 올바른 native 토큰 + 최신 DB binding이면 source가 처리한다. 모르는 profile은 404.
+        assert!(post(h.native, "/native/acc/v1/credential/1/disable", &h.native_token, "").starts_with("HTTP/1.1 200 "));
+        assert!(post(h.native, "/native/missing/v1/credential/1/disable", &h.native_token, "").starts_with("HTTP/1.1 404 "));
+        // 계정이 제외되면 곧바로 거부한다.
+        {
+            let store = h.bridge.service.lock().unwrap();
+            let mut account = accounts(&store.connection).unwrap().remove(0);
+            account.enabled = false;
+            crate::store::save_account(&store.connection, &account).unwrap();
+        }
+        let response = post(h.native, "/native/acc/v1/credential/1/disable", &h.native_token, "");
+        assert!(response.starts_with("HTTP/1.1 409 "));
+        assert!(response.contains("\"code\":\"ACCOUNT_DISABLED\""));
+        wait_idle(&h.bridge);
+    }
+
+    #[test]
+    fn gateway_source_url_uses_the_internal_port_not_the_public_one() {
+        let home = std::env::temp_dir().join(format!("ojak-bridge-url-{}", uuid::Uuid::new_v4()));
+        fs::create_dir_all(&home).unwrap();
+        let paths = Paths { socket: home.join("service.sock"), database: home.join("state.db"), profiles: home.join("profiles"), home: home.clone() };
+        let mut gateway = Gateway {
+            provider: "anthropic".into(), identity: "email:a@example.test|org:a".into(), email: String::new(), org: String::new(),
+            native_account: Some("acc-1".into()), native_port: 49_321, port: 4101, child: None, spawned_at: 0, unhealthy_until: 0,
+        };
+        let (url, token) = gateway_broker(&paths, &gateway).unwrap();
+        assert_eq!(url, "http://127.0.0.1:49321/native/acc-1");
+        assert!(!url.contains(&format!(":{PORT}/")));
+        assert_eq!(token, read_secret(home.join("bridge-native.token")).unwrap());
+        // 내부 포트를 아직 열지 못했으면 옛 공개 포트로 대신하지 않고 실패한다.
+        gateway.native_port = 0;
+        assert!(gateway_broker(&paths, &gateway).is_err());
+        fs::remove_dir_all(home).unwrap();
+    }
+
+    #[test]
+    fn public_budget_saturation_does_not_block_native_short_requests() {
+        let h = harness(Duration::from_secs(5));
+        register_native(&h, "acc");
+        let held: Vec<_> = (0..h.bridge.admission.limits().public).map(|_| h.bridge.admission.admit(admission::Scope::Public).unwrap()).collect();
+        let busy = get(h.public, "/healthz", None);
+        assert!(busy.starts_with("HTTP/1.1 503 "), "{busy}");
+        assert!(busy.contains("BRIDGE_BUSY"), "{busy}");
+        assert!(!busy.to_ascii_lowercase().contains("retry-after"));
+        let short = post(h.native, "/native/acc/v1/credential/1/disable", &h.native_token, "");
+        assert!(short.starts_with("HTTP/1.1 200 "), "{short}");
+        drop(held);
+        assert!(get(h.public, "/healthz", None).starts_with("HTTP/1.1 200 "));
+        wait_idle(&h.bridge);
+    }
+
+    #[test]
+    fn native_long_poll_saturation_keeps_short_control_and_models_keep_public_control() {
+        // 대기 시간 0: 몫이 가득 차면 기다리지 않고 바로 구조화된 거절을 돌려주는 설정.
+        let h = harness_with(Duration::from_secs(5), admission::Config { model_wait: Duration::ZERO, ..admission::Config::default() });
+        register_native(&h, "acc");
+        let limits = h.bridge.admission.limits();
+        let mut polls = Vec::new();
+        for _ in 0..limits.polls.max(1) {
+            let mut permit = h.bridge.admission.admit(admission::Scope::Native).unwrap();
+            if permit.promote().is_ok() { polls.push(permit); }
+        }
+        assert_eq!(polls.len(), limits.polls);
+        // 이 profile 수(1)에서 polls=2이므로 long-poll이 전부 찼다. 새 long-poll은 구조화된 503, 짧은 제어는 통과.
+        let poll = get(h.native, "/native/acc/v1/snapshot?wait=1000", Some(&h.native_token));
+        assert!(poll.starts_with("HTTP/1.1 503 ") && poll.contains("AUTH_BROKER_BUSY"), "{poll}");
+        assert!(post(h.native, "/native/acc/v1/credential/1/disable", &h.native_token, "").starts_with("HTTP/1.1 200 "));
+        assert!(get(h.native, "/native/acc/v1/healthz", None).starts_with("HTTP/1.1 200 "));
+        drop(polls);
+
+        let mut models = Vec::new();
+        while let Ok(mut permit) = h.bridge.admission.admit(admission::Scope::Public) {
+            if permit.promote().is_err() { break; }
+            models.push(permit);
+        }
+        assert_eq!(models.len(), h.bridge.admission.limits().models);
+        let stream = post(h.public, "/v1/pi/stream", &h.public_token, "{}");
+        assert!(stream.starts_with("HTTP/1.1 503 ") && stream.contains("BRIDGE_BUSY"), "{stream}");
+        assert!(get(h.public, "/healthz", None).starts_with("HTTP/1.1 200 "));
+        assert!(get(h.public, "/v1/providers", Some(&h.public_token)).starts_with("HTTP/1.1 200 "));
+        drop(models);
+        wait_idle(&h.bridge);
+    }
+
+    #[test]
+    fn malformed_slow_and_early_return_requests_give_permits_back() {
+        let h = harness(Duration::from_millis(400));
+        register_native(&h, "acc");
+        // 형식이 깨진 요청, 헤더 한도 초과, 토큰 없는 요청, 본문 없이 끊긴 요청.
+        for address in [h.public, h.native] {
+            assert!(exchange(address, "\r\n\r\n").starts_with("HTTP/1.1 "));
+            let oversized = exchange(address, &format!("GET / HTTP/1.1\r\nX: {}\r\n\r\n", "a".repeat(MAX_HEAD + 10)));
+            assert!(oversized.is_empty() || oversized.starts_with("HTTP/1.1 400 "), "{oversized}");
+            drop(TcpStream::connect(address).unwrap());
+        }
+        assert!(post(h.public, "/v1/pi/stream", "wrong", "{}").starts_with("HTTP/1.1 401 "));
+        {
+            let mut client = TcpStream::connect(h.public).unwrap();
+            write!(client, "POST /v1/pi/stream HTTP/1.1\r\nAuthorization: Bearer {}\r\nContent-Length: 100\r\n\r\nshort", h.public_token).unwrap();
+        }
+        // 헤더를 조금씩 흘려 보내 read마다 timeout을 새로 얻으려는 연결은 전체 deadline에서 끊긴다.
+        for address in [h.public, h.native] {
+            let started = std::time::Instant::now();
+            let mut client = TcpStream::connect(address).unwrap();
+            client.set_read_timeout(Some(Duration::from_secs(5))).unwrap();
+            let mut response = String::new();
+            let mut closed = false;
+            for _ in 0..40 {
+                if client.write_all(b"X").is_err() { closed = true; break; }
+                std::thread::sleep(Duration::from_millis(50));
+                if started.elapsed() > Duration::from_millis(1500) { break; }
+            }
+            let _ = client.read_to_string(&mut response);
+            assert!(closed || response.starts_with("HTTP/1.1 400 ") || response.is_empty(), "{response}");
+            assert!(started.elapsed() < Duration::from_millis(3000), "deadline was reset by each read: {:?}", started.elapsed());
+        }
+        wait_idle(&h.bridge);
+        let snapshot = h.bridge.admission.snapshot();
+        assert_eq!((snapshot.counts.public, snapshot.counts.native), (0, 0));
+    }
+
+    #[test]
+    fn overload_is_logged_as_a_sanitized_outcome_and_never_becomes_a_quota_block() {
+        let h = harness(Duration::from_secs(5));
+        let held: Vec<_> = (0..h.bridge.admission.limits().public).map(|_| h.bridge.admission.admit(admission::Scope::Public).unwrap()).collect();
+        for _ in 0..3 {
+            assert!(get(h.public, "/healthz", None).contains("BRIDGE_BUSY"));
+        }
+        let log = fs::read_to_string(h.home.join("logs/bridge.log")).unwrap();
+        let lines: Vec<&str> = log.lines().collect();
+        assert_eq!(lines.len(), 1, "overload lines are throttled: {log}");
+        let line = lines[0];
+        assert!(line.contains("outcome=overload scope=public class=connection"), "{line}");
+        assert!(!line.contains("outcome=blocked") && !line.contains("outcome=rejected") && !line.contains("->"));
+        assert!(parse_usage_line(line).is_none());
+        assert_eq!(line.split(' ').nth(1), Some("bridge/overload"));
+        assert!(h.bridge.state().blocks.is_empty());
+        let status = h.bridge.status();
+        assert_eq!((status.connections.public.active, status.connections.public.limit), (held.len(), h.bridge.admission.limits().public));
+        assert_eq!(status.connections.public.rejected, 3);
+        assert_eq!((status.auth_refresh.active, status.auth_refresh.limit), (0, 4));
+        assert!(status.blocks.is_empty());
+        // 게이트웨이를 통해 돌아온 포화 응답도 한도 응답으로 오인하지 않는다.
+        let busy = b"{\"error\":{\"type\":\"upstream_error\",\"message\":\"busy\",\"code\":\"AUTH_BROKER_BUSY\"}}";
+        assert_eq!(limit_signal(b"HTTP/1.1 503 Service Unavailable\r\n\r\n", busy), None);
+        assert_eq!(limit_signal(b"HTTP/1.1 503 Service Unavailable\r\n\r\n", b"{\"error\":{\"code\":\"BRIDGE_BUSY\",\"message\":\"rate limit\"}}"), None);
+        drop(held);
+    }
+
+    #[test]
+    fn transient_probe_failure_keeps_the_live_gateway_but_explicit_blocks_do_not() {
+        for code in ["PROBE_TIMEOUT", "AUTH_REFRESH_TIMEOUT"] {
+            assert!(keep_gateway_on_failure(code, false, true), "{code}");
+            assert!(!keep_gateway_on_failure(code, false, false), "no live gateway to keep: {code}");
+            assert!(!keep_gateway_on_failure(code, true, true), "binding changed: {code}");
+        }
+        for code in ["ACCOUNT_DISABLED", "AUTH_REQUIRED", "PROFILE_IDENTITY_MISMATCH", "AUTH_OVERRIDE_CONFLICT", "PROFILE_UNVERIFIED"] {
+            assert!(!keep_gateway_on_failure(code, false, true), "{code}");
+        }
+        let make = |provider: &str, identity: &str, native: Option<&str>, port: u16| Gateway {
+            provider: provider.into(), identity: identity.into(), email: String::new(), org: String::new(),
+            native_account: native.map(str::to_owned), native_port: port, port: 4101, child: None, spawned_at: 0, unhealthy_until: 0,
+        };
+        let mut gateways = vec![
+            make("anthropic", "email:a|org:a", Some("a"), 5000),
+            make("anthropic", "email:b|org:b", Some("b"), 5000),
+            make("openai-codex", "email:c|org:c", Some("c"), 4999),
+            make("anthropic", "email:d|org:d", None, 0),
+        ];
+        let mut desired: BTreeMap<(String, String), Option<String>> = BTreeMap::new();
+        // a: 일시 오류로 유지, b: 명시 차단이라 desired에서 빠짐, c: 내부 포트가 바뀜, d: broker 계정.
+        desired.insert(("anthropic".into(), "email:a|org:a".into()), Some("a".into()));
+        desired.insert(("openai-codex".into(), "email:c|org:c".into()), Some("c".into()));
+        desired.insert(("anthropic".into(), "email:d|org:d".into()), None);
+        retain_gateways(&mut gateways, &desired, 5000);
+        let kept: Vec<&str> = gateways.iter().map(|gateway| gateway.identity.as_str()).collect();
+        assert_eq!(kept, ["email:a|org:a", "email:d|org:d"]);
+    }
+
+    #[test]
+    fn status_reports_connection_budgets_and_refresh_limit() {
+        let h = harness(Duration::from_secs(5));
+        register_native(&h, "acc");
+        h.bridge.admission.set_native_profiles(1);
+        let mut model = h.bridge.admission.admit(admission::Scope::Public).unwrap();
+        model.promote().unwrap();
+        let status = serde_json::to_value(h.bridge.status()).unwrap();
+        let limits = h.bridge.admission.limits();
+        assert_eq!(status["connections"]["totalLimit"], 256);
+        assert_eq!(status["connections"]["modelQueue"]["waitingLimit"], limits.waiting);
+        assert_eq!(status["connections"]["modelQueue"]["bodyLimit"], admission::Config::default().body_budget);
+        assert_eq!(status["authRefresh"]["waiting"], 0);
+        assert_eq!(status["nativeAuth"].as_array().unwrap().len(), 1);
+        assert_eq!(status["nativeAuth"][0]["state"], "unknown");
+        assert_eq!(status["connections"]["public"]["active"], 1);
+        assert_eq!(status["connections"]["public"]["limit"], limits.public);
+        assert_eq!(status["connections"]["public"]["longActive"], 1);
+        assert_eq!(status["connections"]["public"]["longLimit"], limits.models);
+        assert_eq!(status["connections"]["native"]["limit"], limits.native);
+        assert_eq!(status["connections"]["native"]["longLimit"], limits.polls);
+        assert_eq!(status["connections"]["native"]["listening"], true);
+        assert_eq!(status["authRefresh"]["limit"], 4);
+        drop(model);
+        assert_eq!(serde_json::to_value(Status::inactive()).unwrap()["authRefresh"]["limit"], 4);
+        wait_idle(&h.bridge);
+    }
+
+    // ───────────── 모델 스트림 동시성: 실제 소켓 + 격리된 합성 upstream(실계정·운영 포트 없음) ─────────────
+
+    /// 합성 gateway. `start`가 응답한 첫 SSE 이벤트 뒤 `release`가 올 때까지 스트림을 붙잡고, 그 뒤 닫는다.
+    /// `held`는 지금 붙잡고 있는 스트림 수, `served`는 받은 요청 누계다(upstream 재시도·재전송이 있었는지 본다).
+    struct Synthetic {
+        release: Arc<AtomicBool>,
+        held: Arc<std::sync::atomic::AtomicUsize>,
+        served: Arc<std::sync::atomic::AtomicUsize>,
+    }
+    impl Drop for Synthetic {
+        fn drop(&mut self) {
+            self.release.store(true, Ordering::SeqCst);
+        }
+    }
+    fn synthetic_gateway(h: &Harness) -> Synthetic {
+        use std::sync::atomic::AtomicUsize;
+        let listener = TcpListener::bind(("127.0.0.1", 0)).unwrap();
+        let port = listener.local_addr().unwrap().port();
+        let (release, held, served) = (Arc::new(AtomicBool::new(false)), Arc::new(AtomicUsize::new(0)), Arc::new(AtomicUsize::new(0)));
+        let (worker_release, worker_held, worker_served) = (Arc::clone(&release), Arc::clone(&held), Arc::clone(&served));
+        std::thread::spawn(move || {
+            for stream in listener.incoming() {
+                let Ok(mut stream) = stream else { break };
+                let (release, held, served) = (Arc::clone(&worker_release), Arc::clone(&worker_held), Arc::clone(&worker_served));
+                std::thread::spawn(move || {
+                    let mut buffer = Vec::new();
+                    let mut chunk = [0u8; 4096];
+                    while head_end(&buffer).is_none() {
+                        match stream.read(&mut chunk) {
+                            Ok(0) | Err(_) => return,
+                            Ok(read) => buffer.extend_from_slice(&chunk[..read]),
+                        }
+                    }
+                    served.fetch_add(1, Ordering::SeqCst);
+                    let _ = stream.write_all(b"HTTP/1.1 200 OK\r\nContent-Type: text/event-stream\r\nConnection: close\r\n\r\ndata: {\"type\":\"start\"}\n\n");
+                    held.fetch_add(1, Ordering::SeqCst);
+                    while !release.load(Ordering::SeqCst) {
+                        std::thread::sleep(Duration::from_millis(5));
+                    }
+                    let _ = stream.write_all(b"data: {\"type\":\"done\"}\n\n");
+                    held.fetch_sub(1, Ordering::SeqCst);
+                });
+            }
+        });
+        // 살아 있는 gateway 프로세스처럼 보이게 하는 자식. Harness가 끝나면 함께 정리된다.
+        #[cfg(unix)]
+        let child = (Command::new("sleep").arg("600").stdout(Stdio::null()).stderr(Stdio::null()).spawn().unwrap(), ());
+        #[cfg(windows)]
+        let child = {
+            let mut command = Command::new("ping.exe");
+            command.args(["-n", "601", "127.0.0.1"]).stdin(Stdio::null()).stdout(Stdio::null()).stderr(Stdio::null());
+            aam_protocol::spawn_in_job(&mut command, true, true, false).unwrap()
+        };
+        h.bridge.state().gateways.push(Gateway {
+            provider: "anthropic".into(), identity: "email:synthetic@example.test|org:o".into(), email: "synthetic@example.test".into(),
+            org: "o".into(), native_account: None, native_port: 0, port, child: Some(child), spawned_at: 0, unhealthy_until: 0,
+        });
+        Synthetic { release, held, served }
+    }
+
+    fn stream_request(token: &str, session: usize) -> String {
+        let body = json!({"modelId": "anthropic/claude-test", "options": {"model": {"id": "claude-test", "provider": "anthropic"}, "sessionId": format!("s-{session}")}}).to_string();
+        format!("POST /v1/pi/stream HTTP/1.1\r\nHost: localhost\r\nAuthorization: Bearer {token}\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}", body.len())
+    }
+
+    fn eventually(what: &str, condition: impl Fn() -> bool) {
+        let end = std::time::Instant::now() + Duration::from_secs(20);
+        while !condition() {
+            assert!(std::time::Instant::now() < end, "timed out waiting for {what}");
+            std::thread::sleep(Duration::from_millis(10));
+        }
+    }
+
+    /// 스트림 하나를 열어 첫 이벤트를 받은 뒤 붙잡는다. 끝까지 읽은 응답 전체를 돌려준다.
+    fn hold_stream(address: SocketAddr, request: String, first: std::sync::mpsc::Sender<()>) -> std::thread::JoinHandle<String> {
+        std::thread::spawn(move || {
+            let mut client = TcpStream::connect(address).unwrap();
+            client.set_read_timeout(Some(Duration::from_secs(30))).unwrap();
+            client.write_all(request.as_bytes()).unwrap();
+            let mut text = String::new();
+            let mut chunk = [0u8; 1024];
+            let mut signalled = false;
+            loop {
+                match client.read(&mut chunk) {
+                    Ok(0) | Err(_) => break,
+                    Ok(read) => text.push_str(&String::from_utf8_lossy(&chunk[..read])),
+                }
+                if !signalled && text.contains("\"start\"") {
+                    signalled = true;
+                    let _ = first.send(());
+                }
+            }
+            text
+        })
+    }
+
+    /// 인수 기준: 128개 스트림을 동시에 붙잡아도 healthz·모델 목록·native 짧은 제어·status가 계속 응답하고,
+    /// upstream은 요청마다 정확히 한 번만 호출되며(재시도·재전송 없음), 끝나면 모든 몫이 돌아온다.
+    #[test]
+    fn a_hundred_twenty_eight_held_streams_keep_control_native_and_status_responsive() {
+        let h = harness(Duration::from_secs(10));
+        register_native(&h, "acc");
+        let gateway = synthetic_gateway(&h);
+        let (first, ready) = std::sync::mpsc::channel();
+        let clients: Vec<_> = (0..128).map(|index| hold_stream(h.public, stream_request(&h.public_token, index), first.clone())).collect();
+        for _ in 0..128 {
+            ready.recv_timeout(Duration::from_secs(30)).expect("a stream did not reach its first event");
+        }
+        let snapshot = h.bridge.admission.snapshot();
+        assert_eq!((snapshot.counts.models, snapshot.counts.waiting), (128, 0));
+        assert_eq!(gateway.held.load(Ordering::SeqCst), 128);
+
+        let started = std::time::Instant::now();
+        assert!(get(h.public, "/healthz", None).starts_with("HTTP/1.1 200 "));
+        assert!(get(h.public, "/v1/providers", Some(&h.public_token)).starts_with("HTTP/1.1 200 "));
+        assert!(post(h.native, "/native/acc/v1/credential/1/disable", &h.native_token, "").starts_with("HTTP/1.1 200 "));
+        assert!(get(h.native, "/native/acc/v1/healthz", None).starts_with("HTTP/1.1 200 "));
+        let status = serde_json::to_value(h.bridge.status()).unwrap();
+        assert!(started.elapsed() < Duration::from_secs(3), "control took {:?} with 128 held streams", started.elapsed());
+        assert_eq!(status["connections"]["public"]["longActive"], 128);
+        assert_eq!(status["connections"]["public"]["rejected"], 0);
+        assert!(status["connections"]["modelQueue"]["bodyBytes"].as_u64().unwrap() < 1 << 20, "held streams keep only their small gateway body");
+
+        gateway.release.store(true, Ordering::SeqCst);
+        for client in clients {
+            let response = client.join().unwrap();
+            assert!(response.starts_with("HTTP/1.1 200 ") && response.contains("\"done\""), "{response}");
+        }
+        assert_eq!(gateway.served.load(Ordering::SeqCst), 128, "no stream was retried or replayed upstream");
+        wait_idle(&h.bridge);
+        assert_eq!(h.bridge.admission.snapshot().body_bytes, 0);
+    }
+
+    /// 몫이 가득 찬 동안 인증된 요청은 본문을 읽거나 잡지 않고 기다리다가, 자리가 나지 않으면 구조화된 거절을 받는다.
+    /// 인증이 없는 요청은 기다리지 않고 곧바로 401이다. 기다리는 요청이 있어도 제어는 응답한다.
+    #[test]
+    fn a_queued_model_request_holds_no_body_and_unauthenticated_requests_never_wait() {
+        let h = harness_with(Duration::from_secs(10), admission::Config { model_wait: Duration::from_millis(900), ..admission::Config::default() });
+        let mut held = Vec::new();
+        while let Ok(mut permit) = h.bridge.admission.admit(admission::Scope::Public) {
+            if permit.promote().is_err() { break; }
+            held.push(permit);
+        }
+        assert_eq!(held.len(), h.bridge.admission.limits().models);
+        let waiting = {
+            let (address, token) = (h.public, h.public_token.clone());
+            std::thread::spawn(move || {
+                // 64 MiB를 선언만 하고 본문은 보내지 않는다. 몫을 얻기 전에는 읽지 않으므로 서버는 본문을 기다리지 않는다.
+                let head = format!("POST /v1/pi/stream HTTP/1.1\r\nHost: x\r\nAuthorization: Bearer {token}\r\nContent-Length: {}\r\nConnection: close\r\n\r\n", 64 << 20);
+                exchange(address, &head)
+            })
+        };
+        eventually("request queued", || h.bridge.admission.snapshot().counts.waiting == 1);
+        let during = h.bridge.admission.snapshot();
+        assert_eq!(during.body_bytes, 0, "a queued request must hold no body memory");
+        let started = std::time::Instant::now();
+        let unauthenticated = post(h.public, "/v1/pi/stream", "wrong-token", "{}");
+        assert!(unauthenticated.starts_with("HTTP/1.1 401 "), "{unauthenticated}");
+        assert!(started.elapsed() < Duration::from_millis(500), "unauthenticated requests must not wait for a slot");
+        assert_eq!(h.bridge.admission.snapshot().counts.waiting, 1, "unauthenticated requests never enter the queue");
+        assert!(get(h.public, "/healthz", None).starts_with("HTTP/1.1 200 "));
+        let timed_out = waiting.join().unwrap();
+        assert!(timed_out.starts_with("HTTP/1.1 503 ") && timed_out.contains("BRIDGE_QUEUE_TIMEOUT"), "{timed_out}");
+        let snapshot = h.bridge.admission.snapshot();
+        assert_eq!((snapshot.counts.waiting, snapshot.wait_timeouts, snapshot.body_bytes), (0, 1, 0));
+        let log = fs::read_to_string(h.home.join("logs/bridge.log")).unwrap();
+        assert!(log.contains("outcome=overload scope=public class=queue_timeout"), "{log}");
+        assert!(h.bridge.state().blocks.is_empty(), "queue timeout is not a provider limit");
+        // 자리가 돌아오면(과부하 회복) 같은 경로가 다시 받아들인다.
+        drop(held);
+        wait_idle_models(&h.bridge);
+        assert_eq!(h.bridge.admission.snapshot().counts.models, 0);
+    }
+
+    fn wait_idle_models(bridge: &Bridge) {
+        eventually("model slots returned", || bridge.admission.snapshot().counts.models == 0);
+    }
+
+    /// 합계 본문 예산: 선언 길이가 큰 요청 하나가 예산을 쥐면 다음 요청은 기다리다 `payload`로 거절되고, 예약은 연결이 끝나면 돌아온다.
+    #[test]
+    fn the_total_body_budget_refuses_extra_payload_and_returns_when_the_connection_ends() {
+        let budget = admission::Config::default().body_budget.min(512 << 20);
+        let config = admission::Config { model_wait: Duration::from_millis(400), body_budget: budget, ..admission::Config::default() };
+        let h = harness_with(Duration::from_secs(3), config);
+        let first = {
+            let (address, token) = (h.public, h.public_token.clone());
+            std::thread::spawn(move || {
+                let head = format!("POST /v1/pi/stream HTTP/1.1\r\nHost: x\r\nAuthorization: Bearer {token}\r\nContent-Length: {}\r\nConnection: close\r\n\r\n", 64 << 20);
+                // 본문을 보내지 않고 연결을 붙잡는다.
+                let mut client = TcpStream::connect(address).unwrap();
+                client.set_read_timeout(Some(Duration::from_secs(10))).unwrap();
+                client.write_all(head.as_bytes()).unwrap();
+                let mut response = String::new();
+                let _ = client.read_to_string(&mut response);
+                response
+            })
+        };
+        eventually("budget reserved", || h.bridge.admission.snapshot().body_bytes == 512 << 20);
+        let refused = post(h.public, "/v1/pi/stream", &h.public_token, "{}");
+        assert!(refused.starts_with("HTTP/1.1 503 ") && refused.contains("BRIDGE_BUSY"), "{refused}");
+        let log = fs::read_to_string(h.home.join("logs/bridge.log")).unwrap();
+        assert!(log.contains("class=payload"), "{log}");
+        assert!(get(h.public, "/healthz", None).starts_with("HTTP/1.1 200 "));
+        // 본문 수신 마감(3초)이 지나면 첫 연결은 400으로 끝나고 예약이 돌아온다.
+        let response = first.join().unwrap();
+        assert!(response.starts_with("HTTP/1.1 400 "), "{response}");
+        wait_idle(&h.bridge);
+        assert_eq!(h.bridge.admission.snapshot().body_bytes, 0);
+    }
 
 }
 

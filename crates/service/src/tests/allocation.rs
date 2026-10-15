@@ -769,3 +769,103 @@ fn quota_block_with_stale_usage_is_not_mislabeled_as_rate_limiting() {
         blocks.reverse();
     }
 }
+
+#[test]
+fn missing_quota_is_explained_as_pending_observation_without_leaking_account_details() {
+    let fixture = Fixture::new();
+    let now = now_ms();
+    let mut account = account_fixture("fresh-login", now);
+    account.email = Some("person@example.test".into());
+    account.buckets.clear();
+    fixture.save(&account);
+    let error = fixture.service.acquire(request("quota-pending"), now).unwrap_err();
+    assert_eq!(error.code, "NO_ELIGIBLE_ACCOUNT");
+    assert!(error.message.contains("QUOTA_UNKNOWN"), "{}", error.message);
+    assert!(error.retryable, "a missing observation can change after a refresh");
+    assert!(!error.message.contains("person@example.test"));
+    // 한도가 아니라 로그인 문제라면 다시 시도해도 같다.
+    account.buckets = vec![bucket("weekly", None, 30.0, now + 86_400_000, now)];
+    account.auth_status = "auth-required".into();
+    fixture.save(&account);
+    let error = fixture.service.acquire(request("login-needed"), now).unwrap_err();
+    assert!(error.message.contains("AUTH_REQUIRED"), "{}", error.message);
+    assert!(!error.retryable);
+}
+
+#[test]
+fn candidate_exclusion_codes_skip_eligible_guidance_and_model_notes() {
+    let candidate = Candidate {
+        account_id: "a".into(),
+        eligible: false,
+        score: None,
+        reasons: vec![
+            "QUOTA_STALE: 오래됐어요".into(),
+            "CAPACITY_RESERVED: 자리".into(),
+            "MODEL_LIMIT_GUARD: 안내".into(),
+            "모델은 공식 CLI의 기존 설정을 유지해요. 공통 한도로: 안내".into(),
+        ],
+    };
+    let mut codes: Vec<&str> = candidate.exclusion_codes().collect();
+    codes.sort_unstable();
+    assert_eq!(codes, vec!["CAPACITY_RESERVED", "QUOTA_STALE"]);
+    let eligible = Candidate { eligible: true, ..candidate };
+    assert_eq!(eligible.exclusion_codes().count(), 0);
+}
+
+#[test]
+fn refresh_wait_follows_the_scheduler_decision_not_a_copy_of_its_rules() {
+    let fixture = Fixture::new();
+    let now = now_ms();
+    let configured = scheduler::Configured::new();
+    // 새 로그인(한도 미확인)과 소진된 known 계정: 선택 가능한 계정이 없으므로 조회를 기다린다.
+    let mut exhausted = account_fixture("exhausted", now);
+    exhausted.buckets[0].used_percent = Some(100.0);
+    exhausted.buckets[0].status = "exhausted".into();
+    let mut fresh = account_fixture("fresh-login", now);
+    fresh.buckets.clear();
+    fixture.save(&exhausted);
+    fixture.save(&fresh);
+    let plan = fixture.service.refresh_plan("exhausted-and-new", Some(&(intent(), None)), &configured).unwrap();
+    assert!(plan.wait && plan.probe, "{plan:?}");
+    // 슬롯을 다 쓴 계정도 같다.
+    let mut roomy = account_fixture("roomy", now);
+    roomy.buckets = vec![bucket("weekly", None, 10.0, now + 86_400_000, now)];
+    fixture.save(&roomy);
+    fixture.service.acquire(request("take-the-slot"), now).unwrap();
+    let busy = fixture.service.refresh_plan("busy-and-new", Some(&(intent(), None)), &configured).unwrap();
+    assert!(busy.wait, "{busy:?}");
+    // 진짜로 받을 수 있는 계정이 하나 더 생기면 미확인 계정을 기다리지 않는다.
+    let mut spare = account_fixture("spare", now);
+    spare.buckets = vec![bucket("weekly", None, 5.0, now + 86_400_000, now)];
+    fixture.save(&spare);
+    let ready = fixture.service.refresh_plan("spare-is-ready", Some(&(intent(), None)), &configured).unwrap();
+    assert!(!ready.wait && !ready.probe, "{ready:?}");
+}
+
+#[test]
+fn resume_waits_for_the_original_accounts_stale_quota_but_keeps_resume_rules() {
+    let fixture = Fixture::new();
+    let now = now_ms();
+    let configured = scheduler::Configured::new();
+    let account = account_fixture("original", now);
+    fixture.save(&account);
+    let grant = fixture.service.acquire(request("first"), now).unwrap();
+    let native = grant.session.native_session_id.clone().unwrap();
+    fixture.service.finish(abort(&grant), true, now).unwrap();
+    // 저장된 원래 계정이 소진으로 기록됐고 그 리셋 시각이 이미 지났다. 새 조회가 있어야 회복 여부를 안다.
+    let mut stale = account.clone();
+    stale.buckets[0].status = "exhausted".into();
+    stale.buckets[0].used_percent = Some(100.0);
+    stale.buckets[0].resets_at = Some(now - 1_000);
+    fixture.save(&stale);
+    let mut resume = request("resume");
+    resume.intent.resume_session_id = Some(native);
+    let planning = fixture.service.planning(&resume).unwrap().expect("resume of a known conversation is planned");
+    assert_eq!(planning.1.as_deref(), Some("original"));
+    let plan = fixture.service.refresh_plan("resume", Some(&planning), &configured).unwrap();
+    assert!(plan.wait, "the first resume must wait for the original account to recover: {plan:?}");
+    // 알 수 없는 대화는 기다리지 않고 배정이 RESUME_UNKNOWN을 낸다.
+    let mut unknown = request("unknown-resume");
+    unknown.intent.resume_session_id = Some(uuid::Uuid::new_v4().to_string());
+    assert!(fixture.service.planning(&unknown).unwrap().is_none());
+}

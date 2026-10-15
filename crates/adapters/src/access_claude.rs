@@ -1,9 +1,9 @@
-use super::NativeAccess;
+use super::{ensure_deadline, NativeAccess};
 use aam_protocol::{now_ms, Account, ApiError};
 use serde::Deserialize;
 #[cfg(target_os = "macos")]
 use sha2::{Digest, Sha256};
-use std::{io::Read, path::Path};
+use std::{io::Read, path::Path, time::Instant};
 #[cfg(target_os = "macos")]
 use unicode_normalization::UnicodeNormalization;
 
@@ -78,7 +78,8 @@ fn service_name(config_dir: Option<&str>) -> String {
     }
 }
 
-fn read(profile: &Path) -> Result<NativeAccess, ApiError> {
+fn read(profile: &Path, deadline: Instant) -> Result<NativeAccess, ApiError> {
+    ensure_deadline(deadline)?;
     #[cfg(target_os = "macos")]
     {
         let env = crate::native::profile_env("claude", profile);
@@ -86,11 +87,12 @@ fn read(profile: &Path) -> Result<NativeAccess, ApiError> {
         let user = match std::env::var("USER") {
             Ok(user) => user,
             Err(_) => {
-                let (status, bytes) = crate::process::Probe::spawn(
+                let (status, bytes) = crate::process::Probe::spawn_until(
                     Path::new("/usr/bin/id"),
                     &["-un"],
                     &env,
                     profile,
+                    deadline,
                 )?
                 .output_bytes()?;
                 if !status.success() {
@@ -119,11 +121,12 @@ fn read(profile: &Path) -> Result<NativeAccess, ApiError> {
         } else {
             "claude-code-user"
         };
-        let (status, bytes) = crate::process::Probe::spawn(
+        let (status, bytes) = crate::process::Probe::spawn_until(
             Path::new("/usr/bin/security"),
             &["find-generic-password", "-a", user, "-w", "-s", &service],
             &env,
             profile,
+            deadline,
         )?
         .output_bytes()?;
         if status.success() {
@@ -138,10 +141,19 @@ fn read(profile: &Path) -> Result<NativeAccess, ApiError> {
             ));
         }
     }
-    file(profile)
+    let access = file(profile)?;
+    ensure_deadline(deadline)?;
+    Ok(access)
 }
 
-pub(super) fn load(account: &Account, refresh: bool) -> Result<NativeAccess, ApiError> {
+pub(super) fn load(
+    account: &Account,
+    refresh: bool,
+    deadline: Instant,
+    stage: &mut dyn FnMut(&'static str),
+) -> Result<NativeAccess, ApiError> {
+    stage("auth-context");
+    ensure_deadline(deadline)?;
     if [
         "CLAUDE_SECURESTORAGE_CONFIG_DIR",
         "CLAUDE_CODE_CUSTOM_OAUTH_URL",
@@ -156,6 +168,7 @@ pub(super) fn load(account: &Account, refresh: bool) -> Result<NativeAccess, Api
             "Claude 인증 저장소나 OAuth 대상을 바꾸는 환경 설정이 있어 연결을 멈췄어요.",
         ));
     }
+    stage("credential-read");
     let profile = Path::new(
         account
             .profile_path
@@ -164,10 +177,11 @@ pub(super) fn load(account: &Account, refresh: bool) -> Result<NativeAccess, Api
     )
     .canonicalize()
     .map_err(|_| ApiError::new("PROFILE_UNVERIFIED", "Claude 프로필을 확인하지 못했어요."))?;
-    let access = read(&profile)?;
+    let access = read(&profile, deadline)?;
     if !refresh && access.expires > now_ms() + 60_000 {
         return Ok(access);
     }
+    stage("cli-refresh");
     let binary = crate::process::executable(Path::new(
         account
             .binary_path
@@ -177,7 +191,7 @@ pub(super) fn load(account: &Account, refresh: bool) -> Result<NativeAccess, Api
     // The native /usage command calls the authenticated usage API with
     // refreshOAuth enabled and the CLI's cross-process OAuth refresh lock.
     // No inference, tools, hooks, or third-party refresh-token writer.
-    let value = crate::process::run_json(
+    let value = crate::process::run_json_until(
         &binary,
         &[
             "-p",
@@ -192,14 +206,25 @@ pub(super) fn load(account: &Account, refresh: bool) -> Result<NativeAccess, Api
         ],
         &crate::native::profile_env("claude", &profile),
         &profile,
+        deadline,
     )?;
-    if value["is_error"] == true || value["num_turns"].as_u64() != Some(0) {
+    // 신원 확인(공식 `auth status`)을 통과한 직후이므로 로그인 자체가 없는 경우가 아니다. CLI가 구조화된 오류 응답을 줬지만
+    // 응답에는 원인이 없으므로 로그인 거절로 단정하지 않는다. 호출자가 오류를 일시 실패로 다룬다.
+    if value["is_error"] == true {
         return Err(ApiError::new(
             "NATIVE_AUTH_UNAVAILABLE",
-            "Claude의 공식 인증 갱신을 확인하지 못했어요.",
+            "Claude 공식 CLI가 인증 갱신 확인에 오류로 응답했어요.",
         ));
     }
-    let renewed = read(&profile)?;
+    // `/usage`는 모델을 부르지 않는 로컬 명령(num_turns=0)이어야 한다. 아니면 응답 형식을 믿지 않고 멈춘다.
+    if value["num_turns"].as_u64() != Some(0) {
+        return Err(ApiError::new(
+            "NATIVE_REFRESH_UNEXPECTED",
+            "Claude 공식 CLI의 인증 갱신 응답이 예상한 형식이 아니에요. CLI 버전을 확인해 주세요.",
+        ));
+    }
+    stage("credential-reread");
+    let renewed = read(&profile, deadline)?;
     if renewed.expires <= now_ms() {
         return Err(ApiError::new(
             "AUTH_REQUIRED",

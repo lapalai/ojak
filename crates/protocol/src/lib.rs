@@ -127,7 +127,7 @@ impl Paths {
     }
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize, Default)]
+#[derive(Debug, Clone, Serialize, Deserialize, Default, PartialEq)]
 #[serde(rename_all = "camelCase")]
 pub struct QuotaBucket {
     pub id: String,
@@ -197,7 +197,7 @@ pub struct OmpCredentialPin {
     pub provider: String,
     pub hash: String,
 }
-#[derive(Debug, Clone, Serialize, Deserialize, Default)]
+#[derive(Debug, Clone, Serialize, Deserialize, Default, PartialEq)]
 #[serde(rename_all = "camelCase")]
 pub struct Account {
     pub id: String,
@@ -590,6 +590,18 @@ pub struct Candidate {
     pub eligible: bool,
     pub score: Option<f64>,
     pub reasons: Vec<String>,
+}
+impl Candidate {
+    /// 제외된 후보가 가진 사유 코드(`CODE: 설명`의 CODE)를 빌려 온 조각으로 돌려준다(중복·정렬 없음).
+    /// 적격 후보의 안내 문장과 모델 한도·여유량 안내(`MODEL_LIMIT_*`, `RESERVE_*`)는 배정을 막는 사유가 아니므로 넣지 않는다.
+    pub fn exclusion_codes(&self) -> impl Iterator<Item = &str> {
+        self.reasons
+            .iter()
+            .filter(|_| !self.eligible)
+            .filter_map(|reason| reason.split_once(':').map(|(code, _)| code))
+            .filter(|code| !code.is_empty() && code.bytes().all(|byte| byte.is_ascii_uppercase() || byte == b'_'))
+            .filter(|code| !code.starts_with("MODEL_LIMIT") && !code.starts_with("RESERVE_"))
+    }
 }
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]

@@ -3,6 +3,7 @@ mod diagnostics;
 mod managed_sessions;
 mod process;
 mod quota_summary;
+mod readiness;
 mod routes;
 pub mod scheduler;
 mod server;
@@ -17,7 +18,7 @@ pub use server::run;
 use std::{
     collections::BTreeMap,
     sync::{
-        atomic::{AtomicBool, Ordering},
+        atomic::{AtomicBool, AtomicI64, Ordering},
         Arc, Mutex, MutexGuard, OnceLock,
     },
     time::{Duration, Instant},
@@ -69,6 +70,8 @@ pub struct Service {
     paths: Paths,
     store: Mutex<Store>,
     refreshing: AtomicBool,
+    /// 마지막으로 배정 요청이 계정·한도 미확인 때문에 조회를 시작한 시각(ms). 전체 조회 시각과 별개이며 저장하지 않는다.
+    last_probe_at: AtomicI64,
     started_at: i64,
     prepared_ms: i64,
     suspect_ms: i64,
@@ -212,6 +215,37 @@ fn value<T: Serialize>(result: T) -> Result<Value, ApiError> {
     serde_json::to_value(result)
         .map_err(|_| ApiError::new("STATE_INVALID", "응답을 만들지 못했어요."))
 }
+
+/// 조회 시작 때 읽은 행(`original`)이 저장된 최신 행(`stored`)과 같은 등록·검증 상태인지 본다.
+/// 다르면 사용자 재등록이나 다른 갱신이 끼어든 것이므로 낡은 기준의 결과를 덮어쓰지 않는다.
+fn scan_baseline_matches(original: &Account, stored: &Account) -> bool {
+    original.identity_key == stored.identity_key
+        && original.profile_path == stored.profile_path
+        && original.auth_status == stored.auth_status
+        && original.can_launch == stored.can_launch
+        && original.verification == stored.verification
+        && original.last_checked_at == stored.last_checked_at
+}
+/// 조회 중 저장된 진행 결과만 다음 비교의 기준으로 쓰고, 사용자 재등록은 덮지 않는다.
+fn merge_scan_account(incoming: &mut Account, previous: Option<&Account>, original: Option<&Account>) -> bool {
+    let Some(previous) = previous else { return original.is_none() };
+    let Some(original) = original else { return false };
+    if !scan_baseline_matches(original, previous) {
+        return false;
+    }
+    incoming.enabled = previous.enabled;
+    incoming.max_concurrency = previous.max_concurrency;
+    if !incoming.label.starts_with(&previous.label) {
+        incoming.label = previous.label.clone();
+    }
+    if previous.identity_key.is_some() && previous.identity_key != incoming.identity_key {
+        incoming.identity_key = previous.identity_key.clone();
+        incoming.can_launch = false;
+        incoming.verification = "observed".into();
+        incoming.reason = Some("등록된 프로필의 identity 변경을 감지했습니다. 활성 세션을 유지하고 새 배정을 차단합니다.".into());
+    }
+    true
+}
 fn config_ms(name: &str, default: i64, min: i64, max: i64) -> i64 {
     std::env::var(name)
         .ok()
@@ -273,7 +307,7 @@ fn terminal(session: &Session) -> bool {
     !scheduler::holds_capacity(&session.state)
 }
 fn expire(connection: &rusqlite::Connection, now: i64) -> Result<(), ApiError> {
-    for mut record in leases(connection)? {
+    for mut record in prepared_leases(connection)? {
         if record.session.state == "PREPARED" && now >= record.expires_at {
             record.session.state = "ABORTED".into();
             record.session.reason =
@@ -292,6 +326,7 @@ impl Service {
             paths,
             store: Mutex::new(store),
             refreshing: AtomicBool::new(false),
+            last_probe_at: AtomicI64::new(0),
             started_at: now_ms(),
             prepared_ms: config_ms("AAM_PREPARED_TIMEOUT_MS", 30_000, 1_000, 300_000),
             suspect_ms: config_ms("AAM_SUSPECT_THRESHOLD_MS", 45_000, 10_000, 600_000),
@@ -327,10 +362,21 @@ impl Service {
     ) -> Result<Snapshot, ApiError> {
         // Bridge는 서비스 DB도 사용한다. 두 잠금을 동시에 잡지 않는다.
         let bridge = self.bridge.get().map(|bridge| bridge.status());
-        let store = self.lock()?;
-        let policy = policy(&store.connection)?;
+        // DB 사실은 한 번의 잠금 안에서 일관되게 읽고, 잠금을 놓은 뒤에 변환·중복 제거·요약을 수행한다.
+        let (policy, mut accounts, sessions, mut notices, uninstalling, stored_takeovers, tools, last_refresh_at) = {
+            let store = self.lock()?;
+            (
+                policy(&store.connection)?,
+                accounts(&store.connection)?,
+                snapshot_sessions(&store.connection, 200)?,
+                notices(&store.connection)?,
+                metadata::<Option<String>>(&store.connection, "uninstallPermit")?.flatten().is_some(),
+                takeovers(&store.connection)?,
+                tools(&store.connection)?,
+                metadata(&store.connection, "lastRefreshAt")?,
+            )
+        };
         let now = now_ms();
-        let mut accounts = accounts(&store.connection)?;
         for account in &mut accounts {
             for bucket in &mut account.buckets {
                 if bucket.status == "known"
@@ -346,22 +392,6 @@ impl Service {
                 }
             }
         }
-        let mut sessions: Vec<Session> = leases(&store.connection)?
-            .into_iter()
-            .map(|record| record.session)
-            .collect();
-        sessions.sort_by_key(|session| std::cmp::Reverse(session.updated_at));
-        // 활성 세션은 모두 보여주고 종료 이력만 최근 200개로 제한합니다.
-        let mut history = 0;
-        sessions.retain(|session| {
-            if scheduler::holds_capacity(&session.state) {
-                true
-            } else {
-                history += 1;
-                history <= 200
-            }
-        });
-        let mut notices = notices(&store.connection)?;
         // 동일 PID만으로 합치지 않으며 관측값은 저장하거나 예약 용량에 넣지 않습니다.
         observed.sessions.retain(|observed| {
             !sessions.iter().any(|managed| {
@@ -374,14 +404,11 @@ impl Service {
             })
         });
         notices.extend(observed.notices);
-        if metadata::<Option<String>>(&store.connection, "uninstallPermit")?
-            .flatten()
-            .is_some()
-        {
+        if uninstalling {
             notices.push(Notice { id: "admission-disabled".into(), level: "warning".into(), title: "서비스 해제 준비 중".into(), message: "새 배정을 잠시 멈췄어요. 해제를 취소하거나 서비스를 다시 설치하면 다시 열려요.".into() });
         }
         // 이미 관리 세션이 생긴 인계 기록은 화면에서 제외합니다.
-        let adopted: Vec<Takeover> = takeovers(&store.connection)?
+        let adopted: Vec<Takeover> = stored_takeovers
             .into_iter()
             .filter(|record| {
                 !sessions.iter().any(|session| {
@@ -397,13 +424,13 @@ impl Service {
             generated_at: now,
             service_started_at: self.started_at,
             accounts,
-            tools: tools(&store.connection)?,
+            tools,
             sessions,
             observed_sessions: observed.sessions,
             policy,
             notices,
             refreshing: self.refreshing.load(Ordering::Acquire),
-            last_refresh_at: metadata(&store.connection, "lastRefreshAt")?,
+            last_refresh_at,
             takeovers: adopted,
             quota_summaries,
             service_version: Some(env!("CARGO_PKG_VERSION").to_owned()),
@@ -417,7 +444,11 @@ impl Service {
             "quota.refresh" => {
                 // 사용자가 직접 누른 새로고침만 omp의 5분 보고 캐시를 건너뛴다. 정기 조회는 캐시를 존중한다.
                 self.start_refresh_with(params.get("force").and_then(Value::as_bool).unwrap_or(false));
-                value(self.snapshot()?)
+                value(if params.get("observe").and_then(Value::as_bool) == Some(false) {
+                    self.stored_snapshot()?
+                } else {
+                    self.snapshot()?
+                })
             }
             "service.prepareUninstall" => self.prepare_uninstall(),
             "service.cancelUninstall" => self.cancel_uninstall(params),
@@ -476,35 +507,23 @@ impl Service {
             "lease.acquire" => {
                 let request: Acquire = parse(params)?;
                 validate_intent(&request.intent)?;
-                let needs_refresh = {
-                    let store = self.lock()?;
-                    let policy = policy(&store.connection)?;
-                    let now = now_ms();
-                    by_request(&store.connection, &request.request_id)?.is_none()
-                        && (metadata::<i64>(&store.connection, "lastRefreshAt")?.is_none()
-                            || accounts(&store.connection)?
-                                .iter()
-                                .filter(|account| {
-                                    account.tool == request.intent.tool && account.can_launch
-                                })
-                                .any(|account| {
-                                    account.buckets.iter().any(|bucket| {
-                                        bucket.status == "stale"
-                                            || now.saturating_sub(bucket.observed_at)
-                                                > policy
-                                                    .stale_after_seconds
-                                                    .saturating_mul(1000)
-                                                    .min(i64::MAX as u64)
-                                                    as i64
-                                            || bucket.resets_at.is_some_and(|reset| reset <= now)
-                                    })
-                                }))
-                };
-                if needs_refresh {
+                let configured = self.configured_for(&request.intent)?;
+                let planning = self.planning(&request)?;
+                let refresh = self.refresh_plan(&request.request_id, planning.as_ref(), &configured)?;
+                if refresh.start {
+                    if refresh.probe {
+                        self.last_probe_at.store(now_ms(), Ordering::Release);
+                    }
                     self.start_refresh();
+                }
+                if refresh.wait {
+                    // 스케줄러가 이 요청에 계정을 고를 수 있게 되면 다른 공급자의 느린 조회를 기다리지 않는다. 상한은 20초다.
                     let deadline = Instant::now() + Duration::from_secs(20);
-                    while self.refreshing.load(Ordering::Acquire) && Instant::now() < deadline {
-                        std::thread::sleep(Duration::from_millis(50));
+                    while self.refreshing.load(Ordering::Acquire)
+                        && Instant::now() < deadline
+                        && self.refresh_plan(&request.request_id, planning.as_ref(), &configured)?.wait
+                    {
+                        std::thread::sleep(Duration::from_millis(100));
                     }
                 }
                 value(self.acquire(request, now_ms())?)
@@ -913,6 +932,63 @@ impl Service {
         tx.commit().map_err(db_error)?;
         Ok(registered)
     }
+    /// 조회 계획에 쓸 의도와 고정 계정. 이어 가기·인계는 원래 계정에 묶이므로 `normalize_resume`/`routes::resolve`로 그 계정을 구한다
+    /// (원래 세션 기록은 이때 한 번만 읽는다). 판단할 수 없으면 `None`이라 기다리지 않고 배정이 정확한 오류를 낸다.
+    fn planning(&self, request: &Acquire) -> Result<Option<(LaunchIntent, Option<String>)>, ApiError> {
+        let mut intent = request.intent.clone();
+        if intent.resume_session_id.is_none() {
+            let pin = intent.account_id.clone();
+            return Ok(Some((intent, pin)));
+        }
+        let store = self.lock()?;
+        if by_request(&store.connection, &request.request_id)?.is_some() {
+            return Ok(None);
+        }
+        let sessions: Vec<_> = leases(&store.connection)?.into_iter().map(|record| record.session).collect();
+        let accounts = accounts(&store.connection)?;
+        let policy = policy(&store.connection)?;
+        if self
+            .normalize_resume(&mut intent, &sessions, &accounts, &takeovers(&store.connection)?, policy.auto_takeover)
+            .is_err()
+        {
+            return Ok(None);
+        }
+        let Ok(resolution) = routes::resolve(&accounts, &sessions, &policy, &intent) else {
+            return Ok(None);
+        };
+        Ok(Some((intent, resolution.account_id)))
+    }
+    /// 조회를 시작·대기할지 정한다. 선택 가능 여부는 배정과 같은 `scheduler::decide_with`로 구한다.
+    /// 새 배정은 용량을 쥔 세션만 필요하므로 종료 이력은 읽지 않는다. 이어 가기는 원래 기록이 필요해 전체 세션을 읽는다.
+    fn refresh_plan(&self, request_id: &str, planning: Option<&(LaunchIntent, Option<String>)>, configured: &scheduler::Configured) -> Result<readiness::RefreshPlan, ApiError> {
+        let Some((intent, pin)) = planning else { return Ok(readiness::RefreshPlan::default()) };
+        let store = self.lock()?;
+        if by_request(&store.connection, request_id)?.is_some() {
+            return Ok(readiness::RefreshPlan::default());
+        }
+        let accounts = accounts(&store.connection)?;
+        let policy = policy(&store.connection)?;
+        let now = now_ms();
+        let sessions = if intent.resume_session_id.is_some() {
+            leases(&store.connection)?.into_iter().map(|record| record.session).collect()
+        } else {
+            snapshot_sessions(&store.connection, 0)?
+        };
+        let selectable = scheduler::decide_with(&accounts, &sessions, &policy, intent, now, configured)
+            .ok()
+            .map(|decision| decision.selected_account_id.is_some());
+        Ok(readiness::plan(
+            &accounts,
+            &policy,
+            &intent.tool,
+            pin.as_deref(),
+            selectable,
+            metadata::<i64>(&store.connection, "lastRefreshAt")?,
+            self.last_probe_at.load(Ordering::Acquire),
+            self.refreshing.load(Ordering::Acquire),
+            now,
+        ))
+    }
     fn acquire(&self, mut request: Acquire, now: i64) -> Result<LeaseGrant, ApiError> {
         validate_intent(&request.intent)?;
         if !safe_id(&request.request_id) || !safe_id(&request.client_instance_id) {
@@ -1018,7 +1094,22 @@ impl Service {
                 .and_then(|reason| reason.split_once(':'))
                 .map(|(code, _)| code)
                 .unwrap_or("NO_ELIGIBLE_ACCOUNT");
-            return Err(ApiError::new(code, format!("배정할 수 있는 계정이 없어요. aam explain --tool {}로 제외 이유를 확인해 주세요.", request.intent.tool)));
+            // 코드는 지정 계정의 첫 사유를 따르고, 없으면 NO_ELIGIBLE_ACCOUNT를 유지한다(실행기의 원본 통과 판단이 이 코드에 의존한다).
+            // 메시지에는 제외 사유 코드만 덧붙인다. 설명 문장·계정 정보는 넣지 않는다.
+            let mut codes: Vec<&str> = decision.candidates.iter().flat_map(Candidate::exclusion_codes).collect();
+            codes.sort_unstable();
+            codes.dedup();
+            let observing = codes.iter().any(|code| matches!(*code, "QUOTA_UNKNOWN" | "QUOTA_STALE" | "RESET_UNCONFIRMED"))
+                || decision.candidates.is_empty();
+            let detail = if decision.candidates.is_empty() {
+                format!("이 도구로 쓸 수 있는 계정이 아직 없어요. 처음 계정을 찾는 중이거나 공식 CLI 로그인이 필요해요. aam explain --tool {}로 확인해 주세요.", request.intent.tool)
+            } else {
+                format!("배정할 수 있는 계정이 없어요 (제외 사유: {}). aam explain --tool {}로 제외 이유를 확인해 주세요.", codes.join(", "), request.intent.tool)
+            };
+            let mut error = ApiError::new(code, detail);
+            // 조회가 진행 중이거나 한도를 새로 받으면 달라질 수 있는 경우만 다시 시도할 수 있다고 알린다. 인증·제외·용량 사유는 그대로다.
+            error.retryable = observing && (self.refreshing.load(Ordering::Acquire) || codes.iter().all(|code| matches!(*code, "QUOTA_UNKNOWN" | "QUOTA_STALE" | "RESET_UNCONFIRMED")));
+            return Err(error);
         };
         let manual = resolution.account_id.is_some();
         let id = new_id();
@@ -1497,12 +1588,50 @@ impl Service {
         });
     }
     fn refresh_inner(&self, force: bool) -> Result<(), ApiError> {
-        let before = {
+        let mut before = {
             let store = self.lock()?;
             accounts(&store.connection)?
         };
-        let scan = aam_adapters::scan(&self.paths, &before, force)?;
+        let mut published: Vec<Account> = Vec::new();
+        let scan = aam_adapters::scan(&self.paths, &before, force,
+            || bridge::account_inventory(&before), |incoming| {
+            let original = published.iter().find(|account| account.id == incoming.id)
+                .or_else(|| before.iter().find(|account| account.id == incoming.id));
+            if let Some(saved) = self.publish_account(original, incoming)? {
+                if let Some(previous) = published.iter_mut().find(|account| account.id == saved.id) {
+                    *previous = saved;
+                } else {
+                    published.push(saved);
+                }
+            }
+            Ok(())
+        })?;
+        for saved in published {
+            if let Some(previous) = before.iter_mut().find(|account| account.id == saved.id) {
+                *previous = saved;
+            } else {
+                before.push(saved);
+            }
+        }
         self.apply_scan(before, scan)
+    }
+
+    fn publish_account(&self, original: Option<&Account>, incoming: &Account) -> Result<Option<Account>, ApiError> {
+        let mut store = self.lock()?;
+        let tx = store.connection.transaction_with_behavior(TransactionBehavior::Immediate).map_err(db_error)?;
+        let previous = match account(&tx, &incoming.id) {
+            Ok(account) => Some(account),
+            Err(error) if error.code == "ACCOUNT_NOT_FOUND" => None,
+            Err(error) => return Err(error),
+        };
+        let mut incoming = incoming.clone();
+        if !merge_scan_account(&mut incoming, previous.as_ref(), original) {
+            return Ok(None);
+        }
+        if previous.as_ref() == Some(&incoming) { return Ok(Some(incoming)); }
+        save_account(&tx, &incoming)?;
+        tx.commit().map_err(db_error)?;
+        Ok(Some(incoming))
     }
 
     fn apply_scan(
@@ -1523,35 +1652,13 @@ impl Service {
         let current = accounts(&tx)?;
         for mut incoming in scan.accounts {
             let previous = current.iter().find(|account| account.id == incoming.id);
-            if let Some(previous) = previous {
-                incoming.enabled = previous.enabled;
-                incoming.max_concurrency = previous.max_concurrency;
-                // 자동 생성 라벨에는 확인된 이메일 표시를 덧붙이고, 사용자가 바꾼 이름은 유지합니다.
-                if !incoming.label.starts_with(&previous.label) {
-                    incoming.label = previous.label.clone();
-                }
-                if previous.identity_key.is_some() && previous.identity_key != incoming.identity_key
-                {
-                    incoming.identity_key = previous.identity_key.clone();
-                    incoming.can_launch = false;
-                    incoming.verification = "observed".into();
-                    incoming.reason = Some("등록된 프로필의 identity 변경을 감지했습니다. 활성 세션을 유지하고 새 배정을 차단합니다.".into());
-                }
-                // 진행 중 사용자 등록/검증이 바뀌었다면 오래된 스캔으로 덮지 않습니다.
-                if before
-                    .iter()
-                    .find(|account| account.id == previous.id)
-                    .is_some_and(|original| {
-                        original.identity_key != previous.identity_key
-                            || original.profile_path != previous.profile_path
-                            || original.auth_status != previous.auth_status
-                            || original.can_launch != previous.can_launch
-                            || original.verification != previous.verification
-                            || original.last_checked_at != previous.last_checked_at
-                    })
-                {
-                    continue;
-                }
+            let original = before.iter().find(|account| account.id == incoming.id);
+            if !merge_scan_account(&mut incoming, previous, original) {
+                continue;
+            }
+            // 사용자 설정을 보존한 결과가 저장된 최신 행과 같으면 쓰지 않는다(동기 FULL 커밋은 그대로 유지).
+            if previous == Some(&incoming) {
+                continue;
             }
             save_account(&tx, &incoming)?;
         }
@@ -1561,9 +1668,21 @@ impl Service {
         for mut previous in current {
             // native binding에 명시적으로 통합된 읽기 전용 관측과, 실행 어댑터가 제거된 도구(grok·agy)의
             // 행만 제거하고 세션 이력은 보존합니다.
+            let original = before.iter().find(|account| account.id == previous.id);
             let obsolete = matches!(previous.tool.as_str(), "grok" | "agy")
                 || (previous.tool == "omp" && scan.merged_observation_ids.contains(&previous.id));
             if obsolete {
+                // omp 병합 관측은 어댑터가 조회 시작 때의 행을 기준으로 골랐다. 그 뒤 사용자가 제외·동시 실행 수를
+                // 바꾸거나 재등록했다면 최신 행이므로 지우지도, 낡은 기준으로 덮지도 않는다.
+                if previous.tool == "omp"
+                    && !original.is_some_and(|original| {
+                        scan_baseline_matches(original, &previous)
+                            && previous.enabled
+                            && previous.max_concurrency == original.max_concurrency
+                    })
+                {
+                    continue;
+                }
                 let removed = tx.execute(
                     "DELETE FROM accounts WHERE id=?1 AND NOT EXISTS (SELECT 1 FROM leases WHERE account_id=?1)",
                     [&previous.id],
@@ -1573,11 +1692,13 @@ impl Service {
                     continue;
                 }
             }
-            if !found_ids.contains(&previous.id) && before.iter().any(|old| old.id == previous.id) {
+            if !found_ids.contains(&previous.id) && original.is_some_and(|original| scan_baseline_matches(original, &previous)) {
                 previous.can_launch = false;
-                previous.auth_status = "unverified".into();
+                if !matches!(previous.auth_status.as_str(), "auth-required" | "error") {
+                    previous.auth_status = "unverified".into();
+                    previous.reason = Some("마지막 조회에서 이 identity가 관측되지 않았습니다. 이전 사용량은 오래된 자료로만 보존합니다.".into());
+                }
                 previous.verification = "observed".into();
-                previous.reason = Some("마지막 조회에서 이 identity가 관측되지 않았습니다. 이전 사용량은 오래된 자료로만 보존합니다.".into());
                 for bucket in &mut previous.buckets {
                     bucket.status = "stale".into();
                 }
@@ -1605,7 +1726,7 @@ impl Service {
     pub fn reconcile(&self, restarting: bool) -> Result<(), ApiError> {
         let records = {
             let store = self.lock()?;
-            leases(&store.connection)?
+            capacity_leases(&store.connection)?
         };
         // 할 일이 있는 임대가 없으면(용량을 쥔 세션도, 만료될 예약도 없음) 2초마다 쓰기 트랜잭션을 열지 않는다.
         // 바꿀 임대가 없으므로 "불확실하면 유지" 규칙과 무관하다.

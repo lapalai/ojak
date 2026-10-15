@@ -322,6 +322,22 @@ impl Probe {
         })
     }
 
+    /// 여러 공식 CLI 호출이 하나의 작업 deadline을 공유한다. 이미 만료됐으면 자식을 시작하지 않는다.
+    pub(crate) fn spawn_until(
+        program: &Path,
+        args: &[&str],
+        env: &BTreeMap<String, String>,
+        cwd: &Path,
+        deadline: Instant,
+    ) -> Result<Self, ApiError> {
+        if Instant::now() >= deadline {
+            return Err(ApiError::new("PROBE_TIMEOUT", "공식 CLI 조회 작업의 제한 시간이 지났어요."));
+        }
+        let mut probe = Self::spawn(program, args, env, cwd)?;
+        probe.deadline = probe.deadline.min(deadline);
+        Ok(probe)
+    }
+
     /// 한 번 읽는다. 아직 데이터가 없으면 Ok(None).
     fn read_chunk(&mut self, bytes: &mut [u8; 8192]) -> std::io::Result<Option<usize>> {
         match &mut self.output {
@@ -346,10 +362,15 @@ impl Probe {
         }
     }
 
-    fn pump(&mut self) -> Result<bool, ApiError> {
+    fn check_deadline(&self) -> Result<(), ApiError> {
         if Instant::now() >= self.deadline {
             return Err(ApiError::new("PROBE_TIMEOUT", "공식 CLI 상태 조회 시간이 초과되었습니다. 네트워크와 native 로그인을 확인한 뒤 새로고침해 주세요."));
         }
+        Ok(())
+    }
+
+    fn pump(&mut self) -> Result<bool, ApiError> {
+        self.check_deadline()?;
         let mut bytes = [0u8; 8192];
         match self.read_chunk(&mut bytes) {
             Ok(Some(0)) => Ok(false),
@@ -378,6 +399,7 @@ impl Probe {
     }
 
     pub(crate) fn send(&mut self, value: &Value) -> Result<(), ApiError> {
+        self.check_deadline()?;
         let input = self
             .child
             .stdin
@@ -400,6 +422,7 @@ impl Probe {
         self.send(&json!({"id": id, "method": method, "params": params}))?;
         loop {
             while let Some(end) = self.buffer.iter().position(|b| *b == b'\n') {
+                self.check_deadline()?;
                 let line: Vec<_> = self.buffer.drain(..=end).collect();
                 let Ok(value) = serde_json::from_slice::<Value>(&line) else {
                     continue;
@@ -499,6 +522,16 @@ pub(crate) fn run_json(
     Probe::spawn(program, args, env, cwd)?.output()
 }
 
+pub(crate) fn run_json_until(
+    program: &Path,
+    args: &[&str],
+    env: &BTreeMap<String, String>,
+    cwd: &Path,
+    deadline: Instant,
+) -> Result<Value, ApiError> {
+    Probe::spawn_until(program, args, env, cwd, deadline)?.output()
+}
+
 /// 줄마다 JSON 이벤트를 내는 조회(`claude -p ... --output-format stream-json`). 해석되지 않는 줄은 건너뛰고,
 /// 이벤트가 하나도 없으면 오류다. 시간·크기 제한은 다른 조회와 같다.
 pub(crate) fn run_ndjson(
@@ -544,10 +577,88 @@ pub(crate) fn run_quiet(program: &Path, args: &[&str], env: &BTreeMap<String, St
     Ok(())
 }
 
+/// 실행 파일이 바뀌었는지 가리는 지문. 진입 경로(symlink)를 해석한 대상 경로와 그 파일의 메타데이터라서,
+/// 공식 업데이트가 링크 대상을 바꾸거나 같은 경로의 파일을 교체하면 값이 달라진다.
+#[derive(Clone, PartialEq, Eq)]
+struct ExecutableFingerprint {
+    canonical: PathBuf,
+    len: u64,
+    modified: Option<std::time::SystemTime>,
+    /// (장치, inode, ctime 초, ctime 나노초). 교체·chmod·내용 변경 모두 ctime이 바뀐다.
+    #[cfg(unix)]
+    inode: (u64, u64, i64, i64),
+}
+
+fn fingerprint(entry: &Path) -> Option<ExecutableFingerprint> {
+    let canonical = entry.canonicalize().ok()?;
+    let metadata = fs::metadata(&canonical).ok()?;
+    if !metadata.is_file() {
+        return None;
+    }
+    #[cfg(unix)]
+    let inode = {
+        use std::os::unix::fs::MetadataExt;
+        (metadata.dev(), metadata.ino(), metadata.ctime(), metadata.ctime_nsec())
+    };
+    Some(ExecutableFingerprint {
+        canonical,
+        len: metadata.len(),
+        modified: metadata.modified().ok(),
+        #[cfg(unix)]
+        inode,
+    })
+}
+
+static VERSION_CACHE: parking_lot::Mutex<BTreeMap<PathBuf, (ExecutableFingerprint, String)>> =
+    parking_lot::Mutex::new(BTreeMap::new());
+
+/// `--version` 응답. 진입 경로와 실행 파일 지문이 같으면 다시 실행하지 않는다.
+/// 성공한 응답만 보관하며 실패(None)는 다음 호출에서 다시 시도한다. 조회 중 파일이 바뀌면 보관하지 않는다.
 pub(crate) fn version(program: &Path, cwd: &Path) -> Option<String> {
-    Probe::spawn(program, &["--version"], &base_env(), cwd)
+    let before = fingerprint(program);
+    if let Some(print) = before.as_ref() {
+        if let Some((cached, version)) = VERSION_CACHE.lock().get(program) {
+            if cached == print {
+                return Some(version.clone());
+            }
+        }
+    }
+    let version = Probe::spawn(program, &["--version"], &base_env(), cwd)
         .and_then(Probe::version)
-        .ok()
+        .ok()?;
+    if let Some(print) = before {
+        if fingerprint(program).as_ref() == Some(&print) {
+            VERSION_CACHE.lock().insert(program.to_path_buf(), (print, version.clone()));
+        }
+    }
+    Some(version)
+}
+
+/// 테스트용 가짜 공식 CLI를 만든다. 다른 스레드의 fork가 쓰기 fd를 물고 있으면 실행이 `ETXTBSY`로 실패하므로
+/// 임시 파일에 쓴 뒤 `rename`으로 교체하고(교체도 새 inode를 만든다), 호출자는 `retry_start`로 감싸 실행한다.
+#[cfg(all(test, unix))]
+pub(crate) mod test_support {
+    use super::*;
+
+    pub(crate) fn write_script(path: &Path, body: &str) {
+        let staged = path.with_extension(format!("staged-{}", uuid::Uuid::new_v4()));
+        fs::write(&staged, format!("#!/bin/sh\n{body}\n")).unwrap();
+        fs::set_permissions(&staged, fs::Permissions::from_mode(0o755)).unwrap();
+        fs::rename(&staged, path).unwrap();
+    }
+
+    /// 시작 실패(`PROBE_START_FAILED`, 드물게 ETXTBSY)만 짧게 재시도한다. 다른 오류는 그대로 돌려준다.
+    pub(crate) fn retry_start<T>(mut run: impl FnMut() -> Result<T, ApiError>) -> Result<T, ApiError> {
+        let mut result = run();
+        for _ in 0..40 {
+            if !matches!(&result, Err(error) if error.code == "PROBE_START_FAILED") {
+                break;
+            }
+            thread::sleep(Duration::from_millis(25));
+            result = run();
+        }
+        result
+    }
 }
 
 #[cfg(all(test, unix))]
@@ -600,6 +711,159 @@ mod tests {
         assert_eq!(discover(&paths, tool), None);
         fs::remove_dir_all(&dir).unwrap();
     }
+
+    fn probes(counter: &Path) -> usize {
+        fs::read_to_string(counter).map(|text| text.lines().count()).unwrap_or(0)
+    }
+
+    /// 스크립트를 막 쓴 직후 다른 테스트의 fork와 겹치면 시작이 실패할 수 있어 `None`이면 짧게 재시도한다.
+    /// 실패 응답은 캐시되지 않으므로 재시도가 호출 횟수를 부풀리지 않는다.
+    fn version_of(entry: &Path, cwd: &Path) -> Option<String> {
+        for _ in 0..40 {
+            if let Some(version) = version(entry, cwd) {
+                return Some(version);
+            }
+            thread::sleep(Duration::from_millis(25));
+        }
+        None
+    }
+
+    fn version_dir() -> PathBuf {
+        let dir = std::env::temp_dir().join(format!("aam-version-{}", uuid::Uuid::new_v4()));
+        fs::create_dir_all(&dir).unwrap();
+        dir.canonicalize().unwrap()
+    }
+
+    fn counting_cli(path: &Path, counter: &Path, banner: &str) {
+        test_support::write_script(
+            path,
+            &format!("echo probe >> '{}'\necho '{banner}'", counter.display()),
+        );
+    }
+
+    #[test]
+    fn unchanged_executable_version_is_not_probed_again() {
+        let dir = version_dir();
+        let (cli, counter) = (dir.join("cli"), dir.join("counter"));
+        counting_cli(&cli, &counter, "tool 1.0.0");
+        assert_eq!(version_of(&cli, &dir).as_deref(), Some("tool 1.0.0"));
+        assert_eq!(version_of(&cli, &dir).as_deref(), Some("tool 1.0.0"));
+        assert_eq!(version_of(&cli, &dir).as_deref(), Some("tool 1.0.0"));
+        assert_eq!(probes(&counter), 1);
+        fs::remove_dir_all(&dir).unwrap();
+    }
+
+    #[test]
+    fn version_is_probed_again_after_executable_replacement() {
+        let dir = version_dir();
+        let (cli, counter) = (dir.join("cli"), dir.join("counter"));
+        counting_cli(&cli, &counter, "tool 1.0.0");
+        assert_eq!(version_of(&cli, &dir).as_deref(), Some("tool 1.0.0"));
+        counting_cli(&cli, &counter, "tool 1.0.1");
+        assert_eq!(version_of(&cli, &dir).as_deref(), Some("tool 1.0.1"));
+        assert_eq!(probes(&counter), 2);
+        fs::remove_dir_all(&dir).unwrap();
+    }
+
+    #[test]
+    fn version_follows_official_symlink_update_of_the_entry_path() {
+        let dir = version_dir();
+        fs::create_dir_all(dir.join("versions")).unwrap();
+        let counter = dir.join("counter");
+        let (old, new) = (dir.join("versions/1.0.0"), dir.join("versions/1.0.1"));
+        counting_cli(&old, &counter, "tool 1.0.0");
+        counting_cli(&new, &counter, "tool 1.0.1");
+        let entry = dir.join("tool");
+        symlink(&old, &entry).unwrap();
+        assert_eq!(version_of(&entry, &dir).as_deref(), Some("tool 1.0.0"));
+        assert_eq!(version_of(&entry, &dir).as_deref(), Some("tool 1.0.0"));
+        assert_eq!(probes(&counter), 1);
+        fs::remove_file(&entry).unwrap();
+        symlink(&new, &entry).unwrap();
+        assert_eq!(version_of(&entry, &dir).as_deref(), Some("tool 1.0.1"));
+        assert_eq!(probes(&counter), 2);
+        // 진입 경로는 그대로 보존됩니다(캐시가 대상 경로로 바꿔 놓지 않음).
+        assert_eq!(entry.read_link().unwrap(), new);
+        fs::remove_dir_all(&dir).unwrap();
+    }
+
+    #[test]
+    fn failed_version_probe_is_not_cached() {
+        let dir = version_dir();
+        let (cli, flag, counter) = (dir.join("cli"), dir.join("fail"), dir.join("counter"));
+        test_support::write_script(
+            &cli,
+            &format!(
+                "echo probe >> '{}'\nif [ -f '{}' ]; then echo 'not a version'; else echo 'tool 2.0.0'; fi",
+                counter.display(),
+                flag.display()
+            ),
+        );
+        fs::write(&flag, b"").unwrap();
+        // 실행 파일은 그대로인데 응답이 형식에 맞지 않으면 None이며 기억하지 않습니다.
+        let mut failed = None;
+        for _ in 0..40 {
+            failed = version(&cli, &dir);
+            if probes(&counter) > 0 {
+                break;
+            }
+            thread::sleep(Duration::from_millis(25));
+        }
+        assert_eq!(failed, None);
+        fs::remove_file(&flag).unwrap();
+        assert_eq!(version_of(&cli, &dir).as_deref(), Some("tool 2.0.0"));
+        fs::remove_dir_all(&dir).unwrap();
+    }
+
+    #[test]
+    fn expired_operation_deadline_does_not_start_a_cli() {
+        let dir = version_dir();
+        let result = run_json_until(
+            &dir.join("missing-cli"),
+            &[],
+            &BTreeMap::new(),
+            &dir,
+            Instant::now(),
+        );
+        assert_eq!(result.unwrap_err().code, "PROBE_TIMEOUT");
+        fs::remove_dir_all(dir).unwrap();
+    }
+
+    #[test]
+    fn operation_deadline_stops_and_reaps_a_slow_cli() {
+        let dir = version_dir();
+        let cli = dir.join("slow-cli");
+        test_support::write_script(&cli, "sleep 30\nprintf '{\"late\":true}'");
+        let probe = test_support::retry_start(|| {
+            Probe::spawn_until(
+                &cli,
+                &[],
+                &BTreeMap::new(),
+                &dir,
+                Instant::now() + Duration::from_millis(500),
+            )
+        }).unwrap();
+        let pid = probe.child.id();
+        assert_eq!(probe.output().unwrap_err().code, "PROBE_TIMEOUT");
+        assert_eq!(unsafe { libc::kill(pid as i32, 0) }, -1);
+        assert_eq!(std::io::Error::last_os_error().raw_os_error(), Some(libc::ESRCH));
+        fs::remove_dir_all(dir).unwrap();
+    }
+
+    #[test]
+    fn expired_rpc_cannot_consume_a_buffered_success() {
+        let dir = version_dir();
+        let cli = dir.join("rpc-cli");
+        test_support::write_script(&cli, "cat");
+        let mut probe = test_support::retry_start(|| {
+            Probe::spawn(&cli, &[], &BTreeMap::new(), &dir)
+        }).unwrap();
+        probe.buffer = b"{\"id\":7,\"result\":{\"stale\":true}}\n".to_vec();
+        probe.deadline = Instant::now();
+        assert_eq!(probe.request(7, "account/read", json!({})).unwrap_err().code, "PROBE_TIMEOUT");
+        drop(probe);
+        fs::remove_dir_all(dir).unwrap();
+    }
 }
 
 #[cfg(all(test, windows))]
@@ -612,7 +876,7 @@ mod windows_tests {
         let bin = root.join("bin");
         fs::create_dir_all(&bin).unwrap();
         let executable_path = bin.join("codex.exe");
-        fs::copy(std::env::current_exe().unwrap(), &executable_path).unwrap();
+        fs::copy(std::env::var_os("COMSPEC").unwrap(), &executable_path).unwrap();
         // An executable's name or bin directory alone is not evidence of a manager shim.
         assert!(executable(&executable_path).is_ok());
         fs::write(root.join("integration.json"), serde_json::to_vec(&json!({
