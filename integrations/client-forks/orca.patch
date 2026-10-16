@@ -60,22 +60,22 @@ index afa049bc..4c58f384 100644
  
  When an agent exits (clean or crash), the tab shows a **Restart** chip. One click rehydrates the same agent with the same working directory. Codex's restart chip also preserves the current account (see [Hot-swap Codex accounts](/docs/agents/codex-hot-swap)).
 diff --git a/package.json b/package.json
-index ec74a5bc..b4337b2a 100644
+index ae91aafa..79048779 100644
 --- a/package.json
 +++ b/package.json
 @@ -1,6 +1,6 @@
  {
    "name": "orca",
--  "version": "1.4.224",
-+  "version": "1.5.0-ojak.1",
+-  "version": "1.4.227",
++  "version": "1.5.0-ojak.2",
    "description": "Next-gen IDE for parallel agentic development",
    "homepage": "https://github.com/stablyai/orca",
    "author": "stablyai",
 diff --git a/src/main/acp/acp-launch-specs.ts b/src/main/acp/acp-launch-specs.ts
-index 4bab75d6..4944a64c 100644
+index 3f814ada..0e1c9254 100644
 --- a/src/main/acp/acp-launch-specs.ts
 +++ b/src/main/acp/acp-launch-specs.ts
-@@ -180,8 +180,9 @@ const OMP_LAUNCH_SPEC: AcpLaunchSpec = {
+@@ -183,8 +183,9 @@ const OMP_LAUNCH_SPEC: AcpLaunchSpec = {
    ),
    // OMP's installers use directories the shared resolver already searches after PATH.
    installDirectories: () => [],
@@ -88,10 +88,10 @@ index 4bab75d6..4944a64c 100644
    // could offer models a chat refuses; its chats' own listings fill the catalog instead.
    modelDiscovery: {
 diff --git a/src/main/acp/acp-structured-acquire.ts b/src/main/acp/acp-structured-acquire.ts
-index 3f8e9555..ed379836 100644
+index 926a8362..3b158a66 100644
 --- a/src/main/acp/acp-structured-acquire.ts
 +++ b/src/main/acp/acp-structured-acquire.ts
-@@ -44,6 +44,7 @@ import type { AcpStructuredSessionAdapterDeps } from './acp-structured-session-a
+@@ -39,6 +39,7 @@ import type { AcpStructuredSessionAdapterDeps } from './acp-structured-session-a
  import { AcpStructuredTurns, type AcpStructuredTurnsDeps } from './acp-structured-turns'
  import { RequestPermissionResponseSchema } from './generated/acp-protocol.generated'
  import { createStructuredAgentSessionLogger } from '../native-chat/agent-session-wire/structured-agent-session-logger'
@@ -99,7 +99,7 @@ index 3f8e9555..ed379836 100644
  
  /** Frames an agent may send before its session exists; past this they are dropped. */
  const MAX_EARLY_FRAMES = 2_048
-@@ -65,29 +66,39 @@ export async function acquireAcpStructuredSession(input: {
+@@ -60,29 +61,39 @@ export async function acquireAcpStructuredSession(input: {
    onSettled: AcpStructuredTurnsDeps['settle']
    forceClose: (sessionId: string) => void
  }): Promise<{ acquisition: AgentSessionAcquisition; session: AcpStructuredSession }> {
@@ -123,7 +123,7 @@ index 3f8e9555..ed379836 100644
 +  if (input.abandoned()) throw new AgentSessionPreSpawnError(new Error('Closed before launch'))
 +  const { acquire, deps } = input
    const launch: AcpStructuredLaunch = await deps
-     .resolveLaunch({ identity: acquire.identity })
+     .resolveLaunch({ identity: acquire.identity, spawnToken: acquire.spawnToken })
      .catch((error: unknown) => {
        throw new AgentSessionPreSpawnError(error)
      })
@@ -157,7 +157,7 @@ index 3f8e9555..ed379836 100644
    let session: AcpStructuredSession | null = null
    // A slot rather than a `let`: closures read it, and control-flow narrowing cannot see them write.
    const slot: { lane: AcpStructuredLane | null; reattaching: boolean } = {
-@@ -113,6 +124,11 @@ export async function acquireAcpStructuredSession(input: {
+@@ -108,6 +119,11 @@ export async function acquireAcpStructuredSession(input: {
        early.push(deliver)
      }
    }
@@ -169,7 +169,7 @@ index 3f8e9555..ed379836 100644
    const connection = deps.connect(
      {
        command: launch.command,
-@@ -220,6 +236,7 @@ export async function acquireAcpStructuredSession(input: {
+@@ -212,6 +228,7 @@ export async function acquireAcpStructuredSession(input: {
      )
    }
    await identity.onSpawned(pid)
@@ -177,7 +177,7 @@ index 3f8e9555..ed379836 100644
    const agentName = acpAgentName(spec.agent)
    try {
      const initialized = await connection.initialize()
-@@ -300,7 +317,7 @@ export async function acquireAcpStructuredSession(input: {
+@@ -292,7 +309,7 @@ export async function acquireAcpStructuredSession(input: {
        exitObservedAt: null
      }
      const reading = liveLane
@@ -187,10 +187,10 @@ index 3f8e9555..ed379836 100644
        resumeReading: () => {
          connection.resumeReading()
 diff --git a/src/main/acp/acp-structured-launch-resolution-omp.test.ts b/src/main/acp/acp-structured-launch-resolution-omp.test.ts
-index 74d9be9f..ff4e7dda 100644
+index c432ef13..93fad174 100644
 --- a/src/main/acp/acp-structured-launch-resolution-omp.test.ts
 +++ b/src/main/acp/acp-structured-launch-resolution-omp.test.ts
-@@ -95,14 +95,14 @@ describe('OMP ACP launch resolution', () => {
+@@ -96,14 +96,14 @@ describe('OMP ACP launch resolution', () => {
      ).rejects.toThrow(/pin PI_CODING_AGENT_DIR/)
    })
  
@@ -208,7 +208,7 @@ index 74d9be9f..ff4e7dda 100644
      async (version) => {
        const launch = resolver(ompRecord(), {
 diff --git a/src/main/acp/acp-structured-session-adapter-deps.ts b/src/main/acp/acp-structured-session-adapter-deps.ts
-index 521e62c2..fa9c75ba 100644
+index 64f4d120..77afbbab 100644
 --- a/src/main/acp/acp-structured-session-adapter-deps.ts
 +++ b/src/main/acp/acp-structured-session-adapter-deps.ts
 @@ -10,6 +10,7 @@ import type { AcpLaunchSpec } from './acp-launch-specs'
@@ -219,36 +219,35 @@ index 521e62c2..fa9c75ba 100644
  
  /** How long a Stop, counted from its cancel, lets the agent end its turn before the child goes. */
  export const ACP_STOP_GRACE_MS = 4_000
-@@ -19,6 +20,7 @@ export const ACP_OPTION_WRITE_TIMEOUT_MS = 30_000
- export type AcpStructuredSessionAdapterDeps = {
-   spec: AcpLaunchSpec
-   resolveLaunch: (input: { identity: AgentSessionJournalIdentity }) => Promise<AcpStructuredLaunch>
+@@ -25,6 +26,7 @@ export type AcpStructuredSessionAdapterDeps = {
+   }) => Promise<AcpStructuredLaunch>
+   /** The same launch for a read that starts no child (restart recovery): the agent's env, unsealed. */
+   readLaunch: (identity: AgentSessionJournalIdentity) => Promise<AcpStructuredLaunch>
 +  acquireLaunchAdmission?: StructuredLaunchAdmission
    /** The chat's journal as it stands, read without opening it; null when it has none. */
    readJournal?: (sessionId: string) => JournalLoad | null
    /** Starts the agent's process and owns its protocol: `createAcpAgentConnection` in production. */
 diff --git a/src/main/acp/acp-structured-session-adapter.test.ts b/src/main/acp/acp-structured-session-adapter.test.ts
-index ad3dbcd2..ae6becf6 100644
+index 291dfe00..2d38f5a2 100644
 --- a/src/main/acp/acp-structured-session-adapter.test.ts
 +++ b/src/main/acp/acp-structured-session-adapter.test.ts
-@@ -10,7 +10,7 @@ import {
-   AgentSessionAcquisitionRootExitObservedError
+@@ -11,6 +11,7 @@ import {
  } from '../native-chat/agent-session-wire/structured-agent-session-adapter'
  import { GENERIC_ACP_DIALECT } from './acp-dialects/acp-dialect'
--import { ACP_CHILD_ENV_TO_DELETE } from './acp-launch-specs'
-+import { ACP_CHILD_ENV_TO_DELETE, acpLaunchSpecFor } from './acp-launch-specs'
+ import { STRUCTURED_CHILD_ENV_TO_DELETE } from '../runtime/structured-session-child-env'
++import { acpLaunchSpecFor } from './acp-launch-specs'
  import { AGENT_HOOK_RUNTIME_ENV_KEYS } from '../ipc/pty/host-env/spawn-env-keys'
  import {
    GROK,
-@@ -21,6 +21,7 @@ import {
-   type AcpAdapterRig
- } from './acp-structured-adapter.test-support'
+@@ -23,6 +24,7 @@ import {
  import type { AgentJournalMessageItem } from '../../shared/agent-session-journal-types'
+ import { createAcpStructuredLaunchResolver } from '../runtime/structured-agent-launch-composition.test-support'
+ import { agentSessionRecordFixture } from '../native-chat/agent-session-record-test-fixture'
 +import type { OjakLaunchTicket } from '../agent-launch/ojak-launch-queue'
  
  afterEach(async () => {
    await closeProviderTimelineRigs()
-@@ -45,6 +46,62 @@ function chunk(promptId: string, text: string) {
+@@ -47,6 +49,62 @@ function chunk(promptId: string, text: string) {
  }
  
  describe('ACP structured session adapter: acquire', () => {
@@ -312,10 +311,10 @@ index ad3dbcd2..ae6becf6 100644
      const rig = await openAcpAdapterRig()
      const acquired = await rig.acquire()
 diff --git a/src/main/acp/acp-structured-session-adapter.ts b/src/main/acp/acp-structured-session-adapter.ts
-index 5decdb16..5e5e1dc4 100644
+index d1911c3c..23ef7fc8 100644
 --- a/src/main/acp/acp-structured-session-adapter.ts
 +++ b/src/main/acp/acp-structured-session-adapter.ts
-@@ -86,7 +86,7 @@ export class AcpStructuredSessionAdapter implements StructuredAgentSessionAdapte
+@@ -85,7 +85,7 @@ export class AcpStructuredSessionAdapter implements StructuredAgentSessionAdapte
      const generation = this.deps.mintGeneration?.() ?? randomUUID()
      try {
        const { acquisition, session } = await acquireAcpStructuredSession({
@@ -346,961 +345,6 @@ index e153e34b..1362a467 100644
    const { intent, runtime } = execution
    if (intent.reuseTerminal || intent.target.kind === 'create-worktree') {
      assertOpenCodeModelLaunchPreferencesAbsent(intent.agent, intent.sessionOptions)
-diff --git a/src/main/ipc/pty/ipc/spawn-execute.ts b/src/main/ipc/pty/ipc/spawn-execute.ts
-index 54507a72..b9adc9e5 100644
---- a/src/main/ipc/pty/ipc/spawn-execute.ts
-+++ b/src/main/ipc/pty/ipc/spawn-execute.ts
-@@ -16,6 +16,7 @@ import { deletePtyOwnership } from '../provider/ownership-state'
- import { ptySizes } from '../delivery/visibility-state'
- import { clearProviderPtyState } from '../provider/state-cleanup'
- import type { PtyIpcSpawnState } from './spawn-state'
-+import { admitOjakPtySpawn } from '../../../agent-launch/ojak-pty-launch'
- 
- export async function executePtyIpcSpawn(ctx: PtyIpcSpawnState): Promise<void> {
-   const args = ctx.args
-@@ -63,6 +64,7 @@ export async function executePtyIpcSpawn(ctx: PtyIpcSpawnState): Promise<void> {
-           owner: stablePaneOwnerCandidate,
-           worktreeId: args.worktreeId,
-           connectionId: args.connectionId,
-+          beforeFreshSpawn: () => admitOjakPtySpawn(ctx.spawnOptions, !args.connectionId && !ctx.expectedWslDistro),
-           resolveOwner
-         })
-     ctx.result = stablePaneSpawn.result
-diff --git a/src/main/ipc/pty/ipc/spawn-run.ts b/src/main/ipc/pty/ipc/spawn-run.ts
-index 83e8a778..4d7c43a2 100644
---- a/src/main/ipc/pty/ipc/spawn-run.ts
-+++ b/src/main/ipc/pty/ipc/spawn-run.ts
-@@ -15,6 +15,7 @@ import { commitPtyIpcSpawn } from './spawn-commit'
- import { createPtyIpcSpawnState, type PtyIpcSpawnState } from './spawn-state'
- import { triggerPtySpawnPushTargetMaterialization } from './spawn-push-target-materialization'
- import type { PtySpawnIpcArgs, PtySpawnIpcDeps } from './spawn-types'
-+import { commitOjakPtySpawn, releaseOjakPtySpawn } from '../../../agent-launch/ojak-pty-launch'
- 
- function releaseAbandonedAgentTeamsLeader(ctx: PtyIpcSpawnState): void {
-   if (!ctx.agentTeamsLeaderHandle) {
-@@ -76,7 +77,9 @@ export async function runPtyIpcSpawn(deps: PtySpawnIpcDeps, args: PtySpawnIpcArg
-       return earlyReserved
-     }
-     await executePtyIpcSpawn(ctx)
--    return await commitPtyIpcSpawn(ctx)
-+    const committed = await commitPtyIpcSpawn(ctx)
-+    await commitOjakPtySpawn(ctx.spawnOptions)
-+    return committed
-   } catch (err) {
-     releaseAbandonedAgentTeamsLeader(ctx)
-     if (ctx.preSpawnHiddenMarkId !== null) {
-@@ -101,6 +104,7 @@ export async function runPtyIpcSpawn(deps: PtySpawnIpcDeps, args: PtySpawnIpcArg
-     rejectPaneSpawnReservation(ctx.paneSpawnReservationKey, ctx.paneSpawnReservation, err)
-     throw err
-   } finally {
-+    releaseOjakPtySpawn(ctx.spawnOptions)
-     ctx.releaseWorktreeSpawn?.()
-     ctx.finishTerminalInstall()
-   }
-diff --git a/src/main/ipc/pty/ipc/spawn.ts b/src/main/ipc/pty/ipc/spawn.ts
-index 6fd5183a..1130772a 100644
---- a/src/main/ipc/pty/ipc/spawn.ts
-+++ b/src/main/ipc/pty/ipc/spawn.ts
-@@ -1,10 +1,27 @@
- import { getPtyIpc } from '../../pty-host-bindings'
- import { runPtyIpcSpawn } from './spawn-run'
- import type { PtySpawnIpcArgs, PtySpawnIpcDeps } from './spawn-types'
-+import { ojakLaunchQueue } from '../../../agent-launch/ojak-launch-admission'
-+import { resumeOjakLaunch } from '../../../agent-launch/ojak-runtime-recovery'
- 
- export function installPtySpawnIpcHandler(deps: PtySpawnIpcDeps): void {
-   const ipcMain = getPtyIpc()
-   const { getLocalPtyStartupPromise } = deps
-+  ipcMain.handle('pty:ojakLaunchNotices', async () => (await ojakLaunchQueue()).notices())
-+  ipcMain.handle('pty:ojakCancelLaunch', async (_event, key: unknown) => {
-+    if (typeof key !== 'string' || key.length > 2048) throw new Error('invalid_launch_key')
-+    return (await ojakLaunchQueue()).cancel(key)
-+  })
-+  ipcMain.handle('pty:ojakDismissLaunch', async (_event, key: unknown) => {
-+    if (typeof key !== 'string' || key.length > 2048) throw new Error('invalid_launch_key')
-+    return (await ojakLaunchQueue()).dismiss(key)
-+  })
-+  ipcMain.handle('pty:ojakResumeLaunch', async (_event, key: unknown, worktreeId: unknown) => {
-+    if (typeof key !== 'string' || key.length > 2048 ||
-+      typeof worktreeId !== 'string' || !worktreeId || worktreeId.length > 2048) throw new Error('invalid_launch_target')
-+    if (!deps.runtime || !deps.store) throw new Error('runtime_unavailable')
-+    await resumeOjakLaunch(deps.runtime, deps.store, key, worktreeId)
-+  })
- 
-   ipcMain.handle('pty:spawn', async (_event, args: PtySpawnIpcArgs) => {
-     const startupPromise = getLocalPtyStartupPromise(args.connectionId)
-diff --git a/src/main/ipc/pty/pane/stable-owner.ts b/src/main/ipc/pty/pane/stable-owner.ts
-index 83ebdd50..b2f6bc1b 100644
---- a/src/main/ipc/pty/pane/stable-owner.ts
-+++ b/src/main/ipc/pty/pane/stable-owner.ts
-@@ -178,6 +178,7 @@ export type StablePaneSpawnContext = {
-   connectionId?: string | null
-   resolveOwner?: () => StablePaneOwner | null
-   onFreshSpawn?: (result: PtySpawnResult) => void
-+  beforeFreshSpawn?: () => Promise<void>
- }
- 
- export function stablePanePersistenceFence(
-@@ -310,6 +311,11 @@ export async function spawnForStablePane(
-       return attached
-     }
-   }
-+  await args.beforeFreshSpawn?.()
-+  args.spawnOptions.signal?.throwIfAborted()
-+  if (args.beforeFreshSpawn && args.resolveOwner?.()) {
-+    throw new Error('terminal_pane_owner_changed')
-+  }
-   const result = await args.provider.spawn(args.spawnOptions)
-   args.onFreshSpawn?.(result)
-   return { result, owner: null }
-diff --git a/src/main/ipc/pty/pane/stable-pane-relay-absence-respawn.test.ts b/src/main/ipc/pty/pane/stable-pane-relay-absence-respawn.test.ts
-index ce3c578c..1cffd760 100644
---- a/src/main/ipc/pty/pane/stable-pane-relay-absence-respawn.test.ts
-+++ b/src/main/ipc/pty/pane/stable-pane-relay-absence-respawn.test.ts
-@@ -83,6 +83,50 @@ function sessionStore(leaves: string[]): { store: Store; read: () => WorkspaceSe
- }
- 
- describe('stable pane adoption after the relay reports the PTY absent', () => {
-+  it('does not create a local PTY while admission waits, or after cancellation', async () => {
-+    const gate = Promise.withResolvers<void>()
-+    const entered = Promise.withResolvers<void>()
-+    const stop = new AbortController()
-+    const spawn = vi.fn().mockResolvedValue({ id: 'fresh', isReattach: false })
-+    const pending = spawnForStablePane({
-+      runtime: undefined,
-+      // oxlint-disable-next-line typescript/consistent-type-assertions -- SAFETY: A fresh pane uses only the provider spawn method.
-+      provider: { spawn } as unknown as IPtyProvider,
-+      spawnOptions: { cols: 80, rows: 24, command: 'omp', signal: stop.signal },
-+      owner: null,
-+      beforeFreshSpawn: () => { entered.resolve(); return gate.promise }
-+    })
-+    await entered.promise
-+    expect(spawn).not.toHaveBeenCalled()
-+    const rejected = expect(pending).rejects.toThrow('launch cancelled')
-+    stop.abort(new Error('launch cancelled'))
-+    gate.resolve()
-+    await rejected
-+    expect(spawn).not.toHaveBeenCalled()
-+  })
-+
-+  it('rechecks ownership after a long wait instead of duplicating a newly attached pane', async () => {
-+    const gate = Promise.withResolvers<void>()
-+    const entered = Promise.withResolvers<void>()
-+    let owner: StablePaneOwner | null = null
-+    const spawn = vi.fn().mockResolvedValue({ id: 'fresh', isReattach: false })
-+    const pending = spawnForStablePane({
-+      runtime: undefined,
-+      // oxlint-disable-next-line typescript/consistent-type-assertions -- SAFETY: The refusal occurs before any provider method except spawn could be used.
-+      provider: { spawn } as unknown as IPtyProvider,
-+      spawnOptions: { cols: 80, rows: 24, command: 'omp' },
-+      owner,
-+      resolveOwner: () => owner,
-+      beforeFreshSpawn: () => { entered.resolve(); return gate.promise }
-+    })
-+    await entered.promise
-+    owner = OWNER
-+    const rejected = expect(pending).rejects.toThrow('terminal_pane_owner_changed')
-+    gate.resolve()
-+    await rejected
-+    expect(spawn).not.toHaveBeenCalled()
-+  })
-+
-   it.each([false, true])(
-     'reattaches a live pane without launching a provider process (settled worker: %s)',
-     async (settledWorker) => {
-diff --git a/src/main/ipc/pty/register-handlers.ts b/src/main/ipc/pty/register-handlers.ts
-index 7f29e895..ff6024fa 100644
---- a/src/main/ipc/pty/register-handlers.ts
-+++ b/src/main/ipc/pty/register-handlers.ts
-@@ -113,6 +113,10 @@ export function registerPtyHandlers(
- 
-   // Remove prior handlers so re-registration (e.g. macOS re-activate creating a new window) doesn't double-register.
-   ipcMain.removeHandler('pty:spawn')
-+  ipcMain.removeHandler('pty:ojakLaunchNotices')
-+  ipcMain.removeHandler('pty:ojakCancelLaunch')
-+  ipcMain.removeHandler('pty:ojakDismissLaunch')
-+  ipcMain.removeHandler('pty:ojakResumeLaunch')
-   ipcMain.removeHandler('pty:moveLeafToNewTab')
-   ipcMain.removeHandler('pty:kill')
-   ipcMain.removeHandler('pty:listSessions')
-diff --git a/src/main/ipc/pty/runtime/spawn-execute.ts b/src/main/ipc/pty/runtime/spawn-execute.ts
-index 8228175a..98e54544 100644
---- a/src/main/ipc/pty/runtime/spawn-execute.ts
-+++ b/src/main/ipc/pty/runtime/spawn-execute.ts
-@@ -18,6 +18,7 @@ import {
- } from '../../../providers/ssh-pty-errors'
- import type { RuntimePtySpawnState } from './spawn-state'
- import { markRuntimeSpawnHiddenBeforeSpawn } from './spawn-hidden-delivery'
-+import { admitOjakPtySpawn } from '../../../agent-launch/ojak-pty-launch'
- 
- export async function executeRuntimePtySpawn(ctx: RuntimePtySpawnState): Promise<void> {
-   const args = ctx.args
-@@ -85,6 +86,8 @@ export async function executeRuntimePtySpawn(ctx: RuntimePtySpawnState): Promise
-         claim: args.agentSessionEnsure.claim,
-         surface: args.agentSessionEnsure.surface,
-         spawn: async () => {
-+          assertClientStillConnected()
-+          await admitOjakPtySpawn(ctx.spawnOptions, !args.connectionId && !ctx.expectedWslDistro)
-           assertClientStillConnected()
-           providerResult = await ctx.provider.spawn(ctx.spawnOptions)
-           ctx.rejectedRegistrationCandidate = providerResult
-@@ -141,6 +144,7 @@ export async function executeRuntimePtySpawn(ctx: RuntimePtySpawnState): Promise
-             owner: stablePaneOwnerCandidate,
-             worktreeId: args.worktreeId,
-             connectionId: args.connectionId,
-+            beforeFreshSpawn: () => admitOjakPtySpawn(ctx.spawnOptions, !args.connectionId && !ctx.expectedWslDistro),
-             resolveOwner: () =>
-               resolveStablePaneOwner(
-                 ctx.deps.runtime,
-diff --git a/src/main/ipc/pty/runtime/spawn.ts b/src/main/ipc/pty/runtime/spawn.ts
-index 5897cb1d..129c0059 100644
---- a/src/main/ipc/pty/runtime/spawn.ts
-+++ b/src/main/ipc/pty/runtime/spawn.ts
-@@ -20,6 +20,7 @@ import {
-   commitRuntimeSpawnHiddenDelivery,
-   releaseRuntimeSpawnPreSpawnHiddenMark
- } from './spawn-hidden-delivery'
-+import { commitOjakPtySpawn, releaseOjakPtySpawn } from '../../../agent-launch/ojak-pty-launch'
- 
- function toRuntimeSpawnReply(result: {
-   id: string
-@@ -101,6 +102,7 @@ export async function spawnPtyFromRuntimeController(
-     await executeRuntimePtySpawn(ctx)
-     const committed = await commitRuntimePtySpawn(ctx)
-     commitRuntimeSpawnHiddenDelivery(ctx)
-+    await commitOjakPtySpawn(ctx.spawnOptions)
-     return toRuntimeSpawnReply(committed)
-   } catch (err) {
-     releaseRuntimeSpawnPreSpawnHiddenMark(ctx)
-@@ -120,6 +122,7 @@ export async function spawnPtyFromRuntimeController(
-     rejectPaneSpawnReservation(ctx.paneSpawnReservationKey, ctx.paneSpawnReservation, err)
-     throw err
-   } finally {
-+    releaseOjakPtySpawn(ctx.spawnOptions)
-     ctx.releaseWorktreeSpawn?.()
-     ctx.finishTerminalInstall()
-   }
-diff --git a/src/main/native-chat/agent-session-timeline/provider-timeline-assembler-test-support.ts b/src/main/native-chat/agent-session-timeline/provider-timeline-assembler-test-support.ts
-index 79c1aea2..94aeb52e 100644
---- a/src/main/native-chat/agent-session-timeline/provider-timeline-assembler-test-support.ts
-+++ b/src/main/native-chat/agent-session-timeline/provider-timeline-assembler-test-support.ts
-@@ -244,6 +244,7 @@ export async function openProviderTimelineRig(
-   deferred.bind({ journal, fence: 1, publish: () => {} })
-   cleanups.push(async () => {
-     deferred.close()
-+    closeTestJournalHostDatabase(root)
-     await rm(root, { recursive: true, force: true })
-   })
-   const sink = providerTimelineSink(deferred.sink)
-diff --git a/src/main/native-chat/agent-session-wire/structured-agent-session-queued-message-rig.test-fixture.ts b/src/main/native-chat/agent-session-wire/structured-agent-session-queued-message-rig.test-fixture.ts
-index ef7e3695..52890615 100644
---- a/src/main/native-chat/agent-session-wire/structured-agent-session-queued-message-rig.test-fixture.ts
-+++ b/src/main/native-chat/agent-session-wire/structured-agent-session-queued-message-rig.test-fixture.ts
-@@ -26,7 +26,7 @@ import {
-   hostTestOperationId,
-   resetHostTestOperationIds
- } from './structured-agent-session-host-test-data'
--import { openTestJournalHostDatabase } from '../agent-session-journal/journal-host-database-test-support'
-+import { closeTestJournalHostDatabase, openTestJournalHostDatabase } from '../agent-session-journal/journal-host-database-test-support'
- import { createStructuredAgentSessionLogger } from './structured-agent-session-logger'
- import {
-   createQueuedRigProvider,
-@@ -271,6 +271,7 @@ export async function createQueuedMessageTestRig(
- 
-   async function dispose(): Promise<void> {
-     await host.flushAllStreamedEvents()
-+    closeTestJournalHostDatabase(root)
-     await rm(root, { recursive: true, force: true })
-   }
- 
-diff --git a/src/main/pi/rpc-runtime-registration.ts b/src/main/pi/rpc-runtime-registration.ts
-index ac78e883..739a26d3 100644
---- a/src/main/pi/rpc-runtime-registration.ts
-+++ b/src/main/pi/rpc-runtime-registration.ts
-@@ -17,6 +17,7 @@ import {
- } from './rpc-launch-resolution'
- import { PiRpcSessionAdapter } from './rpc-session-adapter'
- import { createPiModelCatalogProbe } from './rpc-model-catalog-probe'
-+import { structuredOjakLaunchAdmission } from '../agent-launch/ojak-structured-launch'
- 
- /** The environment every Pi child starts from: a chat's launch and a catalog listing alike. */
- function piEnvironment({
-@@ -32,6 +33,7 @@ function piEnvironment({
- function createPiRpcAdapter(context: StructuredAgentAdapterContext): StructuredAgentRuntimeAdapter {
-   const { deps } = context
-   return new PiRpcSessionAdapter({
-+    acquireLaunchAdmission: structuredOjakLaunchAdmission(context.journalDatabase),
-     resolveLaunch: createPiRpcLaunchResolver({
-       store: context.store,
-       resolveWorkspacePath: deps.resolveWorkspacePath,
-diff --git a/src/main/pi/rpc-session-adapter.test.ts b/src/main/pi/rpc-session-adapter.test.ts
-index 0d991d08..678edba3 100644
---- a/src/main/pi/rpc-session-adapter.test.ts
-+++ b/src/main/pi/rpc-session-adapter.test.ts
-@@ -17,6 +17,8 @@ import type { PiRpcConnection } from './rpc-session'
- import type { ProviderProcessLaunch } from '../provider-process/provider-process-launch'
- import type { StructuredAgentSessionEventSink } from '../native-chat/agent-session-wire/structured-agent-session-event-sink'
- import { PiRpcSessionAdapter } from './rpc-session-adapter'
-+import type { StructuredLaunchAdmission } from '../agent-launch/ojak-structured-launch'
-+import type { OjakLaunchTicket } from '../agent-launch/ojak-launch-queue'
- 
- const sessionId = 'session-timeline'
- const file = '/host/account/sessions/session.jsonl'
-@@ -145,8 +147,10 @@ async function setup(
-       return connection
-     }
-   )
-+  const acquireLaunchAdmission = vi.fn<StructuredLaunchAdmission>().mockResolvedValue(null)
-   const adapter = new PiRpcSessionAdapter({
-     resolveLaunch,
-+    acquireLaunchAdmission,
-     readProcessStartTime: async () => 12345,
-     openConnection,
-     onLifecycle: lifecycle,
-@@ -176,11 +180,47 @@ async function setup(
-     input,
-     resolveLaunch,
-     openConnection,
-+    acquireLaunchAdmission,
-     connections
-   }
- }
- 
- describe('Pi RPC session ownership and delivery', () => {
-+  it('creates no RPC connection before admission and refuses a cancelled grant', async () => {
-+    const h = await setup()
-+    await h.adapter.closeSession(sessionId)
-+    const gate = Promise.withResolvers<OjakLaunchTicket | null>()
-+    const entered = Promise.withResolvers<void>()
-+    h.acquireLaunchAdmission.mockImplementationOnce(() => {
-+      entered.resolve()
-+      return gate.promise
-+    })
-+    const stop = new AbortController()
-+    const started = h.adapter.acquire({ ...h.input, fence: 8, signal: stop.signal })
-+    await entered.promise
-+    expect(h.connections).toHaveLength(1)
-+    stop.abort(new Error('launch cancelled'))
-+    const rejected = expect(started).rejects.toThrow('launch cancelled')
-+    gate.resolve(null)
-+    await rejected
-+    expect(h.connections).toHaveLength(1)
-+  })
-+
-+  it('keeps the RPC child behind the durable submission write', async () => {
-+    const h = await setup()
-+    await h.adapter.closeSession(sessionId)
-+    const release = vi.fn()
-+    h.acquireLaunchAdmission.mockResolvedValueOnce({
-+      signal: new AbortController().signal,
-+      submitted: () => { throw new Error('journal write failed') },
-+      committed: vi.fn(),
-+      release
-+    })
-+    await expect(h.adapter.acquire({ ...h.input, fence: 8 })).rejects.toThrow('journal write failed')
-+    expect(h.connections).toHaveLength(1)
-+    expect(release).toHaveBeenCalledTimes(1)
-+  })
-+
-   it('does not spawn a start cancelled while resolving its workspace', async () => {
-     const h = await setup()
-     await h.adapter.closeSession(sessionId)
-diff --git a/src/main/pi/rpc-session-adapter.ts b/src/main/pi/rpc-session-adapter.ts
-index ee0a13c4..8083943a 100644
---- a/src/main/pi/rpc-session-adapter.ts
-+++ b/src/main/pi/rpc-session-adapter.ts
-@@ -23,12 +23,15 @@ import { applyPiRpcSessionOption, readPiRpcSessionOptions } from './rpc-options'
- import { withLiveCatalogListing } from '../native-chat/agent-model-catalog/agent-model-catalog-store'
- import { supportsSupervisedProviderChildLocation } from '../provider-process/supervised-provider-child-location'
- import { ClaudeDispatchContentError } from '../claude/claude-structured-dispatch-content'
-+import type { StructuredLaunchAdmission } from '../agent-launch/ojak-structured-launch'
-+import type { OjakLaunchTicket } from '../agent-launch/ojak-launch-queue'
- 
- export type PiRpcSessionAdapterDeps = PiRpcSessionDeps & {
-   resolveLaunch: (
-     identity: StructuredAgentSessionAcquireInput['identity']
-   ) => Promise<PiRpcResolvedLaunch>
-   readProcessStartTime?: (pid: number) => Promise<number | null>
-+  acquireLaunchAdmission?: StructuredLaunchAdmission
- }
- 
- export class PiRpcSessionAdapter implements StructuredAgentSessionAdapter {
-@@ -52,6 +55,7 @@ export class PiRpcSessionAdapter implements StructuredAgentSessionAdapter {
-     this.acquiring.add(id)
-     const attempt = this.starts.begin(input.signal)
-     let session: PiRpcSession | undefined
-+    let admission: OjakLaunchTicket | null | undefined
-     try {
-       if (attempt.signal.aborted) {
-         throw new AgentSessionPreSpawnError(new Error('Pi closed while starting'))
-@@ -79,10 +83,13 @@ export class PiRpcSessionAdapter implements StructuredAgentSessionAdapter {
-       if (attempt.signal.aborted) {
-         throw new AgentSessionPreSpawnError(new Error('Pi closed while starting'))
-       }
-+      admission = await this.deps.acquireLaunchAdmission?.({ ...input, signal: attempt.signal }, launch)
-+      attempt.signal.throwIfAborted()
-       const spec = buildPiRpcLaunch({
-         ...launch,
-         structuredSession: { id, spawnToken: input.spawnToken }
-       })
-+      admission?.submitted()
-       session = new PiRpcSession(input, randomUUID(), spec, this.deps)
-       this.sessions.set(id, session)
-       this.starts.track(attempt, session.connection)
-@@ -95,6 +102,7 @@ export class PiRpcSessionAdapter implements StructuredAgentSessionAdapter {
-         await spawned.onSpawned(session.connection.pid)
-       }
-       const process = await spawned.read(session.connection.pid)
-+      admission?.committed()
-       const file = await waitForPromiseWithSignal(session.start(), attempt.signal)
-       if (session.connection.closed || attempt.signal.aborted) {
-         throw new Error('Pi exited while starting')
-@@ -121,6 +129,7 @@ export class PiRpcSessionAdapter implements StructuredAgentSessionAdapter {
-       this.starts.retainFailed(id, session.connection)
-       throw new AgentSessionAcquisitionExitUnprovenError(error)
-     } finally {
-+      admission?.release()
-       this.starts.end(attempt)
-       this.acquiring.delete(id)
-     }
-diff --git a/src/main/runtime/orca-runtime-build-headless-mobile-session-browser-tabs.ts b/src/main/runtime/orca-runtime-build-headless-mobile-session-browser-tabs.ts
-index 9a247177..5765acc0 100644
---- a/src/main/runtime/orca-runtime-build-headless-mobile-session-browser-tabs.ts
-+++ b/src/main/runtime/orca-runtime-build-headless-mobile-session-browser-tabs.ts
-@@ -26,6 +26,8 @@ import { FLOATING_TERMINAL_WORKTREE_ID } from '../../shared/constants'
- import { captureAcknowledgedTerminalTabRetirement } from './workspace-session-terminal-tab-retirement-identity'
- import { closeLeafOrTab } from '../persistence/terminal-topology/terminal-topology-commit'
- import { markAgentLaunchesClosedByUser } from '../agent-launch/agent-launch-pane-attachment'
-+import { cancelOjakTerminalLaunches } from '../agent-launch/ojak-launch-admission'
-+import { makePaneKey } from '../../shared/stable-pane-id'
- 
- export class OrcaRuntimeWithBuildHeadlessMobileSessionBrowserTabs extends OrcaRuntimeWithPersistTerminalSurfaceRetirements {
-   // Why: headless serve backs browser panes with offscreen WebContents that live
-@@ -119,6 +121,9 @@ export class OrcaRuntimeWithBuildHeadlessMobileSessionBrowserTabs extends OrcaRu
-     target: TerminalSurfaceCloseTarget,
-     options: TerminalSurfaceCloseOptions = {}
-   ): Promise<string[]> {
-+    cancelOjakTerminalLaunches(
-+      worktreeId, target.tabId, target.kind === 'pane' ? makePaneKey(target.tabId, target.leafId) : undefined
-+    )
-     const store = this.store
-     if (!store?.getWorkspaceSession || !store.setWorkspaceSession || !store.runDurableMutation) {
-       throw new Error('workspace_session_unavailable')
-diff --git a/src/main/runtime/orca-runtime-get-structured-agent-session-create-support.ts b/src/main/runtime/orca-runtime-get-structured-agent-session-create-support.ts
-index 7fd0dec4..ba52b14c 100644
---- a/src/main/runtime/orca-runtime-get-structured-agent-session-create-support.ts
-+++ b/src/main/runtime/orca-runtime-get-structured-agent-session-create-support.ts
-@@ -31,6 +31,7 @@ import {
-   type StructuredAgentId
- } from '../../shared/agent-session-provider-handle'
- import { agentSessionWireProviderHandle } from '../../shared/agent-session-provider-handle-encoding'
-+import { restoreOjakLaunches } from '../agent-launch/ojak-runtime-recovery'
- 
- export class OrcaRuntimeWithGetStructuredAgentSessionCreateSupport extends OrcaRuntimeWithGetWorktreePs {
-   async getStructuredAgentSessionCreateSupport(
-@@ -295,6 +296,7 @@ export class OrcaRuntimeWithGetStructuredAgentSessionCreateSupport extends OrcaR
-           if (this.structuredAgentSessionInventoryUnverifiable) {
-             this.structuredAgentSessionTabRestorePromise = null
-           }
-+          if (this.store) restoreOjakLaunches(this, this.store)
-         },
-         (error) => {
-           this.structuredAgentSessionTabRestorePromise = null
-diff --git a/src/main/runtime/rpc/methods/agent-launch-terminal-prompt.test.ts b/src/main/runtime/rpc/methods/agent-launch-terminal-prompt.test.ts
-index 4da9fd8d..4dadcca9 100644
---- a/src/main/runtime/rpc/methods/agent-launch-terminal-prompt.test.ts
-+++ b/src/main/runtime/rpc/methods/agent-launch-terminal-prompt.test.ts
-@@ -104,6 +104,23 @@ describe('writing a launch prompt into a terminal agent', () => {
-     expect(options.composerReady).toBe(true)
-   })
- 
-+  it('restores a draft as one sanitized paste without submitting a model request', async () => {
-+    const stub = runtimeStub({})
-+    const writes: { text?: string; enter?: boolean }[] = []
-+    const delivered = await deliverTerminalAgentLaunchPrompt({
-+      runtime: { ...stub.runtime, sendTerminal: async (_handle, action, options) => {
-+        await options.beforeWrite?.('pty-1')
-+        writes.push(action)
-+        return { handle: 'term_1', accepted: true, bytesWritten: action.text?.length ?? 0 }
-+      } },
-+      handle: 'term_1', agent: 'omp', freshLaunch: true, delivery: 'draft',
-+      text: 'first\nsecond\u001b[201~'
-+    })
-+    expect(delivered).toBe(true)
-+    expect(writes).toEqual([{ text: '\u001b[200~first\rsecond␛[201~\u001b[201~', enter: false }])
-+    expect(stub.sendTerminalAgentPrompt).not.toHaveBeenCalled()
-+  })
-+
-   it('does not write when the composer never opened', async () => {
-     const stub = runtimeStub({ wait: { satisfied: false, status: 'blocked' } })
-     const delivered = await deliverTerminalAgentLaunchPrompt({
-diff --git a/src/main/runtime/rpc/methods/agent-launch-terminal-prompt.ts b/src/main/runtime/rpc/methods/agent-launch-terminal-prompt.ts
-index 8cffda5c..0d65aa51 100644
---- a/src/main/runtime/rpc/methods/agent-launch-terminal-prompt.ts
-+++ b/src/main/runtime/rpc/methods/agent-launch-terminal-prompt.ts
-@@ -34,6 +34,7 @@ import {
-   createLaunchedAgentWriteGuard,
-   type LaunchedAgentWriteGuardRuntime
- } from '../../launched-agent-write-guard'
-+import { wrapTerminalBracketedPasteText } from '../../../../shared/terminal-bracketed-paste-text'
- 
- /** The same budget orchestration gives a worker to reach its composer before dispatching to it. */
- const AGENT_READY_TIMEOUT_MS = 60_000
-@@ -96,14 +97,16 @@ async function waitThroughBlockingPrompts(
-  * resend into a live TUI costs a duplicate turn.
-  */
- export async function deliverTerminalAgentLaunchPrompt(args: {
--  runtime: TerminalPromptRuntime
-   handle: string
-   agent: TuiAgent
-   /** False for a reused terminal, whose agent was already running before this launch. */
-   freshLaunch: boolean
-   text: string
-   clock?: ReadinessClock
--}): Promise<boolean> {
-+} & (
-+  | { delivery?: 'submit'; runtime: TerminalPromptRuntime }
-+  | { delivery: 'draft'; runtime: TerminalPromptRuntime & Pick<OrcaRuntimeService, 'sendTerminal'> }
-+)): Promise<boolean> {
-   if (args.text.trim().length === 0) {
-     return false
-   }
-@@ -126,6 +129,12 @@ export async function deliverTerminalAgentLaunchPrompt(args: {
-       )
-       return false
-     }
-+    if (args.delivery === 'draft') {
-+      const sent = await args.runtime.sendTerminal(args.handle, {
-+        text: wrapTerminalBracketedPasteText(args.text), enter: false
-+      }, { inputKind: 'launch', beforeWrite: guard.beforeWrite })
-+      return sent.accepted
-+    }
-     const sent = await args.runtime.sendTerminalAgentPrompt(args.handle, args.text, {
-       inputKind: 'launch',
-       // A fresh launch's composer was just seen ready; a reused pane's state is only inferred.
-diff --git a/src/main/runtime/runtime-agent-terminal-startup.ts b/src/main/runtime/runtime-agent-terminal-startup.ts
-index 68932fc0..4dd03ca9 100644
---- a/src/main/runtime/runtime-agent-terminal-startup.ts
-+++ b/src/main/runtime/runtime-agent-terminal-startup.ts
-@@ -13,6 +13,8 @@ import {
- import { resolveTerminalStartupCwd } from '../../shared/terminal-startup-cwd'
- import { resolveAgentStartupPlanInputs } from '../../shared/agent-startup-plan-inputs'
- import { agentStartedTelemetry } from '../agent-launch/agent-started-telemetry'
-+import { buildAgentDraftLaunchPlan } from '../../shared/tui-agent-startup'
-+import { ojakTerminalSelectionEnv } from '../../shared/ojak-terminal-selection'
- 
- export async function buildRuntimeAgentTerminalStartupOptions(
-   workspace: TerminalWorkspaceLaunchScope,
-@@ -40,6 +42,22 @@ export async function buildRuntimeAgentTerminalStartupOptions(
-     return opts
-   }
- 
-+  if (opts.startupDraft !== undefined) {
-+    const plan = buildAgentDraftLaunchPlan({
-+      ...resolveAgentStartupPlanInputs({
-+        agent, settings, platform, isRemote, agentArgs: opts.agentArgs,
-+        windowsShellOverride: opts.shellOverride, sessionOptions
-+      }),
-+      draft: opts.startupDraft
-+    })
-+    if (plan) {
-+      opts.onStartupPromptCarry?.(true)
-+      return { ...opts, command: plan.launchCommand, env: plan.env,
-+        launchConfig: plan.launchConfig, launchAgent: agent,
-+        startupCommandDelivery: plan.startupCommandDelivery }
-+    }
-+    opts.onStartupPromptCarry?.(false)
-+  }
-   // A prompt this launch command cannot carry has nowhere to go from here — the create returns
-   // options, not a live PTY — so refuse rather than spawn the agent and drop the text.
-   if (opts.startupPrompt && !agentPromptRidesLaunchCommand(agent)) {
-@@ -85,7 +103,11 @@ export async function buildRuntimeAgentTerminalStartupOptions(
-   return {
-     ...opts,
-     command: startupPlan.launchCommand,
--    ...(startupPlan.env ? { env: startupPlan.env } : {}),
-+    ...(startupPlan.env ? { env: {
-+      ...startupPlan.env,
-+      ...(opts.startupDraft !== undefined
-+        ? ojakTerminalSelectionEnv(agent, opts.startupDraft, 'draft', sessionOptions) : {})
-+    } } : {}),
-     launchConfig: startupPlan.launchConfig,
-     launchAgent: agent,
-     startupCommandDelivery: startupPlan.startupCommandDelivery,
-diff --git a/src/main/runtime/runtime-terminal-contracts.ts b/src/main/runtime/runtime-terminal-contracts.ts
-index 43b487db..298a6c15 100644
---- a/src/main/runtime/runtime-terminal-contracts.ts
-+++ b/src/main/runtime/runtime-terminal-contracts.ts
-@@ -53,6 +53,8 @@ export type TerminalCreateOptions = {
-    * and post-start delivery belongs to whoever owns the live PTY.
-    */
-   startupPrompt?: string
-+  /** A recovered unsent draft stays in the agent editor rather than becoming a model request. */
-+  startupDraft?: string
-   /** Main-internal: whether `startupPrompt` rode the launch command. Called once the plan is built. */
-   onStartupPromptCarry?: (carried: boolean) => void
-   /**
-diff --git a/src/main/runtime/structured-agent-runtime-registrations.ts b/src/main/runtime/structured-agent-runtime-registrations.ts
-index bba20e17..dcc1d3ab 100644
---- a/src/main/runtime/structured-agent-runtime-registrations.ts
-+++ b/src/main/runtime/structured-agent-runtime-registrations.ts
-@@ -57,6 +57,7 @@ import {
-   claudeModelCatalogDiscovery,
-   codexModelCatalogDiscovery
- } from './structured-agent-model-catalog-discovery'
-+import { structuredOjakLaunchAdmission } from '../agent-launch/ojak-structured-launch'
- 
- /** What an agent's adapter is built from: the open store and the runtime around it. */
- export type StructuredAgentAdapterContext = {
-@@ -237,6 +238,7 @@ function acpRegistration(spec: AcpLaunchSpec): StructuredAgentRuntimeRegistratio
-       return new AcpStructuredSessionAdapter({
-         spec,
-         readJournal,
-+        acquireLaunchAdmission: structuredOjakLaunchAdmission(context.journalDatabase),
-         resolveLaunch: createAcpStructuredLaunchResolver(spec, {
-           store,
-           readJournal,
-diff --git a/src/main/runtime/structured-agent-session-runtime.ts b/src/main/runtime/structured-agent-session-runtime.ts
-index 5c7d8762..db74c4e2 100644
---- a/src/main/runtime/structured-agent-session-runtime.ts
-+++ b/src/main/runtime/structured-agent-session-runtime.ts
-@@ -73,6 +73,7 @@ import {
-   scheduleNativeChatVisualsSweep,
-   type NativeChatVisualsSweepDeps
- } from '../native-chat/native-chat-visuals-sweep'
-+import { stopOjakLaunchWaiting } from '../agent-launch/ojak-launch-admission'
- 
- /** Whether this profile holds a structured chat: a record or tab in the journal database. */
- export function hasPersistedStructuredAgentSessionStore(
-@@ -216,6 +217,7 @@ export async function stopStructuredAgentSessionRuntime(options?: {
-   trigger?: AgentSessionResumeTrigger
- }): Promise<void> {
-   const trigger = options?.trigger ?? structuredAgentSessionTeardownTrigger()
-+  stopOjakLaunchWaiting()
-   const pending = installing
-   installing = null
-   setStructuredAgentSessionHost(null)
-diff --git a/src/preload/api/pty-api.ts b/src/preload/api/pty-api.ts
-index 229ef1a5..9e1fea17 100644
---- a/src/preload/api/pty-api.ts
-+++ b/src/preload/api/pty-api.ts
-@@ -24,8 +24,13 @@ import type { TerminalPanePlacement } from '../../shared/terminal-pane-placement
- import type { PtyManagementApi } from './pty-management-api'
- import type { TerminalProcessInspection } from '../../shared/terminal-process-inspection'
- import type { CodexSharedServerStatus } from '../../shared/codex-shared-server-command'
-+import type { OjakLaunchNotice } from '../../shared/ojak-launch-admission'
- 
- export type PtyApi = {
-+  ojakLaunchNotices?: () => Promise<OjakLaunchNotice[]>
-+  ojakCancelLaunch?: (key: string) => Promise<boolean>
-+  ojakDismissLaunch?: (key: string) => Promise<boolean>
-+  ojakResumeLaunch?: (key: string, worktreeId: string) => Promise<void>
-   spawn: (opts: {
-     cols: number
-     rows: number
-diff --git a/src/preload/api/pty-bridge.ts b/src/preload/api/pty-bridge.ts
-index 18f867e6..8b926d8c 100644
---- a/src/preload/api/pty-bridge.ts
-+++ b/src/preload/api/pty-bridge.ts
-@@ -1,8 +1,14 @@
- import type { PreloadApi } from '../api-types'
- import { ptySessionControlApi } from './pty-bridge-session-control'
- import { ptyStreamAndSerializationApi } from './pty-bridge-stream-and-serialization'
-+import { ipcRenderer } from 'electron'
-+import type { OjakLaunchNotice } from '../../shared/ojak-launch-admission'
- 
- export const ptyApi = {
-+  ojakLaunchNotices: (): Promise<OjakLaunchNotice[]> => ipcRenderer.invoke('pty:ojakLaunchNotices'),
-+  ojakCancelLaunch: (key: string): Promise<boolean> => ipcRenderer.invoke('pty:ojakCancelLaunch', key),
-+  ojakDismissLaunch: (key: string): Promise<boolean> => ipcRenderer.invoke('pty:ojakDismissLaunch', key),
-+  ojakResumeLaunch: (key: string, worktreeId: string): Promise<void> => ipcRenderer.invoke('pty:ojakResumeLaunch', key, worktreeId),
-   ...ptySessionControlApi,
-   ...ptyStreamAndSerializationApi
- } satisfies PreloadApi['pty']
-diff --git a/src/renderer/src/components/native-chat/StructuredAgentSessionPaneOverlayLayer.tsx b/src/renderer/src/components/native-chat/StructuredAgentSessionPaneOverlayLayer.tsx
-index 942a6a5a..ae91c96a 100644
---- a/src/renderer/src/components/native-chat/StructuredAgentSessionPaneOverlayLayer.tsx
-+++ b/src/renderer/src/components/native-chat/StructuredAgentSessionPaneOverlayLayer.tsx
-@@ -9,6 +9,7 @@ import {
- import { RetainedPaneHost } from '../tab-group/RetainedPaneHost'
- import NativeChatView from './NativeChatView'
- import { isStructuredTab } from './structured-agent-session-tabs'
-+import { OjakLaunchNoticePanel } from '../terminal-pane/OjakLaunchNoticePanel'
- 
- type StructuredAgentSessionTab = Tab & {
-   contentType: 'agent-session'
-@@ -20,12 +21,14 @@ const EMPTY_GROUPS: readonly TabGroup[] = []
- 
- const StructuredAgentSessionOverlaySlot = memo(function StructuredAgentSessionOverlaySlot({
-   tab,
-+  worktreeId,
-   groupId,
-   isActive,
-   isFocusedGroup,
-   onFocusOwningGroup
- }: {
-   tab: StructuredAgentSessionTab
-+  worktreeId: string
-   groupId: string | undefined
-   isActive: boolean
-   isFocusedGroup: boolean
-@@ -55,6 +58,7 @@ const StructuredAgentSessionOverlaySlot = memo(function StructuredAgentSessionOv
-         isFocusedGroup={isFocusedGroup}
-         target={target}
-       />
-+      {target.kind === 'local' && isActive ? <OjakLaunchNoticePanel worktreeId={worktreeId} sessionId={tab.entityId} /> : null}
-     </RetainedPaneHost>
-   )
- })
-@@ -94,6 +98,7 @@ const StructuredAgentSessionPaneOverlayLayer = memo(
-           <StructuredAgentSessionOverlaySlot
-             key={tab.id}
-             tab={tab}
-+            worktreeId={worktreeId}
-             groupId={tab.groupId}
-             isActive={Boolean(isWorktreeActive && groupActiveTabById.get(tab.groupId) === tab.id)}
-             isFocusedGroup={Boolean(
-diff --git a/src/renderer/src/components/terminal-pane/TerminalPaneSurface.tsx b/src/renderer/src/components/terminal-pane/TerminalPaneSurface.tsx
-index 16425f3f..772c526f 100644
---- a/src/renderer/src/components/terminal-pane/TerminalPaneSurface.tsx
-+++ b/src/renderer/src/components/terminal-pane/TerminalPaneSurface.tsx
-@@ -28,6 +28,7 @@ import {
- import type { TerminalPaneController } from './use-terminal-pane-controller'
- import { useAppStore } from '@/store'
- import { isTerminalPaneOnClient } from './terminal-pane-client-host'
-+import { OjakLaunchNoticePanel } from './OjakLaunchNoticePanel'
- 
- export function TerminalPaneSurface({
-   controller
-@@ -177,6 +178,7 @@ export function TerminalPaneSurface({
-           paneTransportsRef={paneTransportsRef}
-         />
-       ))}
-+      {paneOnClient && isActive ? <OjakLaunchNoticePanel worktreeId={worktreeId} tabId={tabId} /> : null}
-       <TerminalPaneCodexRestartPortals controller={controller} />
-       <AgentLaunchPaneNoticePortal
-         refusal={visibleLaunchRefusal}
-diff --git a/src/renderer/src/i18n/locales/en.json b/src/renderer/src/i18n/locales/en.json
-index e4505f56..d9a4789a 100644
---- a/src/renderer/src/i18n/locales/en.json
-+++ b/src/renderer/src/i18n/locales/en.json
-@@ -19275,6 +19275,15 @@
-     "processLimitDetail": "The system refused to create a new process because your user account reached its process limit. This is often caused by runaway terminals, dev servers, or agents. Close some of them, then click Try Again.",
-     "launchFailedGenericDetail": "The system refused to start it. Free up memory or close other apps, then click Try Again. If this keeps happening, reinstall Orca."
-   },
-+  "ojak": {
-+    "launch": {
-+      "copyInput": "Copy saved input",
-+      "cancel": "Cancel",
-+      "resumeHere": "Resume in this workspace",
-+      "dismiss": "Dismiss",
-+      "otherSaved": "Other saved Ojak launches"
-+    }
-+  },
-   "notifications": {
-     "agentStatus": {
-       "needsInput": "needs input",
-diff --git a/src/renderer/src/i18n/locales/es.json b/src/renderer/src/i18n/locales/es.json
-index 957c5cb9..ff438dbe 100644
---- a/src/renderer/src/i18n/locales/es.json
-+++ b/src/renderer/src/i18n/locales/es.json
-@@ -19077,6 +19077,15 @@
-       "hiddenToast": "La pestaña Agentes está oculta. Vuelve a activarla en Configuración → Experimental."
-     }
-   },
-+  "ojak": {
-+    "launch": {
-+      "copyInput": "Copiar entrada guardada",
-+      "cancel": "Cancelar",
-+      "resumeHere": "Reanudar en este espacio de trabajo",
-+      "dismiss": "Descartar",
-+      "otherSaved": "Otros inicios de Ojak guardados"
-+    }
-+  },
-   "notifications": {
-     "agentStatus": {
-       "needsInput": "necesita información",
-diff --git a/src/renderer/src/i18n/locales/fr.json b/src/renderer/src/i18n/locales/fr.json
-index b7b58c6b..a0774a95 100644
---- a/src/renderer/src/i18n/locales/fr.json
-+++ b/src/renderer/src/i18n/locales/fr.json
-@@ -19139,6 +19139,15 @@
-     "moreMatchesAvailable": "D'autres correspondances sont peut-être disponibles. Affinez votre recherche pour réduire les résultats.",
-     "recentValidationFailed": "Impossible de vérifier les fichiers récents : {{error}}"
-   },
-+  "ojak": {
-+    "launch": {
-+      "copyInput": "Copier le texte enregistré",
-+      "cancel": "Annuler",
-+      "resumeHere": "Reprendre dans cet espace de travail",
-+      "dismiss": "Fermer",
-+      "otherSaved": "Autres lancements Ojak enregistrés"
-+    }
-+  },
-   "notifications": {
-     "agentStatus": {
-       "needsInput": "attend une réponse",
-diff --git a/src/renderer/src/i18n/locales/ja.json b/src/renderer/src/i18n/locales/ja.json
-index 4ef3836b..92e022e1 100644
---- a/src/renderer/src/i18n/locales/ja.json
-+++ b/src/renderer/src/i18n/locales/ja.json
-@@ -19077,6 +19077,15 @@
-       "hiddenToast": "Agent タブを非表示にしました。設定 → 実験的機能で再度有効にできます。"
-     }
-   },
-+  "ojak": {
-+    "launch": {
-+      "copyInput": "保存済みの入力をコピー",
-+      "cancel": "キャンセル",
-+      "resumeHere": "このワークスペースで再開",
-+      "dismiss": "閉じる",
-+      "otherSaved": "保存済みの他のOjak起動"
-+    }
-+  },
-   "notifications": {
-     "agentStatus": {
-       "needsInput": "入力待ち",
-diff --git a/src/renderer/src/i18n/locales/ko.json b/src/renderer/src/i18n/locales/ko.json
-index e3a1734a..fe2ad258 100644
---- a/src/renderer/src/i18n/locales/ko.json
-+++ b/src/renderer/src/i18n/locales/ko.json
-@@ -19077,6 +19077,15 @@
-       "hiddenToast": "에이전트 탭이 숨겨졌습니다. 설정 → 실험 기능에서 다시 활성화하세요."
-     }
-   },
-+  "ojak": {
-+    "launch": {
-+      "copyInput": "저장된 입력 복사",
-+      "cancel": "취소",
-+      "resumeHere": "이 작업 공간에서 재개",
-+      "dismiss": "닫기",
-+      "otherSaved": "저장된 다른 Ojak 실행"
-+    }
-+  },
-   "notifications": {
-     "agentStatus": {
-       "needsInput": "입력 필요",
-diff --git a/src/renderer/src/i18n/locales/zh.json b/src/renderer/src/i18n/locales/zh.json
-index a0e85a82..1b71d80a 100644
---- a/src/renderer/src/i18n/locales/zh.json
-+++ b/src/renderer/src/i18n/locales/zh.json
-@@ -19077,6 +19077,15 @@
-       "hiddenToast": "智能体标签页已隐藏。可在设置 → 实验性功能中重新启用。"
-     }
-   },
-+  "ojak": {
-+    "launch": {
-+      "copyInput": "复制已保存的输入",
-+      "cancel": "取消",
-+      "resumeHere": "在此工作区继续",
-+      "dismiss": "关闭",
-+      "otherSaved": "其他已保存的 Ojak 启动"
-+    }
-+  },
-   "notifications": {
-     "agentStatus": {
-       "needsInput": "需要输入",
-diff --git a/src/renderer/src/lib/launch-agent-startup-prompt-plan.ts b/src/renderer/src/lib/launch-agent-startup-prompt-plan.ts
-index 0723d3ed..a76b3c18 100644
---- a/src/renderer/src/lib/launch-agent-startup-prompt-plan.ts
-+++ b/src/renderer/src/lib/launch-agent-startup-prompt-plan.ts
-@@ -3,6 +3,7 @@ import {
-   buildAgentStartupPlan,
-   type AgentStartupPlan
- } from '@/lib/tui-agent-startup'
-+import { ojakTerminalSelectionEnv } from '../../../shared/ojak-terminal-selection'
- 
- type StartupPlanBase = Omit<
-   Parameters<typeof buildAgentStartupPlan>[0],
-@@ -32,11 +33,14 @@ export function planLaunchAgentStartupPrompt(args: {
-   const hasPrompt = prompt.length > 0
-   const launchEmpty = (): AgentStartupPlan | null =>
-     buildAgentStartupPlan({ ...base, prompt: '', allowEmptyPromptLaunch: true })
--  const pasteAfterReady = (submit: boolean): LaunchAgentStartupPromptPlan => ({
--    startupPlan: launchEmpty(),
--    pasteDraftAfterLaunch: prompt,
--    submitPastedPrompt: submit
--  })
-+  const pasteAfterReady = (submit: boolean): LaunchAgentStartupPromptPlan => {
-+    const startupPlan = launchEmpty()
-+    if (startupPlan && base.agent === 'omp') {
-+      startupPlan.env = { ...startupPlan.env, ...ojakTerminalSelectionEnv(base.agent, prompt,
-+        submit ? 'submit' : 'draft', base.sessionOptions) }
-+    }
-+    return { startupPlan, pasteDraftAfterLaunch: prompt, submitPastedPrompt: submit }
-+  }
- 
-   if (hasPrompt && promptDelivery === 'submit-after-ready') {
-     // Why: multi-line generated prompts are too large for a shell argv, so launch clean then paste+submit in the TUI.
-diff --git a/src/shared/startup-line-prompt-carry.ts b/src/shared/startup-line-prompt-carry.ts
-index e808cb9c..2ed7dcda 100644
---- a/src/shared/startup-line-prompt-carry.ts
-+++ b/src/shared/startup-line-prompt-carry.ts
-@@ -19,6 +19,7 @@
- import { TUI_AGENT_CONFIG } from './tui-agent-config'
- import { buildAgentStartupPlan, type AgentStartupPlan } from './tui-agent-startup'
- import type { TuiAgent } from './tui-agent'
-+import { ojakTerminalSelectionEnv } from './ojak-terminal-selection'
- 
- /** Half of macOS MAX_CANON: a single typed line this long survived every canonical-mode write
-  *  measured, and 1 KiB did not. Also the cap on each line of a multi-line one. */
-@@ -116,8 +117,9 @@ export function planStartupWithPromptCandidate(
-       return { plan: withPrompt, promptCarried: true }
-     }
-   }
--  return {
--    plan: buildAgentStartupPlan({ ...inputs, prompt: '', allowEmptyPromptLaunch: true }),
--    promptCarried: false
-+  const plan = buildAgentStartupPlan({ ...inputs, prompt: '', allowEmptyPromptLaunch: true })
-+  if (plan && inputs.agent === 'omp') {
-+    plan.env = { ...plan.env, ...ojakTerminalSelectionEnv(inputs.agent, prompt, 'submit', inputs.sessionOptions) }
-   }
-+  return { plan, promptCarried: false }
- }
-diff --git a/src/shared/tui-agent-startup.ts b/src/shared/tui-agent-startup.ts
-index 8c56c1d9..65630559 100644
---- a/src/shared/tui-agent-startup.ts
-+++ b/src/shared/tui-agent-startup.ts
-@@ -18,6 +18,7 @@ import type { TuiAgent } from './tui-agent'
- import type { SessionOptionValue } from './native-chat-session-options'
- import { resolveAgentLaunchCommand } from './tui-agent-launch-command'
- import { appliedSessionOptionProps, buildFlagPromptStartupPlan } from './flag-prompt-startup'
-+import { ojakTerminalSelectionEnv } from './ojak-terminal-selection'
- 
- export { buildAgentResumeStartupPlan } from './tui-agent-resume-startup'
- 
-@@ -89,7 +90,9 @@ export function buildAgentStartupPlan(args: {
-       followupPrompt: null,
-       launchConfig,
-       ...appliedSessionOptionProps(baseCommand.appliedSessionOptions),
--      ...(args.agentEnv ? { env: { ...args.agentEnv } } : {})
-+      ...(args.agentEnv || agent === 'omp' ? {
-+        env: { ...args.agentEnv, ...ojakTerminalSelectionEnv(agent, prompt, 'submit', args.sessionOptions) }
-+      } : {})
-     }
-   }
- 
-@@ -108,7 +111,9 @@ export function buildAgentStartupPlan(args: {
-       launchConfig,
-       ...appliedSessionOptionProps(baseCommand.appliedSessionOptions),
-       ...(agent === 'codex' ? { startupCommandDelivery: 'shell-ready' as const } : {}),
--      ...(args.agentEnv ? { env: { ...args.agentEnv } } : {})
-+      ...(args.agentEnv || agent === 'omp' ? {
-+        env: { ...args.agentEnv, ...ojakTerminalSelectionEnv(agent, prompt, 'submit', args.sessionOptions) }
-+      } : {})
-     }
-   }
- 
-@@ -276,7 +281,8 @@ export function buildAgentDraftLaunchPlan(args: {
-       expectedProcess: config.expectedProcess,
-       launchConfig,
-       ...appliedSessionOptionProps(baseCommand.appliedSessionOptions),
--      env: { ...args.agentEnv, [config.draftPromptEnvVar]: trimmed }
-+      env: { ...args.agentEnv, [config.draftPromptEnvVar]: trimmed,
-+        ...ojakTerminalSelectionEnv(agent, draft, 'draft', args.sessionOptions) }
-     }
-   }
-   if (
 diff --git a/src/main/agent-launch/ojak-launch-admission.ts b/src/main/agent-launch/ojak-launch-admission.ts
 new file mode 100644
 index 00000000..9f772f3a
@@ -2640,6 +1684,718 @@ index 00000000..c65ce68e
 +    database
 +  })
 +}
+diff --git a/src/main/ipc/pty/ipc/spawn-execute.ts b/src/main/ipc/pty/ipc/spawn-execute.ts
+index 54507a72..b9adc9e5 100644
+--- a/src/main/ipc/pty/ipc/spawn-execute.ts
++++ b/src/main/ipc/pty/ipc/spawn-execute.ts
+@@ -16,6 +16,7 @@ import { deletePtyOwnership } from '../provider/ownership-state'
+ import { ptySizes } from '../delivery/visibility-state'
+ import { clearProviderPtyState } from '../provider/state-cleanup'
+ import type { PtyIpcSpawnState } from './spawn-state'
++import { admitOjakPtySpawn } from '../../../agent-launch/ojak-pty-launch'
+ 
+ export async function executePtyIpcSpawn(ctx: PtyIpcSpawnState): Promise<void> {
+   const args = ctx.args
+@@ -63,6 +64,7 @@ export async function executePtyIpcSpawn(ctx: PtyIpcSpawnState): Promise<void> {
+           owner: stablePaneOwnerCandidate,
+           worktreeId: args.worktreeId,
+           connectionId: args.connectionId,
++          beforeFreshSpawn: () => admitOjakPtySpawn(ctx.spawnOptions, !args.connectionId && !ctx.expectedWslDistro),
+           resolveOwner
+         })
+     ctx.result = stablePaneSpawn.result
+diff --git a/src/main/ipc/pty/ipc/spawn-run.ts b/src/main/ipc/pty/ipc/spawn-run.ts
+index 83e8a778..4d7c43a2 100644
+--- a/src/main/ipc/pty/ipc/spawn-run.ts
++++ b/src/main/ipc/pty/ipc/spawn-run.ts
+@@ -15,6 +15,7 @@ import { commitPtyIpcSpawn } from './spawn-commit'
+ import { createPtyIpcSpawnState, type PtyIpcSpawnState } from './spawn-state'
+ import { triggerPtySpawnPushTargetMaterialization } from './spawn-push-target-materialization'
+ import type { PtySpawnIpcArgs, PtySpawnIpcDeps } from './spawn-types'
++import { commitOjakPtySpawn, releaseOjakPtySpawn } from '../../../agent-launch/ojak-pty-launch'
+ 
+ function releaseAbandonedAgentTeamsLeader(ctx: PtyIpcSpawnState): void {
+   if (!ctx.agentTeamsLeaderHandle) {
+@@ -76,7 +77,9 @@ export async function runPtyIpcSpawn(deps: PtySpawnIpcDeps, args: PtySpawnIpcArg
+       return earlyReserved
+     }
+     await executePtyIpcSpawn(ctx)
+-    return await commitPtyIpcSpawn(ctx)
++    const committed = await commitPtyIpcSpawn(ctx)
++    await commitOjakPtySpawn(ctx.spawnOptions)
++    return committed
+   } catch (err) {
+     releaseAbandonedAgentTeamsLeader(ctx)
+     if (ctx.preSpawnHiddenMarkId !== null) {
+@@ -101,6 +104,7 @@ export async function runPtyIpcSpawn(deps: PtySpawnIpcDeps, args: PtySpawnIpcArg
+     rejectPaneSpawnReservation(ctx.paneSpawnReservationKey, ctx.paneSpawnReservation, err)
+     throw err
+   } finally {
++    releaseOjakPtySpawn(ctx.spawnOptions)
+     ctx.releaseWorktreeSpawn?.()
+     ctx.finishTerminalInstall()
+   }
+diff --git a/src/main/ipc/pty/ipc/spawn.ts b/src/main/ipc/pty/ipc/spawn.ts
+index 6fd5183a..1130772a 100644
+--- a/src/main/ipc/pty/ipc/spawn.ts
++++ b/src/main/ipc/pty/ipc/spawn.ts
+@@ -1,10 +1,27 @@
+ import { getPtyIpc } from '../../pty-host-bindings'
+ import { runPtyIpcSpawn } from './spawn-run'
+ import type { PtySpawnIpcArgs, PtySpawnIpcDeps } from './spawn-types'
++import { ojakLaunchQueue } from '../../../agent-launch/ojak-launch-admission'
++import { resumeOjakLaunch } from '../../../agent-launch/ojak-runtime-recovery'
+ 
+ export function installPtySpawnIpcHandler(deps: PtySpawnIpcDeps): void {
+   const ipcMain = getPtyIpc()
+   const { getLocalPtyStartupPromise } = deps
++  ipcMain.handle('pty:ojakLaunchNotices', async () => (await ojakLaunchQueue()).notices())
++  ipcMain.handle('pty:ojakCancelLaunch', async (_event, key: unknown) => {
++    if (typeof key !== 'string' || key.length > 2048) throw new Error('invalid_launch_key')
++    return (await ojakLaunchQueue()).cancel(key)
++  })
++  ipcMain.handle('pty:ojakDismissLaunch', async (_event, key: unknown) => {
++    if (typeof key !== 'string' || key.length > 2048) throw new Error('invalid_launch_key')
++    return (await ojakLaunchQueue()).dismiss(key)
++  })
++  ipcMain.handle('pty:ojakResumeLaunch', async (_event, key: unknown, worktreeId: unknown) => {
++    if (typeof key !== 'string' || key.length > 2048 ||
++      typeof worktreeId !== 'string' || !worktreeId || worktreeId.length > 2048) throw new Error('invalid_launch_target')
++    if (!deps.runtime || !deps.store) throw new Error('runtime_unavailable')
++    await resumeOjakLaunch(deps.runtime, deps.store, key, worktreeId)
++  })
+ 
+   ipcMain.handle('pty:spawn', async (_event, args: PtySpawnIpcArgs) => {
+     const startupPromise = getLocalPtyStartupPromise(args.connectionId)
+diff --git a/src/main/ipc/pty/pane/stable-owner.ts b/src/main/ipc/pty/pane/stable-owner.ts
+index 83ebdd50..b2f6bc1b 100644
+--- a/src/main/ipc/pty/pane/stable-owner.ts
++++ b/src/main/ipc/pty/pane/stable-owner.ts
+@@ -178,6 +178,7 @@ export type StablePaneSpawnContext = {
+   connectionId?: string | null
+   resolveOwner?: () => StablePaneOwner | null
+   onFreshSpawn?: (result: PtySpawnResult) => void
++  beforeFreshSpawn?: () => Promise<void>
+ }
+ 
+ export function stablePanePersistenceFence(
+@@ -310,6 +311,11 @@ export async function spawnForStablePane(
+       return attached
+     }
+   }
++  await args.beforeFreshSpawn?.()
++  args.spawnOptions.signal?.throwIfAborted()
++  if (args.beforeFreshSpawn && args.resolveOwner?.()) {
++    throw new Error('terminal_pane_owner_changed')
++  }
+   const result = await args.provider.spawn(args.spawnOptions)
+   args.onFreshSpawn?.(result)
+   return { result, owner: null }
+diff --git a/src/main/ipc/pty/pane/stable-pane-relay-absence-respawn.test.ts b/src/main/ipc/pty/pane/stable-pane-relay-absence-respawn.test.ts
+index ce3c578c..1cffd760 100644
+--- a/src/main/ipc/pty/pane/stable-pane-relay-absence-respawn.test.ts
++++ b/src/main/ipc/pty/pane/stable-pane-relay-absence-respawn.test.ts
+@@ -83,6 +83,50 @@ function sessionStore(leaves: string[]): { store: Store; read: () => WorkspaceSe
+ }
+ 
+ describe('stable pane adoption after the relay reports the PTY absent', () => {
++  it('does not create a local PTY while admission waits, or after cancellation', async () => {
++    const gate = Promise.withResolvers<void>()
++    const entered = Promise.withResolvers<void>()
++    const stop = new AbortController()
++    const spawn = vi.fn().mockResolvedValue({ id: 'fresh', isReattach: false })
++    const pending = spawnForStablePane({
++      runtime: undefined,
++      // oxlint-disable-next-line typescript/consistent-type-assertions -- SAFETY: A fresh pane uses only the provider spawn method.
++      provider: { spawn } as unknown as IPtyProvider,
++      spawnOptions: { cols: 80, rows: 24, command: 'omp', signal: stop.signal },
++      owner: null,
++      beforeFreshSpawn: () => { entered.resolve(); return gate.promise }
++    })
++    await entered.promise
++    expect(spawn).not.toHaveBeenCalled()
++    const rejected = expect(pending).rejects.toThrow('launch cancelled')
++    stop.abort(new Error('launch cancelled'))
++    gate.resolve()
++    await rejected
++    expect(spawn).not.toHaveBeenCalled()
++  })
++
++  it('rechecks ownership after a long wait instead of duplicating a newly attached pane', async () => {
++    const gate = Promise.withResolvers<void>()
++    const entered = Promise.withResolvers<void>()
++    let owner: StablePaneOwner | null = null
++    const spawn = vi.fn().mockResolvedValue({ id: 'fresh', isReattach: false })
++    const pending = spawnForStablePane({
++      runtime: undefined,
++      // oxlint-disable-next-line typescript/consistent-type-assertions -- SAFETY: The refusal occurs before any provider method except spawn could be used.
++      provider: { spawn } as unknown as IPtyProvider,
++      spawnOptions: { cols: 80, rows: 24, command: 'omp' },
++      owner,
++      resolveOwner: () => owner,
++      beforeFreshSpawn: () => { entered.resolve(); return gate.promise }
++    })
++    await entered.promise
++    owner = OWNER
++    const rejected = expect(pending).rejects.toThrow('terminal_pane_owner_changed')
++    gate.resolve()
++    await rejected
++    expect(spawn).not.toHaveBeenCalled()
++  })
++
+   it.each([false, true])(
+     'reattaches a live pane without launching a provider process (settled worker: %s)',
+     async (settledWorker) => {
+diff --git a/src/main/ipc/pty/register-handlers.ts b/src/main/ipc/pty/register-handlers.ts
+index 5e823ac5..6ee9b375 100644
+--- a/src/main/ipc/pty/register-handlers.ts
++++ b/src/main/ipc/pty/register-handlers.ts
+@@ -114,6 +114,10 @@ export function registerPtyHandlers(
+ 
+   // Remove prior handlers so re-registration (e.g. macOS re-activate creating a new window) doesn't double-register.
+   ipcMain.removeHandler('pty:spawn')
++  ipcMain.removeHandler('pty:ojakLaunchNotices')
++  ipcMain.removeHandler('pty:ojakCancelLaunch')
++  ipcMain.removeHandler('pty:ojakDismissLaunch')
++  ipcMain.removeHandler('pty:ojakResumeLaunch')
+   ipcMain.removeHandler('pty:moveLeafToNewTab')
+   ipcMain.removeHandler('pty:kill')
+   ipcMain.removeHandler('pty:listSessions')
+diff --git a/src/main/ipc/pty/runtime/spawn-execute.ts b/src/main/ipc/pty/runtime/spawn-execute.ts
+index 8228175a..98e54544 100644
+--- a/src/main/ipc/pty/runtime/spawn-execute.ts
++++ b/src/main/ipc/pty/runtime/spawn-execute.ts
+@@ -18,6 +18,7 @@ import {
+ } from '../../../providers/ssh-pty-errors'
+ import type { RuntimePtySpawnState } from './spawn-state'
+ import { markRuntimeSpawnHiddenBeforeSpawn } from './spawn-hidden-delivery'
++import { admitOjakPtySpawn } from '../../../agent-launch/ojak-pty-launch'
+ 
+ export async function executeRuntimePtySpawn(ctx: RuntimePtySpawnState): Promise<void> {
+   const args = ctx.args
+@@ -85,6 +86,8 @@ export async function executeRuntimePtySpawn(ctx: RuntimePtySpawnState): Promise
+         claim: args.agentSessionEnsure.claim,
+         surface: args.agentSessionEnsure.surface,
+         spawn: async () => {
++          assertClientStillConnected()
++          await admitOjakPtySpawn(ctx.spawnOptions, !args.connectionId && !ctx.expectedWslDistro)
+           assertClientStillConnected()
+           providerResult = await ctx.provider.spawn(ctx.spawnOptions)
+           ctx.rejectedRegistrationCandidate = providerResult
+@@ -141,6 +144,7 @@ export async function executeRuntimePtySpawn(ctx: RuntimePtySpawnState): Promise
+             owner: stablePaneOwnerCandidate,
+             worktreeId: args.worktreeId,
+             connectionId: args.connectionId,
++            beforeFreshSpawn: () => admitOjakPtySpawn(ctx.spawnOptions, !args.connectionId && !ctx.expectedWslDistro),
+             resolveOwner: () =>
+               resolveStablePaneOwner(
+                 ctx.deps.runtime,
+diff --git a/src/main/ipc/pty/runtime/spawn.ts b/src/main/ipc/pty/runtime/spawn.ts
+index 5897cb1d..129c0059 100644
+--- a/src/main/ipc/pty/runtime/spawn.ts
++++ b/src/main/ipc/pty/runtime/spawn.ts
+@@ -20,6 +20,7 @@ import {
+   commitRuntimeSpawnHiddenDelivery,
+   releaseRuntimeSpawnPreSpawnHiddenMark
+ } from './spawn-hidden-delivery'
++import { commitOjakPtySpawn, releaseOjakPtySpawn } from '../../../agent-launch/ojak-pty-launch'
+ 
+ function toRuntimeSpawnReply(result: {
+   id: string
+@@ -101,6 +102,7 @@ export async function spawnPtyFromRuntimeController(
+     await executeRuntimePtySpawn(ctx)
+     const committed = await commitRuntimePtySpawn(ctx)
+     commitRuntimeSpawnHiddenDelivery(ctx)
++    await commitOjakPtySpawn(ctx.spawnOptions)
+     return toRuntimeSpawnReply(committed)
+   } catch (err) {
+     releaseRuntimeSpawnPreSpawnHiddenMark(ctx)
+@@ -120,6 +122,7 @@ export async function spawnPtyFromRuntimeController(
+     rejectPaneSpawnReservation(ctx.paneSpawnReservationKey, ctx.paneSpawnReservation, err)
+     throw err
+   } finally {
++    releaseOjakPtySpawn(ctx.spawnOptions)
+     ctx.releaseWorktreeSpawn?.()
+     ctx.finishTerminalInstall()
+   }
+diff --git a/src/main/native-chat/agent-session-timeline/provider-timeline-assembler-test-support.ts b/src/main/native-chat/agent-session-timeline/provider-timeline-assembler-test-support.ts
+index 79c1aea2..94aeb52e 100644
+--- a/src/main/native-chat/agent-session-timeline/provider-timeline-assembler-test-support.ts
++++ b/src/main/native-chat/agent-session-timeline/provider-timeline-assembler-test-support.ts
+@@ -244,6 +244,7 @@ export async function openProviderTimelineRig(
+   deferred.bind({ journal, fence: 1, publish: () => {} })
+   cleanups.push(async () => {
+     deferred.close()
++    closeTestJournalHostDatabase(root)
+     await rm(root, { recursive: true, force: true })
+   })
+   const sink = providerTimelineSink(deferred.sink)
+diff --git a/src/main/native-chat/agent-session-wire/structured-agent-session-queued-message-rig.test-fixture.ts b/src/main/native-chat/agent-session-wire/structured-agent-session-queued-message-rig.test-fixture.ts
+index ef7e3695..52890615 100644
+--- a/src/main/native-chat/agent-session-wire/structured-agent-session-queued-message-rig.test-fixture.ts
++++ b/src/main/native-chat/agent-session-wire/structured-agent-session-queued-message-rig.test-fixture.ts
+@@ -26,7 +26,7 @@ import {
+   hostTestOperationId,
+   resetHostTestOperationIds
+ } from './structured-agent-session-host-test-data'
+-import { openTestJournalHostDatabase } from '../agent-session-journal/journal-host-database-test-support'
++import { closeTestJournalHostDatabase, openTestJournalHostDatabase } from '../agent-session-journal/journal-host-database-test-support'
+ import { createStructuredAgentSessionLogger } from './structured-agent-session-logger'
+ import {
+   createQueuedRigProvider,
+@@ -271,6 +271,7 @@ export async function createQueuedMessageTestRig(
+ 
+   async function dispose(): Promise<void> {
+     await host.flushAllStreamedEvents()
++    closeTestJournalHostDatabase(root)
+     await rm(root, { recursive: true, force: true })
+   }
+ 
+diff --git a/src/main/pi/rpc-runtime-registration.ts b/src/main/pi/rpc-runtime-registration.ts
+index a8952bcb..ed5caba5 100644
+--- a/src/main/pi/rpc-runtime-registration.ts
++++ b/src/main/pi/rpc-runtime-registration.ts
+@@ -21,10 +21,12 @@ import {
+ import { PiRpcSessionAdapter } from './rpc-session-adapter'
+ import { createPiModelCatalogProbe } from './rpc-model-catalog-probe'
+ import { PI_SESSION_HISTORY } from './pi-session-history'
++import { structuredOjakLaunchAdmission } from '../agent-launch/ojak-structured-launch'
+ 
+ function createPiRpcAdapter(context: StructuredAgentAdapterContext): StructuredAgentRuntimeAdapter {
+   const { deps } = context
+   return new PiRpcSessionAdapter({
++    acquireLaunchAdmission: structuredOjakLaunchAdmission(context.journalDatabase),
+     resolveLaunch: composeStructuredLaunch(
+       PI_RPC_AGENT,
+       structuredAgentLaunchSources(context),
+diff --git a/src/main/pi/rpc-session-adapter.test.ts b/src/main/pi/rpc-session-adapter.test.ts
+index 8c74e65e..abdcff4f 100644
+--- a/src/main/pi/rpc-session-adapter.test.ts
++++ b/src/main/pi/rpc-session-adapter.test.ts
+@@ -18,6 +18,8 @@ import type { ProviderProcessLaunch } from '../provider-process/provider-process
+ import type { StructuredAgentSessionEventSink } from '../native-chat/agent-session-wire/structured-agent-session-event-sink'
+ import { agentSessionLaunchFolderMissing } from '../runtime/agent-session-launch-directory'
+ import { PiRpcSessionAdapter } from './rpc-session-adapter'
++import type { StructuredLaunchAdmission } from '../agent-launch/ojak-structured-launch'
++import type { OjakLaunchTicket } from '../agent-launch/ojak-launch-queue'
+ 
+ const sessionId = 'session-timeline'
+ const file = '/host/account/sessions/session.jsonl'
+@@ -146,8 +148,10 @@ async function setup(
+       return connection
+     }
+   )
++  const acquireLaunchAdmission = vi.fn<StructuredLaunchAdmission>().mockResolvedValue(null)
+   const adapter = new PiRpcSessionAdapter({
+     resolveLaunch,
++    acquireLaunchAdmission,
+     readProcessStartTime: async () => 12345,
+     openConnection,
+     onLifecycle: lifecycle,
+@@ -177,6 +181,7 @@ async function setup(
+     input,
+     resolveLaunch,
+     openConnection,
++    acquireLaunchAdmission,
+     connections
+   }
+ }
+@@ -193,6 +198,41 @@ describe('Pi RPC session ownership and delivery', () => {
+     expect(h.connections).toHaveLength(1)
+   })
+ 
++  it('creates no RPC connection before admission and refuses a cancelled grant', async () => {
++    const h = await setup()
++    await h.adapter.closeSession(sessionId)
++    const gate = Promise.withResolvers<OjakLaunchTicket | null>()
++    const entered = Promise.withResolvers<void>()
++    h.acquireLaunchAdmission.mockImplementationOnce(() => {
++      entered.resolve()
++      return gate.promise
++    })
++    const stop = new AbortController()
++    const started = h.adapter.acquire({ ...h.input, fence: 8, signal: stop.signal })
++    await entered.promise
++    expect(h.connections).toHaveLength(1)
++    stop.abort(new Error('launch cancelled'))
++    const rejected = expect(started).rejects.toThrow('launch cancelled')
++    gate.resolve(null)
++    await rejected
++    expect(h.connections).toHaveLength(1)
++  })
++
++  it('keeps the RPC child behind the durable submission write', async () => {
++    const h = await setup()
++    await h.adapter.closeSession(sessionId)
++    const release = vi.fn()
++    h.acquireLaunchAdmission.mockResolvedValueOnce({
++      signal: new AbortController().signal,
++      submitted: () => { throw new Error('journal write failed') },
++      committed: vi.fn(),
++      release
++    })
++    await expect(h.adapter.acquire({ ...h.input, fence: 8 })).rejects.toThrow('journal write failed')
++    expect(h.connections).toHaveLength(1)
++    expect(release).toHaveBeenCalledTimes(1)
++  })
++
+   it('does not spawn a start cancelled while resolving its workspace', async () => {
+     const h = await setup()
+     await h.adapter.closeSession(sessionId)
+diff --git a/src/main/pi/rpc-session-adapter.ts b/src/main/pi/rpc-session-adapter.ts
+index 139268fe..b99ebbae 100644
+--- a/src/main/pi/rpc-session-adapter.ts
++++ b/src/main/pi/rpc-session-adapter.ts
+@@ -22,6 +22,8 @@ import { PiRpcPromptError, preparePiRpcPrompt } from './rpc-prompt'
+ import { applyPiRpcSessionOption } from './rpc-options'
+ import { supportsSupervisedProviderChildLocation } from '../provider-process/supervised-provider-child-location'
+ import { ClaudeDispatchContentError } from '../claude/claude-structured-dispatch-content'
++import type { StructuredLaunchAdmission } from '../agent-launch/ojak-structured-launch'
++import type { OjakLaunchTicket } from '../agent-launch/ojak-launch-queue'
+ 
+ export type PiRpcSessionAdapterDeps = PiRpcSessionDeps & {
+   resolveLaunch: (input: {
+@@ -29,6 +31,7 @@ export type PiRpcSessionAdapterDeps = PiRpcSessionDeps & {
+     spawnToken: string
+   }) => Promise<PiRpcResolvedLaunch>
+   readProcessStartTime?: (pid: number) => Promise<number | null>
++  acquireLaunchAdmission?: StructuredLaunchAdmission
+ }
+ 
+ export class PiRpcSessionAdapter implements StructuredAgentSessionAdapter {
+@@ -52,6 +55,7 @@ export class PiRpcSessionAdapter implements StructuredAgentSessionAdapter {
+     this.acquiring.add(id)
+     const attempt = this.starts.begin(input.signal)
+     let session: PiRpcSession | undefined
++    let admission: OjakLaunchTicket | null | undefined
+     try {
+       if (attempt.signal.aborted) {
+         throw new AgentSessionPreSpawnError(new Error('Pi closed while starting'))
+@@ -79,8 +83,11 @@ export class PiRpcSessionAdapter implements StructuredAgentSessionAdapter {
+       if (attempt.signal.aborted) {
+         throw new AgentSessionPreSpawnError(new Error('Pi closed while starting'))
+       }
++      admission = await this.deps.acquireLaunchAdmission?.({ ...input, signal: attempt.signal }, launch)
++      attempt.signal.throwIfAborted()
+       const spec = buildPiRpcLaunch(launch)
+       const fresh = !launch.sessionFile && !launch.forkFile
++      admission?.submitted()
+       session = new PiRpcSession(input, randomUUID(), spec, this.deps, fresh)
+       this.sessions.set(id, session)
+       this.starts.track(attempt, session.connection)
+@@ -93,6 +100,7 @@ export class PiRpcSessionAdapter implements StructuredAgentSessionAdapter {
+         await spawned.onSpawned(session.connection.pid)
+       }
+       const process = await spawned.read(session.connection.pid)
++      admission?.committed()
+       const file = await waitForPromiseWithSignal(session.start(), attempt.signal)
+       if (session.connection.closed || attempt.signal.aborted) {
+         throw new Error('Pi exited while starting')
+@@ -120,6 +128,7 @@ export class PiRpcSessionAdapter implements StructuredAgentSessionAdapter {
+       this.starts.retainFailed(id, session.connection)
+       throw new AgentSessionAcquisitionExitUnprovenError(error)
+     } finally {
++      admission?.release()
+       this.starts.end(attempt)
+       this.acquiring.delete(id)
+     }
+diff --git a/src/main/runtime/orca-runtime-build-headless-mobile-session-browser-tabs.ts b/src/main/runtime/orca-runtime-build-headless-mobile-session-browser-tabs.ts
+index 9a247177..5765acc0 100644
+--- a/src/main/runtime/orca-runtime-build-headless-mobile-session-browser-tabs.ts
++++ b/src/main/runtime/orca-runtime-build-headless-mobile-session-browser-tabs.ts
+@@ -26,6 +26,8 @@ import { FLOATING_TERMINAL_WORKTREE_ID } from '../../shared/constants'
+ import { captureAcknowledgedTerminalTabRetirement } from './workspace-session-terminal-tab-retirement-identity'
+ import { closeLeafOrTab } from '../persistence/terminal-topology/terminal-topology-commit'
+ import { markAgentLaunchesClosedByUser } from '../agent-launch/agent-launch-pane-attachment'
++import { cancelOjakTerminalLaunches } from '../agent-launch/ojak-launch-admission'
++import { makePaneKey } from '../../shared/stable-pane-id'
+ 
+ export class OrcaRuntimeWithBuildHeadlessMobileSessionBrowserTabs extends OrcaRuntimeWithPersistTerminalSurfaceRetirements {
+   // Why: headless serve backs browser panes with offscreen WebContents that live
+@@ -119,6 +121,9 @@ export class OrcaRuntimeWithBuildHeadlessMobileSessionBrowserTabs extends OrcaRu
+     target: TerminalSurfaceCloseTarget,
+     options: TerminalSurfaceCloseOptions = {}
+   ): Promise<string[]> {
++    cancelOjakTerminalLaunches(
++      worktreeId, target.tabId, target.kind === 'pane' ? makePaneKey(target.tabId, target.leafId) : undefined
++    )
+     const store = this.store
+     if (!store?.getWorkspaceSession || !store.setWorkspaceSession || !store.runDurableMutation) {
+       throw new Error('workspace_session_unavailable')
+diff --git a/src/main/runtime/orca-runtime-get-structured-agent-session-create-support.ts b/src/main/runtime/orca-runtime-get-structured-agent-session-create-support.ts
+index 335727da..74ce9923 100644
+--- a/src/main/runtime/orca-runtime-get-structured-agent-session-create-support.ts
++++ b/src/main/runtime/orca-runtime-get-structured-agent-session-create-support.ts
+@@ -28,6 +28,7 @@ import {
+ } from '../../shared/agent-session-account-home'
+ import type { StructuredAgentId } from '../../shared/agent-session-provider-handle'
+ import { agentSessionWireProviderHandle } from '../../shared/agent-session-provider-handle-encoding'
++import { restoreOjakLaunches } from '../agent-launch/ojak-runtime-recovery'
+ 
+ export class OrcaRuntimeWithGetStructuredAgentSessionCreateSupport extends OrcaRuntimeWithGetWorktreePs {
+   async getStructuredAgentSessionCreateSupport(
+@@ -290,6 +291,7 @@ export class OrcaRuntimeWithGetStructuredAgentSessionCreateSupport extends OrcaR
+           if (this.structuredAgentSessionInventoryUnverifiable) {
+             this.structuredAgentSessionTabRestorePromise = null
+           }
++          if (this.store) restoreOjakLaunches(this, this.store)
+         },
+         (error) => {
+           this.structuredAgentSessionTabRestorePromise = null
+diff --git a/src/main/runtime/rpc/methods/agent-launch-terminal-prompt.test.ts b/src/main/runtime/rpc/methods/agent-launch-terminal-prompt.test.ts
+index 4da9fd8d..4dadcca9 100644
+--- a/src/main/runtime/rpc/methods/agent-launch-terminal-prompt.test.ts
++++ b/src/main/runtime/rpc/methods/agent-launch-terminal-prompt.test.ts
+@@ -104,6 +104,23 @@ describe('writing a launch prompt into a terminal agent', () => {
+     expect(options.composerReady).toBe(true)
+   })
+ 
++  it('restores a draft as one sanitized paste without submitting a model request', async () => {
++    const stub = runtimeStub({})
++    const writes: { text?: string; enter?: boolean }[] = []
++    const delivered = await deliverTerminalAgentLaunchPrompt({
++      runtime: { ...stub.runtime, sendTerminal: async (_handle, action, options) => {
++        await options.beforeWrite?.('pty-1')
++        writes.push(action)
++        return { handle: 'term_1', accepted: true, bytesWritten: action.text?.length ?? 0 }
++      } },
++      handle: 'term_1', agent: 'omp', freshLaunch: true, delivery: 'draft',
++      text: 'first\nsecond\u001b[201~'
++    })
++    expect(delivered).toBe(true)
++    expect(writes).toEqual([{ text: '\u001b[200~first\rsecond␛[201~\u001b[201~', enter: false }])
++    expect(stub.sendTerminalAgentPrompt).not.toHaveBeenCalled()
++  })
++
+   it('does not write when the composer never opened', async () => {
+     const stub = runtimeStub({ wait: { satisfied: false, status: 'blocked' } })
+     const delivered = await deliverTerminalAgentLaunchPrompt({
+diff --git a/src/main/runtime/rpc/methods/agent-launch-terminal-prompt.ts b/src/main/runtime/rpc/methods/agent-launch-terminal-prompt.ts
+index 8cffda5c..0d65aa51 100644
+--- a/src/main/runtime/rpc/methods/agent-launch-terminal-prompt.ts
++++ b/src/main/runtime/rpc/methods/agent-launch-terminal-prompt.ts
+@@ -34,6 +34,7 @@ import {
+   createLaunchedAgentWriteGuard,
+   type LaunchedAgentWriteGuardRuntime
+ } from '../../launched-agent-write-guard'
++import { wrapTerminalBracketedPasteText } from '../../../../shared/terminal-bracketed-paste-text'
+ 
+ /** The same budget orchestration gives a worker to reach its composer before dispatching to it. */
+ const AGENT_READY_TIMEOUT_MS = 60_000
+@@ -96,14 +97,16 @@ async function waitThroughBlockingPrompts(
+  * resend into a live TUI costs a duplicate turn.
+  */
+ export async function deliverTerminalAgentLaunchPrompt(args: {
+-  runtime: TerminalPromptRuntime
+   handle: string
+   agent: TuiAgent
+   /** False for a reused terminal, whose agent was already running before this launch. */
+   freshLaunch: boolean
+   text: string
+   clock?: ReadinessClock
+-}): Promise<boolean> {
++} & (
++  | { delivery?: 'submit'; runtime: TerminalPromptRuntime }
++  | { delivery: 'draft'; runtime: TerminalPromptRuntime & Pick<OrcaRuntimeService, 'sendTerminal'> }
++)): Promise<boolean> {
+   if (args.text.trim().length === 0) {
+     return false
+   }
+@@ -126,6 +129,12 @@ export async function deliverTerminalAgentLaunchPrompt(args: {
+       )
+       return false
+     }
++    if (args.delivery === 'draft') {
++      const sent = await args.runtime.sendTerminal(args.handle, {
++        text: wrapTerminalBracketedPasteText(args.text), enter: false
++      }, { inputKind: 'launch', beforeWrite: guard.beforeWrite })
++      return sent.accepted
++    }
+     const sent = await args.runtime.sendTerminalAgentPrompt(args.handle, args.text, {
+       inputKind: 'launch',
+       // A fresh launch's composer was just seen ready; a reused pane's state is only inferred.
+diff --git a/src/main/runtime/runtime-agent-terminal-startup.ts b/src/main/runtime/runtime-agent-terminal-startup.ts
+index 68932fc0..4dd03ca9 100644
+--- a/src/main/runtime/runtime-agent-terminal-startup.ts
++++ b/src/main/runtime/runtime-agent-terminal-startup.ts
+@@ -13,6 +13,8 @@ import {
+ import { resolveTerminalStartupCwd } from '../../shared/terminal-startup-cwd'
+ import { resolveAgentStartupPlanInputs } from '../../shared/agent-startup-plan-inputs'
+ import { agentStartedTelemetry } from '../agent-launch/agent-started-telemetry'
++import { buildAgentDraftLaunchPlan } from '../../shared/tui-agent-startup'
++import { ojakTerminalSelectionEnv } from '../../shared/ojak-terminal-selection'
+ 
+ export async function buildRuntimeAgentTerminalStartupOptions(
+   workspace: TerminalWorkspaceLaunchScope,
+@@ -40,6 +42,22 @@ export async function buildRuntimeAgentTerminalStartupOptions(
+     return opts
+   }
+ 
++  if (opts.startupDraft !== undefined) {
++    const plan = buildAgentDraftLaunchPlan({
++      ...resolveAgentStartupPlanInputs({
++        agent, settings, platform, isRemote, agentArgs: opts.agentArgs,
++        windowsShellOverride: opts.shellOverride, sessionOptions
++      }),
++      draft: opts.startupDraft
++    })
++    if (plan) {
++      opts.onStartupPromptCarry?.(true)
++      return { ...opts, command: plan.launchCommand, env: plan.env,
++        launchConfig: plan.launchConfig, launchAgent: agent,
++        startupCommandDelivery: plan.startupCommandDelivery }
++    }
++    opts.onStartupPromptCarry?.(false)
++  }
+   // A prompt this launch command cannot carry has nowhere to go from here — the create returns
+   // options, not a live PTY — so refuse rather than spawn the agent and drop the text.
+   if (opts.startupPrompt && !agentPromptRidesLaunchCommand(agent)) {
+@@ -85,7 +103,11 @@ export async function buildRuntimeAgentTerminalStartupOptions(
+   return {
+     ...opts,
+     command: startupPlan.launchCommand,
+-    ...(startupPlan.env ? { env: startupPlan.env } : {}),
++    ...(startupPlan.env ? { env: {
++      ...startupPlan.env,
++      ...(opts.startupDraft !== undefined
++        ? ojakTerminalSelectionEnv(agent, opts.startupDraft, 'draft', sessionOptions) : {})
++    } } : {}),
+     launchConfig: startupPlan.launchConfig,
+     launchAgent: agent,
+     startupCommandDelivery: startupPlan.startupCommandDelivery,
+diff --git a/src/main/runtime/runtime-terminal-contracts.ts b/src/main/runtime/runtime-terminal-contracts.ts
+index 43b487db..298a6c15 100644
+--- a/src/main/runtime/runtime-terminal-contracts.ts
++++ b/src/main/runtime/runtime-terminal-contracts.ts
+@@ -53,6 +53,8 @@ export type TerminalCreateOptions = {
+    * and post-start delivery belongs to whoever owns the live PTY.
+    */
+   startupPrompt?: string
++  /** A recovered unsent draft stays in the agent editor rather than becoming a model request. */
++  startupDraft?: string
+   /** Main-internal: whether `startupPrompt` rode the launch command. Called once the plan is built. */
+   onStartupPromptCarry?: (carried: boolean) => void
+   /**
+diff --git a/src/main/runtime/structured-agent-runtime-registrations.ts b/src/main/runtime/structured-agent-runtime-registrations.ts
+index 746f55af..033085e5 100644
+--- a/src/main/runtime/structured-agent-runtime-registrations.ts
++++ b/src/main/runtime/structured-agent-runtime-registrations.ts
+@@ -63,6 +63,7 @@ import {
+   composeStructuredLaunchRead,
+   structuredAgentLaunchSources
+ } from './structured-agent-launch-composition'
++import { structuredOjakLaunchAdmission } from '../agent-launch/ojak-structured-launch'
+ 
+ /** What an agent's adapter is built from: the open store and the runtime around it. */
+ export type StructuredAgentAdapterContext = {
+@@ -237,6 +238,7 @@ function acpRegistration(spec: AcpLaunchSpec): StructuredAgentRuntimeRegistratio
+       return new AcpStructuredSessionAdapter({
+         spec,
+         readJournal,
++        acquireLaunchAdmission: structuredOjakLaunchAdmission(context.journalDatabase),
+         resolveLaunch: composeStructuredLaunch(definition, sources, part),
+         readLaunch: composeStructuredLaunchRead(definition, sources, part),
+         connect: (launch, options) => createAcpAgentConnection(launch, options),
+diff --git a/src/main/runtime/structured-agent-session-runtime.ts b/src/main/runtime/structured-agent-session-runtime.ts
+index 34a68277..8e73e960 100644
+--- a/src/main/runtime/structured-agent-session-runtime.ts
++++ b/src/main/runtime/structured-agent-session-runtime.ts
+@@ -71,6 +71,7 @@ import {
+   scheduleNativeChatVisualsSweep,
+   type NativeChatVisualsSweepDeps
+ } from '../native-chat/native-chat-visuals-sweep'
++import { stopOjakLaunchWaiting } from '../agent-launch/ojak-launch-admission'
+ 
+ /** Whether this profile holds a structured chat: a record or tab in the journal database. */
+ export function hasPersistedStructuredAgentSessionStore(
+@@ -206,6 +207,7 @@ export async function stopStructuredAgentSessionRuntime(options?: {
+   trigger?: AgentSessionResumeTrigger
+ }): Promise<void> {
+   const trigger = options?.trigger ?? structuredAgentSessionTeardownTrigger()
++  stopOjakLaunchWaiting()
+   const pending = installing
+   installing = null
+   setStructuredAgentSessionHost(null)
+diff --git a/src/preload/api/pty-api.ts b/src/preload/api/pty-api.ts
+index 1dc52c94..0cc837a7 100644
+--- a/src/preload/api/pty-api.ts
++++ b/src/preload/api/pty-api.ts
+@@ -24,8 +24,13 @@ import type { TerminalPanePlacement } from '../../shared/terminal-pane-placement
+ import type { PtyManagementApi } from './pty-management-api'
+ import type { TerminalProcessInspection } from '../../shared/terminal-process-inspection'
+ import type { CodexSharedServerStatus } from '../../shared/codex-shared-server-command'
++import type { OjakLaunchNotice } from '../../shared/ojak-launch-admission'
+ 
+ export type PtyApi = {
++  ojakLaunchNotices?: () => Promise<OjakLaunchNotice[]>
++  ojakCancelLaunch?: (key: string) => Promise<boolean>
++  ojakDismissLaunch?: (key: string) => Promise<boolean>
++  ojakResumeLaunch?: (key: string, worktreeId: string) => Promise<void>
+   spawn: (opts: {
+     cols: number
+     rows: number
+diff --git a/src/preload/api/pty-bridge.ts b/src/preload/api/pty-bridge.ts
+index 18f867e6..8b926d8c 100644
+--- a/src/preload/api/pty-bridge.ts
++++ b/src/preload/api/pty-bridge.ts
+@@ -1,8 +1,14 @@
+ import type { PreloadApi } from '../api-types'
+ import { ptySessionControlApi } from './pty-bridge-session-control'
+ import { ptyStreamAndSerializationApi } from './pty-bridge-stream-and-serialization'
++import { ipcRenderer } from 'electron'
++import type { OjakLaunchNotice } from '../../shared/ojak-launch-admission'
+ 
+ export const ptyApi = {
++  ojakLaunchNotices: (): Promise<OjakLaunchNotice[]> => ipcRenderer.invoke('pty:ojakLaunchNotices'),
++  ojakCancelLaunch: (key: string): Promise<boolean> => ipcRenderer.invoke('pty:ojakCancelLaunch', key),
++  ojakDismissLaunch: (key: string): Promise<boolean> => ipcRenderer.invoke('pty:ojakDismissLaunch', key),
++  ojakResumeLaunch: (key: string, worktreeId: string): Promise<void> => ipcRenderer.invoke('pty:ojakResumeLaunch', key, worktreeId),
+   ...ptySessionControlApi,
+   ...ptyStreamAndSerializationApi
+ } satisfies PreloadApi['pty']
+diff --git a/src/renderer/src/components/native-chat/StructuredAgentSessionPaneOverlayLayer.tsx b/src/renderer/src/components/native-chat/StructuredAgentSessionPaneOverlayLayer.tsx
+index 942a6a5a..ae91c96a 100644
+--- a/src/renderer/src/components/native-chat/StructuredAgentSessionPaneOverlayLayer.tsx
++++ b/src/renderer/src/components/native-chat/StructuredAgentSessionPaneOverlayLayer.tsx
+@@ -9,6 +9,7 @@ import {
+ import { RetainedPaneHost } from '../tab-group/RetainedPaneHost'
+ import NativeChatView from './NativeChatView'
+ import { isStructuredTab } from './structured-agent-session-tabs'
++import { OjakLaunchNoticePanel } from '../terminal-pane/OjakLaunchNoticePanel'
+ 
+ type StructuredAgentSessionTab = Tab & {
+   contentType: 'agent-session'
+@@ -20,12 +21,14 @@ const EMPTY_GROUPS: readonly TabGroup[] = []
+ 
+ const StructuredAgentSessionOverlaySlot = memo(function StructuredAgentSessionOverlaySlot({
+   tab,
++  worktreeId,
+   groupId,
+   isActive,
+   isFocusedGroup,
+   onFocusOwningGroup
+ }: {
+   tab: StructuredAgentSessionTab
++  worktreeId: string
+   groupId: string | undefined
+   isActive: boolean
+   isFocusedGroup: boolean
+@@ -55,6 +58,7 @@ const StructuredAgentSessionOverlaySlot = memo(function StructuredAgentSessionOv
+         isFocusedGroup={isFocusedGroup}
+         target={target}
+       />
++      {target.kind === 'local' && isActive ? <OjakLaunchNoticePanel worktreeId={worktreeId} sessionId={tab.entityId} /> : null}
+     </RetainedPaneHost>
+   )
+ })
+@@ -94,6 +98,7 @@ const StructuredAgentSessionPaneOverlayLayer = memo(
+           <StructuredAgentSessionOverlaySlot
+             key={tab.id}
+             tab={tab}
++            worktreeId={worktreeId}
+             groupId={tab.groupId}
+             isActive={Boolean(isWorktreeActive && groupActiveTabById.get(tab.groupId) === tab.id)}
+             isFocusedGroup={Boolean(
 diff --git a/src/renderer/src/components/terminal-pane/OjakLaunchNoticePanel.tsx b/src/renderer/src/components/terminal-pane/OjakLaunchNoticePanel.tsx
 new file mode 100644
 index 00000000..3a4cdafe
@@ -2743,6 +2499,178 @@ index 00000000..3a4cdafe
 +    </div>
 +  )
 +}
+diff --git a/src/renderer/src/components/terminal-pane/TerminalPaneSurface.tsx b/src/renderer/src/components/terminal-pane/TerminalPaneSurface.tsx
+index b125de9a..becf2938 100644
+--- a/src/renderer/src/components/terminal-pane/TerminalPaneSurface.tsx
++++ b/src/renderer/src/components/terminal-pane/TerminalPaneSurface.tsx
+@@ -28,6 +28,7 @@ import {
+ import type { TerminalPaneController } from './use-terminal-pane-controller'
+ import { useAppStore } from '@/store'
+ import { isTerminalPaneOnClient } from './terminal-pane-client-host'
++import { OjakLaunchNoticePanel } from './OjakLaunchNoticePanel'
+ 
+ export function TerminalPaneSurface({
+   controller
+@@ -177,6 +178,7 @@ export function TerminalPaneSurface({
+           paneTransportsRef={paneTransportsRef}
+         />
+       ))}
++      {paneOnClient && isActive ? <OjakLaunchNoticePanel worktreeId={worktreeId} tabId={tabId} /> : null}
+       <TerminalPaneCodexRestartPortals controller={controller} />
+       <AgentLaunchPaneNoticePortal
+         refusal={visibleLaunchRefusal}
+diff --git a/src/renderer/src/i18n/locales/en.json b/src/renderer/src/i18n/locales/en.json
+index 6d291a14..183edddf 100644
+--- a/src/renderer/src/i18n/locales/en.json
++++ b/src/renderer/src/i18n/locales/en.json
+@@ -19336,6 +19336,15 @@
+     "processLimitDetail": "The system refused to create a new process because your user account reached its process limit. This is often caused by runaway terminals, dev servers, or agents. Close some of them, then click Try Again.",
+     "launchFailedGenericDetail": "The system refused to start it. Free up memory or close other apps, then click Try Again. If this keeps happening, reinstall Orca."
+   },
++  "ojak": {
++    "launch": {
++      "copyInput": "Copy saved input",
++      "cancel": "Cancel",
++      "resumeHere": "Resume in this workspace",
++      "dismiss": "Dismiss",
++      "otherSaved": "Other saved Ojak launches"
++    }
++  },
+   "notifications": {
+     "agentStatus": {
+       "needsInput": "needs input",
+diff --git a/src/renderer/src/i18n/locales/es.json b/src/renderer/src/i18n/locales/es.json
+index 40f08806..d4e67cc6 100644
+--- a/src/renderer/src/i18n/locales/es.json
++++ b/src/renderer/src/i18n/locales/es.json
+@@ -19113,6 +19113,15 @@
+       "hiddenToast": "La pestaña Agentes está oculta. Vuelve a activarla en Configuración → Experimental."
+     }
+   },
++  "ojak": {
++    "launch": {
++      "copyInput": "Copiar entrada guardada",
++      "cancel": "Cancelar",
++      "resumeHere": "Reanudar en este espacio de trabajo",
++      "dismiss": "Descartar",
++      "otherSaved": "Otros inicios de Ojak guardados"
++    }
++  },
+   "notifications": {
+     "agentStatus": {
+       "needsInput": "necesita información",
+diff --git a/src/renderer/src/i18n/locales/fr.json b/src/renderer/src/i18n/locales/fr.json
+index c5103ea6..fbbcaaf4 100644
+--- a/src/renderer/src/i18n/locales/fr.json
++++ b/src/renderer/src/i18n/locales/fr.json
+@@ -19172,6 +19172,15 @@
+     "moreMatchesAvailable": "D'autres correspondances sont peut-être disponibles. Affinez votre recherche pour réduire les résultats.",
+     "recentValidationFailed": "Impossible de vérifier les fichiers récents : {{error}}"
+   },
++  "ojak": {
++    "launch": {
++      "copyInput": "Copier le texte enregistré",
++      "cancel": "Annuler",
++      "resumeHere": "Reprendre dans cet espace de travail",
++      "dismiss": "Fermer",
++      "otherSaved": "Autres lancements Ojak enregistrés"
++    }
++  },
+   "notifications": {
+     "agentStatus": {
+       "needsInput": "attend une réponse",
+diff --git a/src/renderer/src/i18n/locales/ja.json b/src/renderer/src/i18n/locales/ja.json
+index 90c53e14..3d1d3641 100644
+--- a/src/renderer/src/i18n/locales/ja.json
++++ b/src/renderer/src/i18n/locales/ja.json
+@@ -19113,6 +19113,15 @@
+       "hiddenToast": "Agent タブを非表示にしました。設定 → 実験的機能で再度有効にできます。"
+     }
+   },
++  "ojak": {
++    "launch": {
++      "copyInput": "保存済みの入力をコピー",
++      "cancel": "キャンセル",
++      "resumeHere": "このワークスペースで再開",
++      "dismiss": "閉じる",
++      "otherSaved": "保存済みの他のOjak起動"
++    }
++  },
+   "notifications": {
+     "agentStatus": {
+       "needsInput": "入力待ち",
+diff --git a/src/renderer/src/i18n/locales/ko.json b/src/renderer/src/i18n/locales/ko.json
+index 2203c5ef..0ed8188f 100644
+--- a/src/renderer/src/i18n/locales/ko.json
++++ b/src/renderer/src/i18n/locales/ko.json
+@@ -19113,6 +19113,15 @@
+       "hiddenToast": "에이전트 탭이 숨겨졌습니다. 설정 → 실험 기능에서 다시 활성화하세요."
+     }
+   },
++  "ojak": {
++    "launch": {
++      "copyInput": "저장된 입력 복사",
++      "cancel": "취소",
++      "resumeHere": "이 작업 공간에서 재개",
++      "dismiss": "닫기",
++      "otherSaved": "저장된 다른 Ojak 실행"
++    }
++  },
+   "notifications": {
+     "agentStatus": {
+       "needsInput": "입력 필요",
+diff --git a/src/renderer/src/i18n/locales/zh.json b/src/renderer/src/i18n/locales/zh.json
+index 9501aa69..1c9569f2 100644
+--- a/src/renderer/src/i18n/locales/zh.json
++++ b/src/renderer/src/i18n/locales/zh.json
+@@ -19113,6 +19113,15 @@
+       "hiddenToast": "智能体标签页已隐藏。可在设置 → 实验性功能中重新启用。"
+     }
+   },
++  "ojak": {
++    "launch": {
++      "copyInput": "复制已保存的输入",
++      "cancel": "取消",
++      "resumeHere": "在此工作区继续",
++      "dismiss": "关闭",
++      "otherSaved": "其他已保存的 Ojak 启动"
++    }
++  },
+   "notifications": {
+     "agentStatus": {
+       "needsInput": "需要输入",
+diff --git a/src/renderer/src/lib/launch-agent-startup-prompt-plan.ts b/src/renderer/src/lib/launch-agent-startup-prompt-plan.ts
+index 0723d3ed..a76b3c18 100644
+--- a/src/renderer/src/lib/launch-agent-startup-prompt-plan.ts
++++ b/src/renderer/src/lib/launch-agent-startup-prompt-plan.ts
+@@ -3,6 +3,7 @@ import {
+   buildAgentStartupPlan,
+   type AgentStartupPlan
+ } from '@/lib/tui-agent-startup'
++import { ojakTerminalSelectionEnv } from '../../../shared/ojak-terminal-selection'
+ 
+ type StartupPlanBase = Omit<
+   Parameters<typeof buildAgentStartupPlan>[0],
+@@ -32,11 +33,14 @@ export function planLaunchAgentStartupPrompt(args: {
+   const hasPrompt = prompt.length > 0
+   const launchEmpty = (): AgentStartupPlan | null =>
+     buildAgentStartupPlan({ ...base, prompt: '', allowEmptyPromptLaunch: true })
+-  const pasteAfterReady = (submit: boolean): LaunchAgentStartupPromptPlan => ({
+-    startupPlan: launchEmpty(),
+-    pasteDraftAfterLaunch: prompt,
+-    submitPastedPrompt: submit
+-  })
++  const pasteAfterReady = (submit: boolean): LaunchAgentStartupPromptPlan => {
++    const startupPlan = launchEmpty()
++    if (startupPlan && base.agent === 'omp') {
++      startupPlan.env = { ...startupPlan.env, ...ojakTerminalSelectionEnv(base.agent, prompt,
++        submit ? 'submit' : 'draft', base.sessionOptions) }
++    }
++    return { startupPlan, pasteDraftAfterLaunch: prompt, submitPastedPrompt: submit }
++  }
+ 
+   if (hasPrompt && promptDelivery === 'submit-after-ready') {
+     // Why: multi-line generated prompts are too large for a shell argv, so launch clean then paste+submit in the TUI.
 diff --git a/src/shared/ojak-launch-admission.ts b/src/shared/ojak-launch-admission.ts
 new file mode 100644
 index 00000000..396bada2
@@ -2832,3 +2760,72 @@ index 00000000..68818e26
 +  }
 +  return { [OJAK_TERMINAL_SELECTION_ENV]: JSON.stringify(selection) }
 +}
+diff --git a/src/shared/startup-line-prompt-carry.ts b/src/shared/startup-line-prompt-carry.ts
+index e808cb9c..2ed7dcda 100644
+--- a/src/shared/startup-line-prompt-carry.ts
++++ b/src/shared/startup-line-prompt-carry.ts
+@@ -19,6 +19,7 @@
+ import { TUI_AGENT_CONFIG } from './tui-agent-config'
+ import { buildAgentStartupPlan, type AgentStartupPlan } from './tui-agent-startup'
+ import type { TuiAgent } from './tui-agent'
++import { ojakTerminalSelectionEnv } from './ojak-terminal-selection'
+ 
+ /** Half of macOS MAX_CANON: a single typed line this long survived every canonical-mode write
+  *  measured, and 1 KiB did not. Also the cap on each line of a multi-line one. */
+@@ -116,8 +117,9 @@ export function planStartupWithPromptCandidate(
+       return { plan: withPrompt, promptCarried: true }
+     }
+   }
+-  return {
+-    plan: buildAgentStartupPlan({ ...inputs, prompt: '', allowEmptyPromptLaunch: true }),
+-    promptCarried: false
++  const plan = buildAgentStartupPlan({ ...inputs, prompt: '', allowEmptyPromptLaunch: true })
++  if (plan && inputs.agent === 'omp') {
++    plan.env = { ...plan.env, ...ojakTerminalSelectionEnv(inputs.agent, prompt, 'submit', inputs.sessionOptions) }
+   }
++  return { plan, promptCarried: false }
+ }
+diff --git a/src/shared/tui-agent-startup.ts b/src/shared/tui-agent-startup.ts
+index 8c56c1d9..65630559 100644
+--- a/src/shared/tui-agent-startup.ts
++++ b/src/shared/tui-agent-startup.ts
+@@ -18,6 +18,7 @@ import type { TuiAgent } from './tui-agent'
+ import type { SessionOptionValue } from './native-chat-session-options'
+ import { resolveAgentLaunchCommand } from './tui-agent-launch-command'
+ import { appliedSessionOptionProps, buildFlagPromptStartupPlan } from './flag-prompt-startup'
++import { ojakTerminalSelectionEnv } from './ojak-terminal-selection'
+ 
+ export { buildAgentResumeStartupPlan } from './tui-agent-resume-startup'
+ 
+@@ -89,7 +90,9 @@ export function buildAgentStartupPlan(args: {
+       followupPrompt: null,
+       launchConfig,
+       ...appliedSessionOptionProps(baseCommand.appliedSessionOptions),
+-      ...(args.agentEnv ? { env: { ...args.agentEnv } } : {})
++      ...(args.agentEnv || agent === 'omp' ? {
++        env: { ...args.agentEnv, ...ojakTerminalSelectionEnv(agent, prompt, 'submit', args.sessionOptions) }
++      } : {})
+     }
+   }
+ 
+@@ -108,7 +111,9 @@ export function buildAgentStartupPlan(args: {
+       launchConfig,
+       ...appliedSessionOptionProps(baseCommand.appliedSessionOptions),
+       ...(agent === 'codex' ? { startupCommandDelivery: 'shell-ready' as const } : {}),
+-      ...(args.agentEnv ? { env: { ...args.agentEnv } } : {})
++      ...(args.agentEnv || agent === 'omp' ? {
++        env: { ...args.agentEnv, ...ojakTerminalSelectionEnv(agent, prompt, 'submit', args.sessionOptions) }
++      } : {})
+     }
+   }
+ 
+@@ -276,7 +281,8 @@ export function buildAgentDraftLaunchPlan(args: {
+       expectedProcess: config.expectedProcess,
+       launchConfig,
+       ...appliedSessionOptionProps(baseCommand.appliedSessionOptions),
+-      env: { ...args.agentEnv, [config.draftPromptEnvVar]: trimmed }
++      env: { ...args.agentEnv, [config.draftPromptEnvVar]: trimmed,
++        ...ojakTerminalSelectionEnv(agent, draft, 'draft', args.sessionOptions) }
+     }
+   }
+   if (

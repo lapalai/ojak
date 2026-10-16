@@ -34,7 +34,7 @@
 - **미전송 증거:** 서비스가 upstream 전 단계에서 거절할 때만 HTTP 503의 `error.type=admission_wait`, `error.submitted=false`, `BRIDGE_BUSY`·`BRIDGE_QUEUE_TIMEOUT`·`BRIDGE_RESOURCE_PRESSURE` 중 하나를 보낸다. 이 경우만 같은 POST를 다시 보낼 수 있다. GET 실패는 모델 전송이 아니므로 서비스 복구를 기다릴 수 있다.
 - **불확실 실행:** gateway 연결 자체가 실패해 아무 요청도 보내지 않은 경우에는 기존 계정 선택을 계속할 수 있다. 요청 쓰기/응답 읽기 뒤 실패는 `BRIDGE_EXECUTION_UNKNOWN`으로 닫고 다른 계정으로 넘기지 않는다. omp도 이 상태에서 retry·fallback·자동 continuation을 실행하지 않는다.
 - **생성 전 대기:** omp의 `before_subagent_admission`은 기존 scheduler permit 안에서 무거운 child/session/worktree 생성보다 먼저 실행한다. 기존 30초 `before_subagent_spawn` 라우팅 hook을 대기열로 전용하지 않는다. Orca는 Ojak 관리 대상인 로컬 omp만 생성 전에 대기시키고 비대상 실행은 바꾸지 않는다.
-- **수정본 관리:** omp `v18.11.0` (`c2cb79e4c227aa4b22c4ccb933ff72fd88bceba4`)과 Orca `v1.4.224` (`2bb20586ebc39d605e16d95f57420e20a16e7485`) 소스에 변경을 적용한다. 설치된 바이너리/app.asar를 직접 편집하지 않는다. 공식 업데이트가 수정본을 대체하면 API 호환성을 다시 검증해야 한다.
+- **수정본 관리:** omp `v18.11.0` (`c2cb79e4c227aa4b22c4ccb933ff72fd88bceba4`)과 Orca `v1.4.227` (`f51e82c4c26745f6a15e215e4391f533327697e2`) 소스에 변경을 적용한다. Orca는 초기 v1.4.224 기반 후보에서 현재 설치 버전으로 재기반해 upstream의 sealed launch·새 세션 판정·이력 처리를 보존한다. 설치된 바이너리/app.asar를 직접 편집하지 않는다. 공식 업데이트가 수정본을 대체하면 API 호환성을 다시 검증해야 한다.
 - **Orca 실행 상한:** terminal·Pi RPC·omp ACP가 공유하는 host 대기열은 32건/4MiB다. 생성은 한 번에 하나, 최소 2초 간격으로 해제하며 매번 새 readiness를 확인한다. 원문은 기존 SQLite journal/draft에 두고 실행 의도는 같은 host DB에 FULL 동기화로 저장한다. 임의 shell 문자열이나 환경 snapshot을 복구 실행하지 않는다.
 - **Orca 복구:** 실제 저장된 workspace/tab의 소유권을 검증해 원래 입력을 재개한다. 닫힌 pane은 자동 복원하지 않으며 사용자가 유효한 로컬 workspace에서 재개할 수 있다. structured 대화는 원래 workspace만 허용한다. `submitted`는 기존 process/lease 증명이 해결하기 전까지 자동 재실행·삭제하지 않는다.
 - **재현 가능한 수정본:** `integrations/client-forks/manifest.json`에 upstream commit·tag·수정본 버전·patch SHA-256을 고정한다. `node scripts/prepare-client-forks.mjs <빈-대상-폴더>`로 두 checkout을 재현한다. 기존 checkout·설치본은 덮어쓰지 않는다. Ojak launcher는 지정된 omp 수정본 버전을 확인한 뒤에만 bridge 연결/소유 확장 갱신을 진행한다.
@@ -64,4 +64,4 @@
 
 ## 출시
 
-버전은 Ojak **0.12.0**, omp **18.12.0-ojak.1**, Orca **1.5.0-ojak.1**이다. Windows에서는 소스 빌드와 격리 실행만 검증했으며 설치본을 교체하지 않았다. PC를 재부팅하거나 실제 사용 중인 서비스·IDE·세션을 종료하지 않았다. Mac 설치/검증, release installer 검증, commit/push/공개 배포도 하지 않았다. 구형 클라이언트는 새 모델 POST 규약을 사용할 수 없으므로 실제 반영은 세 수정본과 기존 세션 전환 시점을 함께 조율해야 한다.
+현재 통합 후보는 Ojak **0.13.2**, omp **18.12.0-ojak.1**, Orca **1.5.0-ojak.2**이다. 위 표·화면 시나리오는 초기 0.12.0 후보의 검증 기록이며 새 후보의 설치 증거를 대신하지 않는다. 현재 사용자는 세션 유지를 선택했으므로 PC 재부팅·사용 중인 서비스·IDE·세션 강제 종료를 하지 않는다. 구형 클라이언트는 새 모델 POST 규약을 사용할 수 없으므로 실제 반영은 세 수정본과 기존 세션 전환 시점을 함께 조율해야 한다. 최신 후보별 결과는 `docs/release-policy.md`에 기록한다.

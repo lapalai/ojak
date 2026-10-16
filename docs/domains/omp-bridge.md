@@ -51,7 +51,7 @@ Claude·Codex는 Ojak에 등록된 기존 공식 CLI 로그인과 omp의 원래 
 - 첫 structured 시작은 공급자-visible index가 생기기 전에도 workspace tab이 저장될 수 있다. 복구는 실제 tab 소유권으로 판정하고, 아직 공급자 대화를 만들지 않았다면 기존 예약 session/tab을 재사용한다. Orca의 ACP 버전 검사에는 검증한 `18.12.0-ojak.1`만 추가하며 다른 prerelease를 일괄 허용하지 않는다.
 
 ### 수정본 재현과 빌드 범위
-- 버전: Ojak `0.12.0`, omp `18.12.0-ojak.1`, Orca `1.5.0-ojak.1`. 패치와 각 upstream MIT 라이선스는 `integrations/client-forks`에 있다.
+- 현재 후보 버전: Ojak `0.13.2`, omp `18.12.0-ojak.1`, Orca `1.5.0-ojak.2`(upstream `v1.4.227`). 패치와 각 upstream MIT 라이선스는 `integrations/client-forks`에 있다.
 - `node scripts/prepare-client-forks.mjs --check`는 패치 해시만 검사한다. `node scripts/prepare-client-forks.mjs <새 디렉터리>`는 공식 tag를 clone하고 commit 일치·`git apply --check` 후 패치를 적용한다. 빌드·설치·기존 checkout 변경은 하지 않는다.
 - 각 upstream의 lockfile·native 빌드 전제조건을 따른다. 이번 Windows 검증은 Bun `1.4.3`으로 omp의 `packages/coding-agent`에서 `bun run build`, Orca에서는 `node config/scripts/run-electron-vite-build.mjs`를 실행했다. omp의 native addon은 해당 upstream `18.11.0` ABI, Orca의 native addon은 Electron `43.7.5` ABI가 필요하다.
 - Windows native 모듈 빌드에는 C++ toolchain과 Python이 필요하다. 긴 checkout/pnpm 경로에서는 MSBuild의 260자 중간 파일 경로 제한을 확인했으므로 짧은 checkout/build 경로를 사용한다. 생성된 `out`은 검증용 번들이며 release installer 검증을 대신하지 않는다.

@@ -12,10 +12,10 @@
     {
       "directory": "orca",
       "repository": "https://github.com/stablyai/orca.git",
-      "tag": "v1.4.224",
-      "revision": "2bb20586ebc39d605e16d95f57420e20a16e7485",
-      "version": "1.5.0-ojak.1",
-      "sha256": "cea8784d8654bfdda8bc2d3a3fab9e26ba3600ee052c6cc675740f70bb1dab72"
+      "tag": "v1.4.227",
+      "revision": "f51e82c4c26745f6a15e215e4391f533327697e2",
+      "version": "1.5.0-ojak.2",
+      "sha256": "07af72f298de0b926b5cbe9074ef6e8f5d34535207cf7cde35e322a0178c0551"
     }
   ]
 }

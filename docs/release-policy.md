@@ -83,6 +83,16 @@ npx tauri signer generate -w "$HOME/.tauri/ojak.key"
 
 비밀키가 없는 로컬 빌드에서 `scripts/build.mjs`는 업데이터 산출물만 끄고 앱·설치 파일을 만든다. 키가 있으면 Mac의 `Ojak.app.tar.gz`와 `.sig` 등 업데이터 산출물도 만든다. 빌드 완료와 두 OS 배포 검증 완료는 구분한다.
 
+## 0.13.2 통합 배포 준비 기록 (2026-10-17)
+
+- Ojak Windows 후보: `target/release/bundle/nsis/Ojak_0.13.2_x64-setup.exe`, 11,061,609 bytes, SHA-256 `b0dd6ef9cb800a22ca278c2077dcc82614d69de4dd9f0ddf7d7e1ce6fb821eab`. 로컬 업데이터 서명은 없다.
+- 동시 교체할 omp는 `18.12.0-ojak.1` 실행 파일(256,087,040 bytes, SHA-256 `7708ef018390d318072d44e85b0178d4d9bdf34b055d0342d1ae6588799dfd73`), Orca는 현재 설치본과 같은 upstream `v1.4.227` (`f51e82c4c26745f6a15e215e4391f533327697e2`) 기반 `1.5.0-ojak.2` Windows NSIS다(222,369,920 bytes, SHA-256 `002b2e65382218e1342c9d4298ce745247af28f2ebd0cdb9d3971ae958c64b19`).
+- Orca의 최신 sealed launch composition·spawn token·fresh-session·이력 처리를 보존해 admission 패치를 재기반했다. 독립적인 깨끗한 `v1.4.227` worktree에서 patch 적용 검사, host/CLI/renderer 타입 검사와 queue·recovery·ACP/Pi·미전송 입력 관련 10개 파일 147개 테스트가 통과했다.
+- Orca 네이티브 입력은 공식 `v1.4.224` Windows 배포 파일에서 가져왔다. GitHub asset digest와 실제 파일 SHA-256은 모두 `d192a7f1142b58a8c9bc855275fb37cd41dff7f152fd3cbac3acdd96331ec849`이며, 봉인된 원본 템플릿의 9개 대상 파일 해시 검증을 통과했다. 두 upstream 간 lockfile·node-pty 소스 패치·Node runtime pin의 바이트 일치를 확인하고 네이티브 파일을 수정하지 않았다. ELF의 실제 GLIBC 요구 버전을 읽고 N-API 8 초과 심볼을 거절한 뒤 슬롯을 가져왔다. 모든 OS에서 새로 컴파일하거나 실행했다고 주장하지 않는다.
+- 수정한 `v1.4.227` 소스로 9개 대상 원격 JS 템플릿을 재생성하고 `ORCA_REQUIRE_ORCAD_TEMPLATE=1`로 전체 NSIS를 빌드했다. packaged main 의존성·ConPTY 프로세스 트리 소유권·daemon 진입점·CLI 5개 명령·모바일 웹·플러그인·9개 원격 대상 검증을 모두 통과했다. 원격 템플릿을 생략한 이전 개발 후보는 교체 후보로 사용하지 않는다.
+- 실제 Windows orcad를 임시 HOME·프로필·loopback 포트에서 실행해 pairing → repo/worktree 생성 → terminal RPC → 실제 PTY 명령 출력 왕복 → 종료를 확인했다(`terminal round trip OK`, `PASS`). 테스트 프로세스가 남지 않았음을 확인하고 임시 HOME·worktree를 제거했다. Ojak Rust 426개·desktop 97개·omp extension 25개와 타입 검사 및 전체 Windows NSIS 빌드도 통과했다.
+- 사용자는 점검 재부팅 대신 **현재 세션 유지**를 명시 선택했다. `SESSION_BUSY`를 무시하는 기존 서비스 교체·강제 종료·lease 삭제·재부팅은 하지 않는다. PR 필수 검토자는 `Liopark`, 현재 작업 자격은 WRITE이며 SSH 등록 호스트도 없다. Windows 기존 설치본·Mac 실기기 설치·서명된 동일 후보·공개 릴리스는 아직 미검증이다.
+
 ## 0.13.1 후보 검증 기록 (2026-10-17)
 
 - Windows 로컬 통합 후보: `target/release/bundle/nsis/Ojak_0.13.1_x64-setup.exe`, 11,060,658 bytes, SHA-256 `06acc92b33f4f3ecd51ad3925110b7d7aff270304cda0e996db55246dba9ac86`. 업데이터 서명이 없는 로컬 빌드다.
