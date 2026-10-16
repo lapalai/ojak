@@ -629,6 +629,12 @@ impl Source {
         }
         Ok(())
     }
+    pub(super) fn reset_credential(self: &Arc<Self>) -> Result<Value, ApiError> {
+        self.ready()?;
+        self.validate()?;
+        self.entry(&self.state.lock()).map(|entry| entry["credential"].clone())
+            .ok_or_else(|| ApiError::new("AUTH_REQUIRED", "공식 CLI의 유효한 구독 로그인을 확인하지 못했어요."))
+    }
     fn entry(&self, state: &SourceState) -> Option<Value> {
         let access = state.access.as_ref()?;
         if state.rejected() {
@@ -822,7 +828,7 @@ impl Source {
                 }
                 let text = body.to_string();
                 let _ = write!(client,"HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nCache-Control: no-store\r\nETag: \"{}\"\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",generation,text.len(),text);
-                let _ = client.shutdown(Shutdown::Both);
+                finish(client);
                 return;
             }
             // 바뀔 때까지 잠근 채 기다리지 않고 잠금을 풀고 잔다. 깨우는 시점: 상태 변경, 가장 이른 차단 만료,

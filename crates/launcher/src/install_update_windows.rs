@@ -137,9 +137,13 @@ fn resume(paths: &Paths, update: &Update) -> Result<(), ApiError> {
         return Err(error("INVALID_UNINSTALL_PERMIT", "비어 있는 안전 종료 승인은 사용하지 않습니다."));
     }
     let binary = update.directory.join("aam-service.exe");
+    // 새 판은 감독 프로세스를 시작하고 서비스는 그 자식이다. 승인과 RPC는 pipe 서버(서비스) 프로세스 객체에 대해서만 한다.
     let process = match ServiceProcess::connect(paths, &binary)? {
         Some(process) => process,
-        None => start_detached(&binary, paths)?,
+        None => {
+            let started = start_detached(&binary, paths)?;
+            started_worker(paths, &binary, &started)?
+        }
     };
     let deadline = Instant::now() + Duration::from_secs(15);
     loop {
@@ -321,7 +325,8 @@ pub(super) fn run(paths: &Paths, action: &str, install_dir: &Path) -> Result<(),
                 return Err(error("UPDATE_RECOVERY_REQUIRED", "이전 업데이트 복구 기록이 있습니다. installer recover로 복구한 뒤 다시 설치하세요."));
             }
             let service = owned_service(paths, &install_dir)?;
-            let was_running = running(paths);
+            // 서비스가 충돌 뒤 재시작 대기 중이어도 감독 프로세스가 있으면 실행 중이던 서비스다. 업데이트 뒤 다시 시작해야 한다.
+            let was_running = running(paths) || aam_service::supervisor::running(paths);
             if was_running && service.is_none() { return Err(error("UNMANAGED_SERVICE", "등록되지 않은 실행 중 서비스가 있어 업데이트하지 않았습니다.")); }
             // 조용한 prepare는 닫지 않고 실패한다. 동의 UI와 종료는 prepare-interactive에서만, 백업·영수증을 만들기 전에 일어난다.
             if action == "prepare-interactive" { release_launcher_interactively(&install_dir)?; } else { ensure_launcher_released(&install_dir)?; }
@@ -411,28 +416,48 @@ pub(super) fn run(paths: &Paths, action: &str, install_dir: &Path) -> Result<(),
                     service = owned_service(paths, &install_dir)?;
                 }
             }
-            if let Some(mut process) = process {
-                if service.is_some() {
-                    service_stop(paths)?;
-                } else {
-                    // 0.9.2가 시작 후 소유 검사에 실패해 남긴 daemon만 installer 복구에서 다룬다.
-                    let originals_proved = update.service_installed && FILES.iter().all(|name| update.files.contains_key(*name));
-                    let image = process.image.as_mut().ok_or_else(|| error("UNMANAGED_SERVICE", "서비스 실행 파일 객체를 확인하지 못했습니다."))?;
-                    let current_hash = hash_file(image)?;
-                    let known_hash = update.files.get("aam-service.exe").is_some_and(|hash| hash == &current_hash)
-                        || update.replacement_files.get("aam-service.exe").is_some_and(|hash| hash == &current_hash)
-                        || current_hash == LEGACY_092_SERVICE_HASH;
-                    if !originals_proved || !known_hash {
-                        return Err(error("UNMANAGED_SERVICE", "기존 설치의 실행 파일 증거가 없어 무기록 서비스를 중지하지 않았습니다."));
-                    }
-                    let permit = process.prepare(paths)?;
-                    update.rollback_permit = Some(permit.clone());
-                    save(&paths.home.join(RECEIPT), &update)?;
-                    if !process.stop() || running(paths) {
-                        let _ = process.call(paths, "service.cancelUninstall", json!({ "permit": permit }));
-                        return Err(error("SERVICE_STOP_FAILED", "승인한 서비스의 종료를 확인하지 못해 복구 기록을 보존했습니다."));
-                    }
+            // 파일을 되돌리는 동안 쥐는 관문. 새 감독 프로세스나 작업자가 실행 파일을 다시 열지 못하게 한다.
+            let mut fence: Option<aam_service::supervisor::Fence> = None;
+            if service.is_some() {
+                // 최초 연결의 image 핸들도 복원 전에 놓는다. 중지 경로에서 같은 소유 서비스를 다시 검증한다.
+                drop(process);
+                // 등록된 서비스는 pipe가 있든 없든 독립적으로 끝낸다. 충돌한 교체 서비스의 감독 프로세스가 재시작 대기 중이면 pipe가 없지만
+                // 같은 실행 파일을 쥐고 새 서비스를 만들 수 있다. `service_stop_for_rollback`이 자기 관문을 쥐고 서비스(있으면)와 감독 프로세스를 끝낸다.
+                fence = Some(service_stop_for_rollback(paths)?);
+            } else if let Some(mut process) = process {
+                // 0.9.2가 시작 후 소유 검사에 실패해 남긴 daemon만 installer 복구에서 다룬다.
+                let originals_proved = update.service_installed && FILES.iter().all(|name| update.files.contains_key(*name));
+                let image = process.image.as_mut().ok_or_else(|| error("UNMANAGED_SERVICE", "서비스 실행 파일 객체를 확인하지 못했습니다."))?;
+                let current_hash = hash_file(image)?;
+                let known_hash = update.files.get("aam-service.exe").is_some_and(|hash| hash == &current_hash)
+                    || update.replacement_files.get("aam-service.exe").is_some_and(|hash| hash == &current_hash)
+                    || current_hash == LEGACY_092_SERVICE_HASH;
+                if !originals_proved || !known_hash {
+                    return Err(error("UNMANAGED_SERVICE", "기존 설치의 실행 파일 증거가 없어 무기록 서비스를 중지하지 않았습니다."));
                 }
+                // 감독 프로세스가 (있다면) 이 서비스를 되살리지 못하게 막은 뒤에 승인하고 끈다. 파일을 되돌리기 전에 감독 프로세스가
+                // 끝난 것까지 확인하고 관문은 파일 복구가 끝날 때까지 쥔다. 확정 전에 거절되면 관문을 놓아 감독이 이어진다.
+                let held = fence.insert(aam_service::supervisor::engage(paths)?);
+                let permit = process.prepare(paths)?;
+                update.rollback_permit = Some(permit.clone());
+                save(&paths.home.join(RECEIPT), &update)?;
+                if !process.stop() || running(paths) {
+                    let _ = process.call(paths, "service.cancelUninstall", json!({ "permit": permit }));
+                    return Err(error("SERVICE_STOP_FAILED", "승인한 서비스의 종료를 확인하지 못해 복구 기록을 보존했습니다."));
+                }
+                held.commit_retirement();
+                held.wait_supervisor_exit(Duration::from_secs(15))?;
+            } else {
+                // 등록도 pipe도 없다. 감독 프로세스만 살아 있으면 누가 소유한 것인지 알 수 없는 감독이 같은 실행 파일을 쥐고 있다.
+                // 건드리지 않고 파일 복구 전에 거절한다. 없다고 확인되면 파일 복구가 끝날 때까지 그 잠금을 쥐어 새 감독 프로세스를 막는다.
+                if aam_service::supervisor::running(paths) {
+                    return Err(error("UNMANAGED_SERVICE", "등록되지 않은 감독 프로세스가 실행 중이라 파일을 되돌리지 않았습니다."));
+                }
+                let mut held = aam_service::supervisor::engage(paths)?;
+                if held.supervisor_alive() {
+                    return Err(error("UNMANAGED_SERVICE", "등록되지 않은 감독 프로세스가 실행 중이라 파일을 되돌리지 않았습니다."));
+                }
+                fence = Some(held);
             }
             for name in update.files.keys() {
                 let backup = paths.home.join(BACKUP).join(name);
@@ -446,6 +471,8 @@ pub(super) fn run(paths: &Paths, action: &str, install_dir: &Path) -> Result<(),
             }
             // legacy 소유 기록이 사라졌으면 검증된 파일만 되돌린다. 다음 NSIS 설치가 새 등록을 담당한다.
             if service.is_some() {
+                // 서비스를 다시 시작하기 전에 관문을 푼다. 쥔 채로는 새 감독 프로세스가 작업자를 만들지 못한다.
+                drop(fence.take());
                 resume(paths, &update)?;
             } else if paths.database.try_exists().map_err(io_error)? {
                 aam_service::cancel_stopped_uninstall(paths, update.rollback_permit.as_deref())?;
@@ -665,6 +692,42 @@ mod tests {
         update.was_running = true;
         assert_eq!(resume(&fixture.paths, &update).unwrap_err().code, "UNMANAGED_SERVICE");
         assert!(!fixture.paths.home.join("service-install.json").exists());
+    }
+    #[test]
+    fn prepare_counts_a_live_supervisor_as_a_running_service() {
+        // 서비스가 충돌 뒤 재시작을 기다리는 중이라 pipe가 없어도 감독 프로세스가 살아 있으면 등록 없는 서비스로 보고 업데이트하지 않는다.
+        let fixture = Fixture::new();
+        for name in FILES { fs::write(fixture.app.join(name), b"original").unwrap(); }
+        let supervisor = aam_protocol::secure::open_owned_file(&fixture.paths.home.join("service-supervisor.lock")).unwrap();
+        supervisor.try_lock().unwrap();
+        assert!(aam_service::supervisor::running(&fixture.paths));
+        assert_eq!(run(&fixture.paths, "prepare", &fixture.app).unwrap_err().code, "UNMANAGED_SERVICE");
+        assert!(!fixture.paths.home.join(BACKUP).exists() && !fixture.paths.home.join(RECEIPT).exists());
+        drop(supervisor);
+        assert!(!aam_service::supervisor::running(&fixture.paths));
+        run(&fixture.paths, "prepare", &fixture.app).unwrap();
+    }
+
+    #[test]
+    fn recover_refuses_an_unmanaged_supervisor_before_restoring_files_and_leaves_it_running() {
+        // 등록도 pipe도 없는데 감독 프로세스만 살아 있으면(재시작 대기) 같은 실행 파일을 쥔 소유 불명의 감독이다. 파일을 되돌리기 전에 거절하고
+        // 건드리지 않아야 한다(관문도 남기지 않아 감독이 계속 작업자를 만든다).
+        let fixture = Fixture::new();
+        for name in FILES { fs::write(fixture.app.join(name), b"original").unwrap(); }
+        run(&fixture.paths, "prepare", &fixture.app).unwrap();
+        for name in FILES { fs::write(fixture.app.join(name), b"replacement").unwrap(); }
+        let supervisor = aam_protocol::secure::open_owned_file(&fixture.paths.home.join("service-supervisor.lock")).unwrap();
+        supervisor.try_lock().unwrap();
+        assert_eq!(run(&fixture.paths, "recover", &fixture.app).unwrap_err().code, "UNMANAGED_SERVICE");
+        for name in FILES { assert_eq!(fs::read(fixture.app.join(name)).unwrap(), b"replacement"); }
+        assert!(fixture.paths.home.join(RECEIPT).exists());
+        assert!(aam_service::supervisor::running(&fixture.paths), "a refused recovery must not retire the supervisor");
+        // 관문이 남지 않았다: 다른 작업이 즉시 관문을 얻을 수 있다.
+        drop(aam_service::supervisor::engage(&fixture.paths).unwrap());
+        drop(supervisor);
+        run(&fixture.paths, "recover", &fixture.app).unwrap();
+        for name in FILES { assert_eq!(fs::read(fixture.app.join(name)).unwrap(), b"original"); }
+        assert!(!fixture.paths.home.join(RECEIPT).exists());
     }
 
 }

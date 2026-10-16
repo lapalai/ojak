@@ -1,8 +1,9 @@
 import { spawnSync } from 'node:child_process';
-import { existsSync, mkdirSync, copyFileSync, writeFileSync } from 'node:fs';
+import { existsSync, mkdirSync, copyFileSync, writeFileSync, readFileSync } from 'node:fs';
 import { homedir } from 'node:os';
 import { resolve, dirname, delimiter } from 'node:path';
 import { fileURLToPath } from 'node:url';
+import { createHash } from 'node:crypto';
 const root = resolve(dirname(fileURLToPath(import.meta.url)), '..');
 const windows = process.platform === 'win32';
 const exe = windows ? '.exe' : '';
@@ -25,6 +26,26 @@ mkdirSync(resolve(native, 'binaries'), { recursive: true });
 for (const name of ['aam', 'aam-service']) copyFileSync(resolve(root, 'target/release', `${name}${exe}`), resolve(native, 'binaries', `${name}-${triple}${exe}`));
 // NSIS needs the new helper before replacing an older installation, and verifies both installed sidecars against this payload.
 if (windows) for (const name of ['aam', 'aam-service']) copyFileSync(resolve(root, 'target/release', `${name}.exe`), resolve(native, 'binaries', `installer-${name}.exe`));
+// Keep the exact service image and matching PDB outside the installer payload.
+// WER dumps are private runtime data and are never included here.
+if (windows) {
+  const appVersion = JSON.parse(readFileSync(resolve(root, 'package.json'), 'utf8')).version;
+  const symbols = resolve(root, 'target/symbols', appVersion);
+  mkdirSync(symbols, { recursive: true });
+  const checksums = [];
+  for (const file of ['aam-service.exe', 'aam_service.pdb']) {
+    const source = resolve(root, 'target/release', file);
+    const bytes = readFileSync(source);
+    const hash = createHash('sha256').update(bytes).digest('hex');
+    const destination = resolve(symbols, file);
+    if (existsSync(destination) && createHash('sha256').update(readFileSync(destination)).digest('hex') !== hash) {
+      throw new Error(`Refusing to replace different ${appVersion} service symbols; bump the version first.`);
+    }
+    copyFileSync(source, destination);
+    checksums.push(`${hash}  ${file}`);
+  }
+  writeFileSync(resolve(symbols, 'SHA256SUMS'), `${checksums.join('\n')}\n`);
+}
 const tauriArgs = ['build'];
 // createUpdaterArtifacts needs a private key that matches plugins.updater.pubkey.
 // Local builds omit the key, so skip updater archives instead of failing the app bundle.

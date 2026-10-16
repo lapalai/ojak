@@ -75,8 +75,8 @@ macOS는 `kern.bootsessionuuid`로 "이전 부팅"을 판정한다. Windows 후�
 |---|---|
 | `aam integration install` | 서비스의 첫 계정 조회가 끝나길 기다린 뒤(최대 60초) 계정이 준비된 도구의 원본 CLI 진입 경로를 기록하고, `AAM_HOME\bin\claude.exe`·`codex.exe`를 launcher 복사본으로 만든다(symlink는 관리자·개발자 모드 필요). launcher는 argv0 파일 이름(확장자 제외, 대소문자 무시)으로 shim 모드를 고른다. 앱이 만든 적 없는 파일이 있으면 `SHIM_CONFLICT`로 멈춘다. 실행 중인 shim은 이름을 바꿔 두고 다음 설치에서 지운다. |
 | `aam shell install` | 사용자 `HKCU\Environment\Path` 맨 앞에 `AAM_HOME\bin`을 넣고(값 형식 보존) `WM_SETTINGCHANGE`를 알린다. 제거는 그 항목만 뺀다. |
-| `aam service install` | `HKCU\...\Run`의 `Ojak Service` 값으로 로그인 시 `aam-service.exe`를 실행하고, 지금 콘솔·작업과 분리해 시작한다. 이전 `Ojak` 값은 소유 기록이 일치할 때만 이관한다. 데스크톱 앱 자동 실행 값과 충돌하지 않는다. |
-| `aam service stop`/`uninstall` | macOS와 같은 안전 절차(`service.prepareUninstall` permit, 활성·불확실 lease 검사) 뒤 파이프 서버 프로세스(같은 사용자 확인)를 종료한다. 제거는 앱이 쓴 Run 값만 지운다. |
+| `aam service install` | `HKCU\...\Run`의 `Ojak Service` 값으로 로그인 시 `aam-service.exe` 감독 프로세스를 실행하고, 지금 콘솔·작업과 분리해 시작한다. 실제 서비스는 `--worker` 자식이다. 이전 `Ojak` 값은 소유 기록이 일치할 때만 이관하며 데스크톱 자동 실행 값과 충돌하지 않는다. |
+| `aam service stop`/`uninstall` | 작업자 생성을 일시 정지한 뒤 `service.prepareUninstall` permit과 활성·불확실 lease를 검사한다. 확인한 파이프 서버만 종료하고 감독 종료를 확정해 프로세스 종료까지 기다린다. 안전 검사 거절은 자동 복구를 유지한다. 제거는 앱이 쓴 Run 값만 지운다. |
 
 원본 CLI 탐색(`adapters::discover`)은 현재 `AAM_HOME\bin`을 제외한다. 다른 AAM_HOME의 복사본 shim도 상위 `integration.json`의 앱 owner·shims 목록으로 확인해 거부한다.
 

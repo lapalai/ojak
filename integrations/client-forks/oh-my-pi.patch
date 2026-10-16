@@ -1,0 +1,2059 @@
+diff --git a/bun.lock b/bun.lock
+index 3e5f132..c754135 100644
+--- a/bun.lock
++++ b/bun.lock
+@@ -22,7 +22,7 @@
+     },
+     "packages/agent": {
+       "name": "@oh-my-pi/pi-agent-core",
+-      "version": "18.11.0",
++      "version": "18.12.0-ojak.1",
+       "dependencies": {
+         "@oh-my-pi/pi-ai": "catalog:",
+         "@oh-my-pi/pi-catalog": "catalog:",
+@@ -41,7 +41,7 @@
+     },
+     "packages/ai": {
+       "name": "@oh-my-pi/pi-ai",
+-      "version": "18.11.0",
++      "version": "18.12.0-ojak.1",
+       "dependencies": {
+         "@oh-my-pi/omptype": "catalog:",
+         "@oh-my-pi/pi-catalog": "catalog:",
+@@ -76,7 +76,7 @@
+     },
+     "packages/coding-agent": {
+       "name": "@oh-my-pi/pi-coding-agent",
+-      "version": "18.11.0",
++      "version": "18.12.0-ojak.1",
+       "bin": {
+         "omp": "src/cli.ts",
+       },
+@@ -296,7 +296,7 @@
+     },
+     "packages/utils": {
+       "name": "@oh-my-pi/pi-utils",
+-      "version": "18.11.0",
++      "version": "18.12.0-ojak.1",
+       "dependencies": {
+         "@oh-my-pi/pi-natives": "catalog:",
+       },
+@@ -343,14 +343,14 @@
+     "@napi-rs/cli": "3.7.2",
+     "@oh-my-pi/omp-stats": "18.11.0",
+     "@oh-my-pi/omptype": "18.11.0",
+-    "@oh-my-pi/pi-agent-core": "18.11.0",
+-    "@oh-my-pi/pi-ai": "18.11.0",
++    "@oh-my-pi/pi-agent-core": "18.12.0-ojak.1",
++    "@oh-my-pi/pi-ai": "18.12.0-ojak.1",
+     "@oh-my-pi/pi-catalog": "18.11.0",
+-    "@oh-my-pi/pi-coding-agent": "18.11.0",
++    "@oh-my-pi/pi-coding-agent": "18.12.0-ojak.1",
+     "@oh-my-pi/pi-mnemopi": "18.11.0",
+     "@oh-my-pi/pi-natives": "18.11.0",
+     "@oh-my-pi/pi-tui": "18.11.0",
+-    "@oh-my-pi/pi-utils": "18.11.0",
++    "@oh-my-pi/pi-utils": "18.12.0-ojak.1",
+     "@oh-my-pi/pi-wire": "18.11.0",
+     "@oh-my-pi/snapcompact": "18.11.0",
+     "@opentelemetry/api": "^1.9.1",
+diff --git a/docs/extensions.md b/docs/extensions.md
+index 6cfdecb..dca29f8 100644
+--- a/docs/extensions.md
++++ b/docs/extensions.md
+@@ -347,6 +347,7 @@ Handlers and tool `execute` receive `ctx` with:
+ - `hasUI`: whether this runner has a non-no-op UI context, not whether every UI method is supported
+ - `cwd`
+ - `sessionManager` (read-only)
++- `providerSessionId: string | undefined` (read-only): the live `AgentSession.sessionId` used in primary provider callback `options.sessionId`. It can differ from `sessionManager.getSessionId()` and changes on `/fresh` or context reset. Available in TUI/reload, print/JSON/RPC, ACP, child, event, tool, and command contexts; undefined only for an embedding host that has not bound a provider identity. Do not fall back to the transcript ID. Saved runner contexts reject after switching transcripts; command contexts retain the live getter.
+ - `modelRegistry`, `model`
+ - `models` (read-only model query — see below)
+ - `localProtocolOptions` (optional calling-session `local://` root mapping for external tool bridges)
+@@ -354,6 +355,9 @@ Handlers and tool `execute` receive `ctx` with:
+ - `getAsyncJobSnapshot()` returns the current session's read-only async-job snapshot, or `null` when no session owns the context
+ - `compact(instructionsOrOptions?)`: accepts summary focus text or `CompactOptions`, including one-off `mode: "soft" | "remote" | "snapcompact"`, `onComplete`, `onError`, and `suppressContinuation`
+ - `isIdle()`, `hasPendingMessages()`, `abort()`
++- `persistSession(): Promise<void>`: force the current branch onto durable storage, including its first user/context messages and extension entries, without inventing an assistant message. Await this inside a provider-request boundary (after input has entered agent state) before submitting a request; `before_agent_start` runs too early to persist that new input. Rejects on storage failure, nonpersistent sessions, another writer's ownership, disposal, or a concurrent session/branch transition. A saved context cannot persist another session.
++  This is a stable-storage fence: file storage fsyncs the live transcript, and POSIX also fsyncs its parent directory. Ordinary `flush()` remains visibility-only. Backends without a stable-storage barrier reject before dispatch.
++- `resumePendingTurn(): Promise<boolean>`: admit an idle continuation of existing context without appending a user message or custom nudge. Resolves `true` once launched, not when the turn finishes; safe to await in `session_start`. Concurrent calls cannot launch twice. Returns `false` when busy/retrying/compacting, holding queued messages, missing user history, or encountering unresolved/synthetic tools or unsafe assistant tails. The sole failed-assistant exception is an output-free `stopReason: "error"` with `errorCode: "BRIDGE_ADMISSION_PAUSED"` or an `errorMessage` starting with `[BRIDGE_ADMISSION_PAUSED]`. Empty legacy text placeholders are allowed; emitted text/thinking/tool calls, `errorAfterOutput`, cancellation, stopped admission, unknown execution, and arbitrary errors are not. Checks the durable branch even when restart filtering hid failed assistants. Removes only trailing safe pause records from active provider context; durable errors and completed tool results remain. Persistence/ownership failures reject. The extension must first validate its newest durable marker for the exact branch/request: automatic startup continuation only for `queued`, explicit user resumption may also accept `paused`. Never invoke it for submitted, unknown, or cancelled work; 429/503/disconnect alone proves nothing. Unsupported embedding hosts reject.
+ - `shutdown()`
+ - `resolvePlanReview(reviewId, choice, input?)`: answer the open interactive plan review; returns `false` when the review or choice is unavailable, `refine` requires non-empty `input.feedback`, and on approvals (`execute`, `compact`, `keep`) `input.role` may name a tier from the event's `tiers` to pick the execution model (an unknown role, or a `role` on any other choice, returns `false`)
+ - `getPendingPlanReview()`: the open interactive plan review still awaiting an answer, in the `plan_review_requested` shape, or `undefined`; use it to answer a review that opened before the extension loaded or reconnected
+@@ -367,6 +371,18 @@ Handlers and tool `execute` receive `ctx` with:
+   Explicit paste requires `ctx.ui.supportsEditor === true`: the TUI and non-headless RPC expose composers; ACP and no-op UI contexts do not. Supplied diffs used for LLM review reject above 50,000 characters or 20 reviewable files before delivery, and `open` rejects such a patch before mounting the overlay; split larger patches into smaller requests. Notes-only submissions do not have this review-prompt bound.
+ - `setInterval(fn, ms, ...args)` / `setTimeout(fn, ms, ...args)` / `clearTimer(timer)` — managed timers (see below)
+ 
++### Provider request ownership
++
++Custom provider callbacks receive the host-only `StreamOptions.requestKind?: "primary" | "ephemeral"`:
++
++- `"primary"`: the owning `AgentSession` conversation, including child sessions. Require `options.sessionId === ctx.providerSessionId` on a live bound context, then await `ctx.persistSession()` before transmission. A missing binding or identity mismatch must stop the request, not silently treat it as side work.
++- `"ephemeral"`: one-shot `completeSimple` requests (including titles and prompted judges), side turns, advisors, cache warming, and auto-learn capture. These requests have no primary pending-turn resume contract. `sessionId` and `parentSessionId` still serve transport/cache affinity and are not proof of primary ownership.
++- Missing/unknown provenance: fail closed in providers requiring durable primary admission. Bare `streamSimple` calls are not automatically labeled ephemeral. No session-ID prefix or model/provider-name heuristics are used.
++
++`completeSimple` defaults to `"ephemeral"` but preserves an explicit `"primary"` override. Primary `AgentSession` dispatch always stamps `"primary"` and the current provider ID; side wrappers overwrite inherited provenance with `"ephemeral"`. The native gateway serializer strips `requestKind`; it is a local host ownership claim, not an authorization field accepted from the wire. Revalidate live IDs after `/fresh` and reset rather than caching a transcript-ID mapping forever.
++
++`BRIDGE_ADMISSION_PAUSED`, `BRIDGE_ADMISSION_STOPPED`, and execution-unknown outcomes veto automatic recovery, fallback, compaction, stop-hook continuation, and queued-message draining. Paused is a resumable, proven-unsent outcome, not `execution_unknown`; stopped requires setup repair. Throwing a custom provider error with string `code`/`type` and numeric `status` retains those fields on the assistant failure.
++
+ ### Ephemeral side turns (`ctx.runEphemeralTurn`)
+ 
+ Run the same side-turn pipeline as `/btw` using the current model and conversational context. The question and response are not appended to session history, and the request can run while the main turn is active. The snapshot may include in-flight assistant text.
+@@ -562,6 +578,7 @@ and `/new`. Commands retain their explicit prefill and session-transition action
+ ### Subagent lifecycle
+ 
+ - `before_subagent_spawn` → `{ model?: string | string[]; block?: boolean; reason?: string; note?: string }`. Fires in the parent session exactly once per spawned child (`task`, eval `agent()`, workpool workers), at dispatch before the child resolves its model — never during a frontend's validation preflight, so stateful routers (round-robin, quota) advance once per child. The event carries `agent`, `invocationKind`, `modelRole` (the pre-expansion role alias, when any), the expanded `patterns` core would use, and an optional stable `spawnKey`. A returned `model` replaces the spawn's attempt-ordered patterns while keeping the role identity, so the remaining entries become the child's retry fallback chain; handlers run in extension order and the last returned `model` wins, along with its `note`, which the task UI shows as the spawn's routing reason on live, async, and settled rows. `block: true` refuses the spawn with `reason`. Cancelling the spawn releases an awaiting handler (its result is discarded and pending `ctx.ui` dialogs close) instead of holding the spawn until the handler timeout.
++- `before_subagent_admission` → `void | Promise<void>`. Register with `pi.on("before_subagent_admission", async (event, ctx) => { ... })`. The event is `{ type: "before_subagent_admission", agent: string, invocationKind: "task" | "eval", model: string, signal: AbortSignal }`; `model` is the resolved `provider/model` selector after spawn routing/auth fallback. Runs in the parent under the existing task spawn permit (eval/workpool retain their existing async-job limits), before artifacts, worktree materialization, child-session creation, extension loading, and runtime watchdog setup. The admitted model is pinned for child creation. Handlers run sequentially, have **no timeout**, and must pass `event.signal` to their polling/network waits. Cancellation rejects even if a handler ignores its signal; rejection/throw fails the spawn closed and skips later handlers. No additional queue or eager child sessions are allocated. This does not alter the separate 30-second `before_subagent_spawn` routing hook. A ready response is only a readiness sample, not a provider-capacity reservation; the provider must still enforce its own admission.
+ 
+ ### Reliability/runtime signals
+ 
+diff --git a/docs/non-compaction-retry-policy.md b/docs/non-compaction-retry-policy.md
+index 2d3eb7d..71da23e 100644
+--- a/docs/non-compaction-retry-policy.md
++++ b/docs/non-compaction-retry-policy.md
+@@ -27,6 +27,16 @@ Retry and compaction are checked from the same `agent_end` path, but they are in
+ 
+ So: overload/rate/server/network-style failures use this retry policy; context-window overflow uses compaction recovery.
+ 
++### Admission and execution-unknown safety veto
++
++`AssistantMessage.errorType === "execution_unknown"` or `errorCode === "BRIDGE_EXECUTION_UNKNOWN"` is terminal regardless of HTTP status, retry settings, or configured fallback chains. Legacy adapters can preserve either marker in `errorMessage` or `errorClassificationMessage` (including a serialized JSON error envelope). Custom provider adapters must retain this classification rather than replacing it with a generic transport error.
++
++`TurnRecovery` refuses automatic retry, credential/model fallback, empty-stop repair, malformed-call repair, interrupted-tool continuation, and recovery compaction for these errors. The session persists the terminal error and stops before compaction/stop-hook continuation or automatic queued-message draining. No output is fabricated and no completed tool result is removed for replay. A separate admission rejection is safe to wait/re-submit only when the provider positively proves non-submission; generic 429/503/network failures do not provide that proof.
++
++`BRIDGE_ADMISSION_PAUSED` and `BRIDGE_ADMISSION_STOPPED` likewise veto **all automatic recovery** without changing their meaning to `execution_unknown`. Recognized in `errorCode`, `errorMessage`, or `errorClassificationMessage`, they remain terminal even if a status or diagnostic would otherwise trigger retry/fallback/overflow handling. A thrown custom provider error preserves its string `code`/`type` and numeric `status` on the assistant failure.
++
++Explicit `ctx.resumePendingTurn()` may resume only a proven-unsent, output-free admission pause after the extension validates the newest durable `queued`/`paused` marker for that exact branch. It rejects unknown, cancelled, stopped, emitted-output, and arbitrary errors. Durable branch validation prevents restart filtering from hiding an unsafe assistant failure; prior completed tools and the single original user are retained. This exception does not make paused requests automatically retryable.
++
+ ### Responses request-body-read timeout exception
+ 
+ An exact OpenAI Responses HTTP 408 whose error text says `Timed out reading request body` is special only when the provider recorded that the **actual submitted request** was a full replay, not a `previous_response_id` delta. The transport surfaces that full-replay case after the first response. Delta and unknown/legacy request shapes retain ordinary transport retry behavior: mutating history after a delta can force a larger full replay, so automatic local elision must not infer safety from the diagnostic alone. Before any full-replay recovery, the session preserves the normal replay-safety veto and retry budget, requires enabled compaction with `shake` in `compaction.methodOrder`, then performs one conservative, artifact-backed local `shake elide`. The one-shot marker is scoped to the logical prompt sequence and is cleared by any turn that produced output, so a long prompt that keeps making progress can recover a later timeout over its newly grown history while back-to-back timeouts still get exactly one changed request; prompt generation remains the cancellation/session-transition fence. A retry occurs only when that operation rewrote eligible history; disabled, no-progress, artifact-save failure, cancellation, an exhausted retry budget, or a second matching error terminates the turn without an unchanged replay.
+diff --git a/package.json b/package.json
+index c8abe69..cb6eb11 100644
+--- a/package.json
++++ b/package.json
+@@ -18,14 +18,14 @@
+ 			"@napi-rs/cli": "3.7.2",
+ 			"@oh-my-pi/omp-stats": "18.11.0",
+ 			"@oh-my-pi/omptype": "18.11.0",
+-			"@oh-my-pi/pi-agent-core": "18.11.0",
+-			"@oh-my-pi/pi-ai": "18.11.0",
++			"@oh-my-pi/pi-agent-core": "18.12.0-ojak.1",
++			"@oh-my-pi/pi-ai": "18.12.0-ojak.1",
+ 			"@oh-my-pi/pi-catalog": "18.11.0",
+-			"@oh-my-pi/pi-coding-agent": "18.11.0",
++			"@oh-my-pi/pi-coding-agent": "18.12.0-ojak.1",
+ 			"@oh-my-pi/pi-mnemopi": "18.11.0",
+ 			"@oh-my-pi/pi-natives": "18.11.0",
+ 			"@oh-my-pi/pi-tui": "18.11.0",
+-			"@oh-my-pi/pi-utils": "18.11.0",
++			"@oh-my-pi/pi-utils": "18.12.0-ojak.1",
+ 			"@oh-my-pi/pi-wire": "18.11.0",
+ 			"@oh-my-pi/snapcompact": "18.11.0",
+ 			"@opentelemetry/api": "^1.9.1",
+diff --git a/packages/agent/CHANGELOG.md b/packages/agent/CHANGELOG.md
+index b89da1c..90fa8e4 100644
+--- a/packages/agent/CHANGELOG.md
++++ b/packages/agent/CHANGELOG.md
+@@ -1,6 +1,10 @@
+ # Changelog
+ 
+-## [Unreleased]
++## [18.12.0-ojak.1]
++
++### Fixed
++
++- Custom provider exceptions retain error codes, types, status, and prior-output evidence so admission pauses cannot be mistaken for retryable or safely unsent requests.
+ 
+ ## [18.11.0] - 2026-10-14
+ 
+diff --git a/packages/agent/package.json b/packages/agent/package.json
+index a49e1f9..0884577 100644
+--- a/packages/agent/package.json
++++ b/packages/agent/package.json
+@@ -1,7 +1,7 @@
+ {
+   "type": "module",
+   "name": "@oh-my-pi/pi-agent-core",
+-  "version": "18.11.0",
++  "version": "18.12.0-ojak.1",
+   "description": "General-purpose agent with transport abstraction, state management, and attachment support",
+   "homepage": "https://omp.sh",
+   "author": { "name": "Stencil Labs, Inc.", "url": "https://stencil.so" },
+diff --git a/packages/agent/src/agent.ts b/packages/agent/src/agent.ts
+index f4c09c6..5179daf 100644
+--- a/packages/agent/src/agent.ts
++++ b/packages/agent/src/agent.ts
+@@ -2094,7 +2094,7 @@ export class Agent {
+ 						}
+ 					: {
+ 							role: "assistant",
+-							content: [{ type: "text", text: "" }],
++							content: [],
+ 							api: model.api,
+ 							provider: model.provider,
+ 							model: model.id,
+@@ -2110,6 +2110,16 @@ export class Agent {
+ 							errorMessage,
+ 							timestamp: Date.now(),
+ 						};
++			if (assistantPartial?.content.some(block => block.type !== "text" || block.text !== "")) {
++				errorMsg.errorAfterOutput = true;
++			}
++			// Preserve host/provider safety classifications when a custom stream throws
++			// before returning a stream instead of yielding an assistant error event.
++			if (typeof err === "object" && err !== null) {
++				if ("code" in err && typeof err.code === "string") errorMsg.errorCode = err.code;
++				if ("type" in err && typeof err.type === "string") errorMsg.errorType = err.type;
++				if ("status" in err && typeof err.status === "number") errorMsg.errorStatus = err.status;
++			}
+ 
+ 			if (shouldEmitVisibleError) {
+ 				if (!turnOpen) {
+diff --git a/packages/ai/CHANGELOG.md b/packages/ai/CHANGELOG.md
+index ba48f02..ec33de5 100644
+--- a/packages/ai/CHANGELOG.md
++++ b/packages/ai/CHANGELOG.md
+@@ -1,6 +1,11 @@
+ # Changelog
+ 
+-## [Unreleased]
++## [18.12.0-ojak.1]
++
++### Added
++
++- Provider adapters can preserve machine-readable error types and codes on assistant messages through `errorType` and `errorCode`.
++- Provider callbacks can distinguish primary conversation requests from ephemeral work with host-only `requestKind`, omitted from native gateway requests.
+ 
+ ## [18.11.0] - 2026-10-14
+ 
+diff --git a/packages/ai/package.json b/packages/ai/package.json
+index cdcd426..845af6a 100644
+--- a/packages/ai/package.json
++++ b/packages/ai/package.json
+@@ -1,6 +1,6 @@
+ {
+ 	"name": "@oh-my-pi/pi-ai",
+-	"version": "18.11.0",
++	"version": "18.12.0-ojak.1",
+ 	"description": "Unified LLM API with automatic model discovery and provider configuration",
+ 	"keywords": [
+ 		"ai",
+diff --git a/packages/ai/src/providers/pi-native-client.ts b/packages/ai/src/providers/pi-native-client.ts
+index 6b9d345..1f20148 100644
+--- a/packages/ai/src/providers/pi-native-client.ts
++++ b/packages/ai/src/providers/pi-native-client.ts
+@@ -50,6 +50,7 @@ const NON_WIRE_KEYS = new Set<keyof SimpleStreamOptions>([
+ 	"cursorExecHandlers",
+ 	"cursorOnToolResult",
+ 	"providerSessionState",
++	"requestKind",
+ ]);
+ const PI_NATIVE_STREAM_IDLE_TIMEOUT_ERROR = "pi-native stream stalled while waiting for the next event";
+ const PI_NATIVE_STREAM_FIRST_EVENT_TIMEOUT_ERROR = "pi-native stream timed out while waiting for the first event";
+diff --git a/packages/ai/src/stream.ts b/packages/ai/src/stream.ts
+index e85b470..897d0b2 100644
+--- a/packages/ai/src/stream.ts
++++ b/packages/ai/src/stream.ts
+@@ -1564,8 +1564,8 @@ export async function completeSimple<TApi extends Api>(
+ 		onAttempt?: (message: AssistantMessage) => void;
+ 	},
+ ): Promise<AssistantMessage> {
+-	const { onAttempt, ...streamOptions } = options ?? {};
+-	const sessionOptions = withInferenceSessionId(streamOptions);
++	const { onAttempt, requestKind = "ephemeral", ...streamOptions } = options ?? {};
++	const sessionOptions = withInferenceSessionId({ ...streamOptions, requestKind });
+ 	return resolveWithThinkingLoopRetries(
+ 		options?.signal,
+ 		() => streamSimple(model, context, sessionOptions),
+diff --git a/packages/ai/src/types.ts b/packages/ai/src/types.ts
+index 1d520ab..56eb7cb 100644
+--- a/packages/ai/src/types.ts
++++ b/packages/ai/src/types.ts
+@@ -565,6 +565,14 @@ export interface StreamOptions {
+ 	 * as the prompt-cache key when `promptCacheKey` is not set.
+ 	 */
+ 	sessionId?: string;
++	/**
++	 * Host-owned request provenance; never sent to a native gateway.
++	 * `primary` is the owning AgentSession's durable conversation; its `sessionId`
++	 * must match an ExtensionContext.providerSessionId. `ephemeral` is a side
++	 * request (one-shot completion, judge, title, advisor, cache warmer).
++	 * Absence means unknown, NOT permission to bypass primary durability.
++	 */
++	requestKind?: "primary" | "ephemeral";
+ 	/**
+ 	 * Optional prompt-cache identity. OpenAI-family providers use this for
+ 	 * `prompt_cache_key` payloads and cache-affinity headers such as
+@@ -1297,6 +1305,12 @@ export interface AssistantMessage {
+ 	errorMessage?: string;
+ 	/** Stable recovery-classification text when errorMessage includes display-only diagnostics. */
+ 	errorClassificationMessage?: string;
++	/** Provider error type. `execution_unknown` forbids automatic request recovery/replay. */
++	errorType?: string;
++	/** Provider error code. `BRIDGE_EXECUTION_UNKNOWN` forbids automatic request recovery/replay. */
++	errorCode?: string;
++	/** Output was emitted before an exception, even if incomplete tool calls were removed from `content`. */
++	errorAfterOutput?: boolean;
+ 	/** True only when an exact request-body-read timeout failed on a full Responses replay, not a previous-response delta. */
+ 	requestBodyReadTimeoutFullReplay?: boolean;
+ 	/** Per-tool abort messages used when an aborted assistant turn needs different placeholder results per tool call. */
+diff --git a/packages/ai/test/pi-native-client.test.ts b/packages/ai/test/pi-native-client.test.ts
+index 9474b8f..08a74c2 100644
+--- a/packages/ai/test/pi-native-client.test.ts
++++ b/packages/ai/test/pi-native-client.test.ts
+@@ -301,6 +301,7 @@ describe("streamPiNative request shape", () => {
+ 			},
+ 			onSseEvent: () => undefined,
+ 			providerSessionState: new Map(),
++			requestKind: "primary",
+ 			maxTokens: 1024,
+ 		});
+ 		await stream.result();
+@@ -313,6 +314,8 @@ describe("streamPiNative request shape", () => {
+ 		expect("onResponse" in body.options).toBe(false);
+ 		expect("onSseEvent" in body.options).toBe(false);
+ 		expect("providerSessionState" in body.options).toBe(false);
++		// Local ownership claims must never be trusted across a gateway hop.
++		expect("requestKind" in body.options).toBe(false);
+ 		// And the legitimate options survive
+ 		expect(body.options.maxTokens).toBe(1024);
+ 		expect(responseMetadata).toMatchObject({
+diff --git a/packages/coding-agent/CHANGELOG.md b/packages/coding-agent/CHANGELOG.md
+index 5556ca9..9624c86 100644
+--- a/packages/coding-agent/CHANGELOG.md
++++ b/packages/coding-agent/CHANGELOG.md
+@@ -1,6 +1,18 @@
+ # Changelog
+ 
+-## [Unreleased]
++## [18.12.0-ojak.1]
++
++### Added
++
++- Extensions can durably save the first user turn with `ctx.persistSession()` and continue explicitly unsent context with `ctx.resumePendingTurn()` without duplicating user messages or tool effects.
++- Extensions can delay child creation with the cancellable, timeout-free `before_subagent_admission` hook inside existing subagent scheduling limits.
++- Provider extensions can identify the exact live request owner with readonly `ctx.providerSessionId` and distinguish primary from ephemeral requests through `options.requestKind`.
++- External request fences use stable-storage synchronization rather than ordinary buffered session flushes; unsupported storage fails closed before dispatch.
++
++### Fixed
++
++- Requests marked `execution_unknown` or `BRIDGE_EXECUTION_UNKNOWN` no longer trigger automatic retry, fallback, or continuation.
++- Paused or stopped admission no longer triggers automatic recovery; explicit resumption of a proven-unsent, output-free pause preserves the original user and completed tools.
+ 
+ ## [18.11.0] - 2026-10-14
+ 
+diff --git a/packages/coding-agent/package.json b/packages/coding-agent/package.json
+index 128b868..2cf53c2 100644
+--- a/packages/coding-agent/package.json
++++ b/packages/coding-agent/package.json
+@@ -1,6 +1,6 @@
+ {
+ 	"name": "@oh-my-pi/pi-coding-agent",
+-	"version": "18.11.0",
++	"version": "18.12.0-ojak.1",
+ 	"description": "Coding agent CLI with read, bash, edit, write tools and session management",
+ 	"keywords": [
+ 		"agent",
+diff --git a/packages/coding-agent/src/config/model-resolver.ts b/packages/coding-agent/src/config/model-resolver.ts
+index 292bd8a..52a0458 100644
+--- a/packages/coding-agent/src/config/model-resolver.ts
++++ b/packages/coding-agent/src/config/model-resolver.ts
+@@ -1689,6 +1689,14 @@ export function sessionModelDiscoveryProviders(
+ 	return providers;
+ }
+ 
++export interface AuthenticatedModelResolution {
++	model?: Model<Api>;
++	thinkingLevel?: ConfiguredThinkingLevel;
++	explicitThinkingLevel: boolean;
++	authFallbackUsed: boolean;
++	warning?: string;
++}
++
+ /**
+  * Resolve a list of override patterns to the first matching model, with an
+  * auth-aware fallback to the parent session's active model.
+@@ -1724,13 +1732,7 @@ export async function resolveModelOverrideWithAuthFallback(
+ 	modelRegistry: ModelLookupRegistry & Pick<ModelRegistry, "getApiKey">,
+ 	settings?: Settings,
+ 	sessionId?: string,
+-): Promise<{
+-	model?: Model<Api>;
+-	thinkingLevel?: ConfiguredThinkingLevel;
+-	explicitThinkingLevel: boolean;
+-	authFallbackUsed: boolean;
+-	warning?: string;
+-}> {
++): Promise<AuthenticatedModelResolution> {
+ 	const disabledProviders = disabledProviderIds(settings);
+ 	let lookupRegistry: ModelLookupRegistry = modelRegistry;
+ 	if (disabledProviders.size > 0) {
+diff --git a/packages/coding-agent/src/extensibility/extensions/runner.ts b/packages/coding-agent/src/extensibility/extensions/runner.ts
+index daf6e98..0c49dcc 100644
+--- a/packages/coding-agent/src/extensibility/extensions/runner.ts
++++ b/packages/coding-agent/src/extensibility/extensions/runner.ts
+@@ -26,7 +26,7 @@ import {
+ 	setContextHistoryIndex,
+ } from "@oh-my-pi/pi-ai/utils/block-symbols";
+ import type { KeyId } from "@oh-my-pi/pi-tui";
+-import { logger } from "@oh-my-pi/pi-utils";
++import { logger, untilAborted } from "@oh-my-pi/pi-utils";
+ import { refreshShellConfigCache } from "@oh-my-pi/pi-utils/procmgr";
+ import { MAIN_AGENT_RULE_NAME } from "../../capability/rule";
+ import type { ModelRegistry } from "../../config/model-registry";
+@@ -52,6 +52,7 @@ import type {
+ 	BeforeAgentStartEventResult,
+ 	BeforeProviderRequestEvent,
+ 	BeforeProviderRequestEventResult,
++	BeforeSubagentAdmissionEvent,
+ 	BeforeSubagentSpawnEvent,
+ 	BeforeSubagentSpawnEventResult,
+ 	CompactOptions,
+@@ -512,7 +513,10 @@ export class ExtensionRunner {
+ 	#toolApprovalPreviewWaiter?: (toolCallId: string) => Promise<void>;
+ 	#errorListeners: Set<ExtensionErrorListener> = new Set();
+ 	#getModel: () => Model | undefined = () => undefined;
++	#getProviderSessionId: () => string | undefined = () => undefined;
+ 	#isIdleFn: () => boolean = () => true;
++	#persistSessionFn?: ExtensionContextActions["persistSession"];
++	#resumePendingTurnFn?: ExtensionContextActions["resumePendingTurn"];
+ 	#waitForIdleFn: () => Promise<void> = async () => {};
+ 	#abortFn: () => void = () => {};
+ 	#hasPendingMessagesFn: () => boolean = () => false;
+@@ -825,7 +829,10 @@ export class ExtensionRunner {
+ 
+ 		// Context actions (required)
+ 		this.#getModel = contextActions.getModel;
++		this.#getProviderSessionId = contextActions.getProviderSessionId ?? (() => undefined);
+ 		this.#isIdleFn = contextActions.isIdle;
++		this.#persistSessionFn = contextActions.persistSession;
++		this.#resumePendingTurnFn = contextActions.resumePendingTurn;
+ 		this.#abortFn = contextActions.abort;
+ 		this.#hasPendingMessagesFn = contextActions.hasPendingMessages;
+ 		this.#shutdownHandler = contextActions.shutdown;
+@@ -1391,8 +1398,13 @@ export class ExtensionRunner {
+ 		agent: ExtensionAgentIdentity = this.agent,
+ 	): ExtensionContext {
+ 		const getModel = model ? () => model : this.#getModel;
++		const getProviderSessionId = () => this.#getProviderSessionId();
+ 		const runEphemeralTurn = this.#runEphemeralTurnFn;
+ 		const createAnnotations = this.#createAnnotations;
++		const sessionId = this.sessionManager.getSessionId();
++		const assertOwner = () => {
++			if (sessionId !== this.sessionManager.getSessionId()) throw new Error("Extension context belongs to another session");
++		};
+ 		const sendUserMessage = (text: string, options?: SendUserMessageOptions): void =>
+ 			this.runtime.sendUserMessage(text, options);
+ 		return {
+@@ -1404,6 +1416,10 @@ export class ExtensionRunner {
+ 			hasUI: this.hasUI(),
+ 			cwd: this.cwd,
+ 			sessionManager: this.sessionManager,
++			get providerSessionId() {
++				assertOwner();
++				return getProviderSessionId();
++			},
+ 			modelRegistry: this.modelRegistry,
+ 			isProjectTrusted: () => true,
+ 			agent,
+@@ -1412,6 +1428,17 @@ export class ExtensionRunner {
+ 			},
+ 			models: createExtensionModelQuery(this.modelRegistry, this.settings, getModel),
+ 			isIdle: () => this.#isIdleFn(),
++			persistSession: async () => {
++				assertOwner();
++				if (!this.#persistSessionFn) throw new Error("Session persistence is unavailable in this host");
++				await this.#persistSessionFn();
++				assertOwner();
++			},
++			resumePendingTurn: async () => {
++				assertOwner();
++				if (!this.#resumePendingTurnFn) throw new Error("Pending turn continuation is unavailable in this host");
++				return this.#resumePendingTurnFn();
++			},
+ 			abort: () => this.#abortFn(),
+ 			hasPendingMessages: () => this.#hasPendingMessagesFn(),
+ 			shutdown: () => this.#shutdownHandler(),
+@@ -1500,8 +1527,12 @@ export class ExtensionRunner {
+ 	}
+ 
+ 	createCommandContext(): ExtensionCommandContext {
++		const context = this.createContext();
+ 		return {
+-			...this.createContext(),
++			...context,
++			get providerSessionId() {
++				return context.providerSessionId;
++			},
+ 			getContextUsage: () => this.#getContextUsageFn(),
+ 			waitForIdle: () => this.#waitForIdleFn(),
+ 			newSession: options => this.#newSessionHandler(options),
+@@ -2191,6 +2222,27 @@ export class ExtensionRunner {
+ 		return undefined;
+ 	}
+ 
++	/** Admission is fail-closed, unbounded in time, and bounded by the caller's spawn permit. */
++	async emitBeforeSubagentAdmission(event: BeforeSubagentAdmissionEvent): Promise<void> {
++		event.signal.throwIfAborted();
++		const ctx = createHandlerContext(this.createContext(), event.signal);
++		for (const ext of this.extensions) {
++			for (const handler of ext.handlers.get("before_subagent_admission") ?? []) {
++				try {
++					await untilAborted(event.signal, async () => this.runScoped(() => handler(event, ctx)));
++					event.signal.throwIfAborted();
++				} catch (error) {
++					this.emitError({
++						extensionPath: ext.path,
++						event: event.type,
++						error: error instanceof Error ? error.message : String(error),
++					});
++					throw error;
++				}
++			}
++		}
++	}
++
+ 	/**
+ 	 * Runs `before_subagent_spawn` handlers; a `block` short-circuits, the last defined `model` wins.
+ 	 * `signal` (the spawn's abort signal) cancels an awaiting handler instead of parking until the timeout.
+diff --git a/packages/coding-agent/src/extensibility/extensions/types.ts b/packages/coding-agent/src/extensibility/extensions/types.ts
+index 877ea55..e10a7e9 100644
+--- a/packages/coding-agent/src/extensibility/extensions/types.ts
++++ b/packages/coding-agent/src/extensibility/extensions/types.ts
+@@ -652,6 +652,8 @@ export interface ExtensionContext {
+ 	cwd: string;
+ 	/** Session manager (read-only) */
+ 	sessionManager: ReadonlySessionManager;
++	/** Current provider request identity (AgentSession.sessionId), not the persisted transcript ID. */
++	readonly providerSessionId: string | undefined;
+ 	/** Model registry for API key resolution */
+ 	modelRegistry: ModelRegistry;
+ 	/** Calling session's `local://` root mapping for external tool bridges. */
+@@ -662,6 +664,15 @@ export interface ExtensionContext {
+ 	models: ExtensionModelQuery;
+ 	/** Whether the agent is idle (not streaming) */
+ 	isIdle(): boolean;
++	/** Durably flush the current branch, including the first user turn. Rejects without persistent storage. */
++	persistSession(): Promise<void>;
++	/**
++	 * Schedule an idle continuation of existing, explicitly unsent context without adding a message.
++	 * Output-free BRIDGE_ADMISSION_PAUSED tails may resume after explicit durable-marker validation.
++	 * False when busy, queued, or interrupted tools/assistant output make continuation unsafe.
++	 * Rejects persistence/ownership failures. The caller must establish that the request was never submitted.
++	 */
++	resumePendingTurn(): Promise<boolean>;
+ 	/** Abort the current agent operation */
+ 	abort(): void;
+ 	/** Whether there are queued messages waiting */
+@@ -1047,6 +1058,17 @@ export interface BeforeSubagentSpawnEvent {
+ 	spawnKey?: string;
+ }
+ 
++/** Parent-side admission inside the spawn permit, before allocating a child session or worktree. */
++export interface BeforeSubagentAdmissionEvent {
++	type: "before_subagent_admission";
++	agent: string;
++	invocationKind: "task" | "eval";
++	/** Resolved provider/model selector. Admission does not reserve provider capacity. */
++	model: string;
++	/** Cancels waiting; no handler timeout is imposed. */
++	signal: AbortSignal;
++}
++
+ export type {
+ 	AgentEndEvent,
+ 	AgentStartEvent,
+@@ -1437,6 +1459,7 @@ export type ExtensionEvent =
+ 	| AfterProviderResponseEvent
+ 	| BeforeAgentStartEvent
+ 	| BeforeSubagentSpawnEvent
++	| BeforeSubagentAdmissionEvent
+ 	| AgentStartEvent
+ 	| AgentEndEvent
+ 	| SessionStopEvent
+@@ -1643,6 +1666,7 @@ export interface ExtensionAPI {
+ 		event: "before_subagent_spawn",
+ 		handler: ExtensionHandler<BeforeSubagentSpawnEvent, BeforeSubagentSpawnEventResult>,
+ 	): void;
++	on(event: "before_subagent_admission", handler: ExtensionHandler<BeforeSubagentAdmissionEvent>): void;
+ 	on(event: "agent_start", handler: ExtensionHandler<AgentStartEvent>): void;
+ 	on(event: "agent_end", handler: ExtensionHandler<AgentEndEvent>): void;
+ 	on(event: "session_stop", handler: ExtensionHandler<SessionStopEvent, SessionStopEventResult>): void;
+@@ -2123,7 +2147,10 @@ export interface ExtensionActions {
+ /** Actions for ExtensionContext (ctx.* in event handlers). */
+ export interface ExtensionContextActions {
+ 	getModel: () => Model | undefined;
++	getProviderSessionId?: () => string;
+ 	isIdle: () => boolean;
++	persistSession?: () => Promise<void>;
++	resumePendingTurn?: () => Promise<boolean>;
+ 	abort: () => void;
+ 	hasPendingMessages: () => boolean;
+ 	shutdown: () => void;
+diff --git a/packages/coding-agent/src/modes/acp/acp-agent.ts b/packages/coding-agent/src/modes/acp/acp-agent.ts
+index 832ff92..06d98dd 100644
+--- a/packages/coding-agent/src/modes/acp/acp-agent.ts
++++ b/packages/coding-agent/src/modes/acp/acp-agent.ts
+@@ -2619,7 +2619,10 @@ export class AcpAgent implements Agent {
+ 			},
+ 			{
+ 				getModel: () => record.session.model,
++				getProviderSessionId: () => record.session.sessionId,
+ 				isIdle: () => !record.session.isStreaming,
++				persistSession: () => record.session.persistSession(),
++				resumePendingTurn: () => record.session.resumePendingTurn(),
+ 				abort: () => {
+ 					void record.session.abort({ reason: USER_INTERRUPT_LABEL });
+ 				},
+diff --git a/packages/coding-agent/src/modes/controllers/extension-ui-controller.ts b/packages/coding-agent/src/modes/controllers/extension-ui-controller.ts
+index a751278..1af3313 100644
+--- a/packages/coding-agent/src/modes/controllers/extension-ui-controller.ts
++++ b/packages/coding-agent/src/modes/controllers/extension-ui-controller.ts
+@@ -241,7 +241,10 @@ export class ExtensionUiController {
+ 		};
+ 		const contextActions: ExtensionContextActions = {
+ 			getModel: () => this.ctx.session.model,
++			getProviderSessionId: () => this.ctx.session.sessionId,
+ 			isIdle: () => !this.ctx.session.isStreaming,
++			persistSession: () => this.ctx.session.persistSession(),
++			resumePendingTurn: () => this.ctx.session.resumePendingTurn(),
+ 			abort: () => this.ctx.session.abort({ reason: USER_INTERRUPT_LABEL }),
+ 			hasPendingMessages: () => this.ctx.session.queuedMessageCount > 0,
+ 			shutdown: () => this.ctx.requestShutdown(),
+@@ -472,7 +475,10 @@ export class ExtensionUiController {
+ 		};
+ 		const contextActions: ExtensionContextActions = {
+ 			getModel: () => this.ctx.session.model,
++			getProviderSessionId: () => this.ctx.session.sessionId,
+ 			isIdle: () => !this.ctx.session.isStreaming,
++			persistSession: () => this.ctx.session.persistSession(),
++			resumePendingTurn: () => this.ctx.session.resumePendingTurn(),
+ 			abort: () => this.ctx.session.abort({ reason: USER_INTERRUPT_LABEL }),
+ 			hasPendingMessages: () => this.ctx.session.queuedMessageCount > 0,
+ 			shutdown: () => this.ctx.requestShutdown(),
+diff --git a/packages/coding-agent/src/modes/runtime-init.ts b/packages/coding-agent/src/modes/runtime-init.ts
+index edf5830..7a301ac 100644
+--- a/packages/coding-agent/src/modes/runtime-init.ts
++++ b/packages/coding-agent/src/modes/runtime-init.ts
+@@ -140,7 +140,10 @@ export async function initializeExtensions(session: AgentSession, options: Initi
+ 		// ExtensionContextActions
+ 		{
+ 			getModel: () => session.model,
++			getProviderSessionId: () => session.sessionId,
+ 			isIdle: () => !session.isStreaming,
++			persistSession: () => session.persistSession(),
++			resumePendingTurn: () => session.resumePendingTurn(),
+ 			abort: () => session.abort({ reason: USER_INTERRUPT_LABEL }),
+ 			hasPendingMessages: () => session.queuedMessageCount > 0,
+ 			shutdown,
+diff --git a/packages/coding-agent/src/sdk.ts b/packages/coding-agent/src/sdk.ts
+index 3f132e2..c313f68 100644
+--- a/packages/coding-agent/src/sdk.ts
++++ b/packages/coding-agent/src/sdk.ts
+@@ -107,6 +107,7 @@ import { createAnnotationsAPI } from "./extensibility/custom-commands/bundled/an
+ import { discoverCustomToolPaths, loadCustomTools, type ToolPathWithSource } from "./extensibility/custom-tools";
+ import type { CustomTool, CustomToolContext, CustomToolSessionEvent } from "./extensibility/custom-tools/types";
+ import {
++	type BeforeSubagentAdmissionEvent,
+ 	bindPreparedExtensions,
+ 	discoverAndLoadExtensions,
+ 	discoverExtensionPaths,
+@@ -2369,6 +2370,12 @@ async function createAgentSessionScoped(options: CreateAgentSessionOptions): Pro
+ 			getClientBridge: () => session?.clientBridge,
+ 			emitBeforeSubagentSpawn: (event, signal) =>
+ 				session?.extensionRunner?.emitBeforeSubagentSpawn(event, signal) ?? Promise.resolve(undefined),
++			get emitBeforeSubagentAdmission() {
++				const runner = session?.extensionRunner;
++				return runner?.hasHandlers("before_subagent_admission")
++					? (event: BeforeSubagentAdmissionEvent) => runner.emitBeforeSubagentAdmission(event)
++					: undefined;
++			},
+ 			queueDeferredDiagnostics: entry => session?.yieldQueue.enqueue(LSP_LATE_DIAGNOSTIC_MESSAGE_TYPE, entry),
+ 			queueLaunchCompletion: notification =>
+ 				session?.queueLaunchCompletion(notification) ??
+@@ -4331,7 +4338,8 @@ async function createAgentSessionScoped(options: CreateAgentSessionOptions): Pro
+ 			options.cacheWarming === false
+ 				? undefined
+ 				: new CacheWarmer({
+-						stream: (model, context, streamOptions) => primaryStreamFn(model, context, streamOptions),
++						stream: (model, context, streamOptions) =>
++							primaryStreamFn(model, context, { ...streamOptions, requestKind: "ephemeral" }),
+ 						getPromptTokens: () => session.lastPromptTokens(),
+ 						getMode: () => cfgProvidersCacheWarming.get(settings),
+ 						decide: event => extensionRunner.emitCacheWarmingDecision(event),
+@@ -5230,7 +5238,8 @@ async function createAgentSessionScoped(options: CreateAgentSessionOptions): Pro
+ 					hideThinkingSummary: agent.hideThinkingSummary,
+ 					maxRetryDelayMs: agent.maxRetryDelayMs,
+ 					getToolContext: toolCall => toolContextStore.getContext(toolCall),
+-					streamFn: primaryStreamFn,
++					streamFn: (model, context, streamOptions) =>
++						primaryStreamFn(model, context, { ...streamOptions, requestKind: "ephemeral" }),
+ 					transformToolCallArguments,
+ 					// No fallback resolver. The capture agent advertises only
+ 					// `learn`/`manage_skill`, both of which stay top-level and never
+diff --git a/packages/coding-agent/src/session/agent-session.ts b/packages/coding-agent/src/session/agent-session.ts
+index 493b3af..dd92742 100644
+--- a/packages/coding-agent/src/session/agent-session.ts
++++ b/packages/coding-agent/src/session/agent-session.ts
+@@ -37,6 +37,7 @@ import {
+ 	type BeforeToolCallContext,
+ 	type BeforeToolCallResult,
+ 	EventLoopKeepalive,
++	isSyntheticToolResultMessage,
+ 	type QueuedMessagePreparation,
+ 	resolveTelemetry,
+ 	type StreamFn,
+@@ -450,6 +451,7 @@ import type { ShakeMode, ShakeResult } from "./shake-types";
+ import { ToolChoiceQueue } from "./tool-choice-queue";
+ import { planTurnPersistence, sameMessageContent, sessionMessagePersistenceKey } from "./turn-persistence";
+ import { TurnRecovery, type TurnRecoveryHost } from "./turn-recovery";
++import { isResumableAdmissionPause } from "./admission-recovery";
+ import { YieldQueue } from "./yield-queue";
+ 
+ export * from "./agent-session-events";
+@@ -1916,10 +1918,17 @@ export class AgentSession implements SettingsScope {
+ 		// toggle scopes priority to Fireworks alone, without mutating the shared
+ 		// session `serviceTier` that drives `/fast` and OpenAI/Anthropic priority.
+ 		this.agent.serviceTierResolver = model => this.#models.effectiveServiceTier(model);
++		// This agent alone owns the durable conversation. Side/advisor callers have
++		// separate stream functions and must not inherit primary admission authority.
++		const primaryStreamFn = this.agent.streamFn;
++		this.agent.streamFn = (model, context, options) =>
++			primaryStreamFn(model, context, { ...options, requestKind: "primary", sessionId: this.sessionId });
+ 		this.#titleSystemPrompt = config.titleSystemPrompt;
+ 		this.#autoTitle = config.autoTitle === true;
+ 		this.#transformContext = config.transformContext ?? (messages => messages);
+-		this.#sideStreamFn = config.sideStreamFn ?? streamSimple;
++		const sideStreamFn = config.sideStreamFn ?? streamSimple;
++		this.#sideStreamFn = (model, context, options) =>
++			sideStreamFn(model, context, { ...options, requestKind: "ephemeral" });
+ 		this.#onPayload = config.onPayload;
+ 		this.rawSseDebugBuffer = config.rawSseDebugBuffer ?? new RawSseDebugBuffer();
+ 		// Avoid wrapping in an `async` closure when no user callback is configured: the
+@@ -4242,6 +4251,18 @@ export class AgentSession implements SettingsScope {
+ 			// outside the session transcript (issue #6177).
+ 			logProviderTurnError(msg);
+ 
++			if (this.#recovery.blocksAutomaticRecovery(msg)) {
++				// Admission pause/stop and uncertain execution are terminal for automatic processing.
++				// No compaction, fallback, stop hook, or queued-message drain may resubmit them.
++				this.#queuedMessageDrainBlocked = true;
++				await this.#recovery.persistTerminalEmptyErrorTurn(msg);
++				await this.#recovery.onErrorSettledWithoutRetry(msg, COMPACTION_CHECK_NONE);
++				this.#recovery.resolveRetry();
++				this.#resetSessionStopContinuationState();
++				await emitAgentEndNotification();
++				return;
++			}
++
+ 			// Invalidate GitHub Copilot credentials on a hard auth failure (401, or an
+ 			// expired/revoked token) so stale tokens aren't reused on the next request.
+ 			// Account usage caps and concurrency caps leave the credential valid: the
+@@ -8113,12 +8134,16 @@ export class AgentSession implements SettingsScope {
+ 			return this.#extensionRunner.createCommandContext();
+ 		}
+ 
++		const session = this;
+ 		return {
+ 			ui: noOpUIContext,
+ 			mode: "print",
+ 			hasUI: false,
+ 			cwd: this.sessionManager.getCwd(),
+ 			sessionManager: this.sessionManager,
++			get providerSessionId() {
++				return session.sessionId;
++			},
+ 			modelRegistry: this.#modelRegistry,
+ 			isProjectTrusted: () => true,
+ 			// Used only when the session has no extension runner. `createAgentSession` always builds
+@@ -8128,6 +8153,8 @@ export class AgentSession implements SettingsScope {
+ 			model: this.model ?? undefined,
+ 			models: createExtensionModelQuery(this.#modelRegistry, this.settings, () => this.model ?? undefined),
+ 			isIdle: () => !this.isStreaming,
++			persistSession: () => this.persistSession(),
++			resumePendingTurn: () => this.resumePendingTurn(),
+ 			abort: () => {
+ 				void this.abort();
+ 			},
+@@ -9942,6 +9969,110 @@ export class AgentSession implements SettingsScope {
+ 		await this.sessionManager.flush();
+ 	}
+ 
++	/** Force the actual current branch durable, even before its first assistant response. */
++	async persistSession(): Promise<void> {
++		if (this.#isDisposed || !this.sessionManager.getSessionFile()) {
++			throw new Error("Session persistence requires a live session with persistent storage");
++		}
++		const generation = this.#sessionGeneration;
++		const sessionId = this.sessionId;
++		const promptGeneration = this.#promptGeneration;
++		const assertOwner = () => {
++			if (promptGeneration !== this.#promptGeneration) throw new Error("Session branch changed while persisting");
++			if (this.#isDisposed || generation !== this.#sessionGeneration || sessionId !== this.sessionId) {
++				throw new Error("Session changed while persisting");
++			}
++		};
++		// Provider hooks run after the input enters agent state, but message_end persistence
++		// can still be settling. Do not wait on all event handlers (a hook may own one).
++		await Promise.all(this.#pendingMessageEndPersistence.values());
++		assertOwner();
++		await this.sessionManager.ensureOnDisk({ requireOwnership: true });
++		assertOwner();
++		for (const message of this.agent.state.messages) this.#persistSessionMessageIfMissing(message);
++		await this.sessionManager.flushDurably();
++		assertOwner();
++		if (!this.sessionManager.isSessionOnDisk()) throw new Error("Session was not persisted");
++	}
++
++	/** Continue only a caller-proven unsent request; never repair or replay interrupted tools. */
++	async resumePendingTurn(): Promise<boolean> {
++		if (
++			this.isStreaming || this.isRetrying || this.isCompacting || this.isGeneratingHandoff ||
++			this.#isDisposed || this.#abortInProgress || this.#modeExitDrainSuppressionDepth > 0 ||
++			this.queuedMessageCount > 0 || this.agent.state.pendingToolCalls.size > 0
++		) return false;
++		const messages = this.agent.state.messages;
++		const tail = messages.at(-1);
++		let resumeEnd = messages.length;
++		while (resumeEnd > 0) {
++			const message = messages[resumeEnd - 1];
++			if (message.role !== "assistant" || !isResumableAdmissionPause(message)) break;
++			resumeEnd--;
++		}
++		const resumeTail = messages[resumeEnd - 1];
++		if (!resumeTail || resumeTail.role === "assistant") return false;
++		const pending = new Set<string>();
++		let hasUser = false;
++		for (let index = 0; index < resumeEnd; index++) {
++			const message = messages[index];
++			if (message.role === "user") hasUser = true;
++			if (message.role === "assistant") {
++				if (message.stopReason === "error" || message.stopReason === "aborted") return false;
++				for (const block of message.content) {
++					if (block.type === "toolCall") pending.add(block.id);
++				}
++			} else if (message.role === "toolResult") {
++				if (isSyntheticToolResultMessage(message) || !pending.delete(message.toolCallId)) return false;
++			}
++		}
++		if (!hasUser || pending.size > 0) return false;
++		const generation = this.#promptGeneration;
++		const sessionGeneration = this.#sessionGeneration;
++		const signal = this.#postPromptTasksAbortController.signal;
++		// Claim synchronously, before persistence yields, so two startup handlers cannot resume twice.
++		this.#beginInFlight();
++		let launched = false;
++		try {
++			await this.persistSession();
++			if (
++				signal.aborted || generation !== this.#promptGeneration ||
++				sessionGeneration !== this.#sessionGeneration || this.#isDisposed || this.#abortInProgress ||
++				this.agent.state.isStreaming || this.isCompacting || this.isGeneratingHandoff ||
++				this.queuedMessageCount > 0 || this.agent.state.messages.at(-1) !== tail
++			) return false;
++			// Restored provider context can omit failed assistants. Check the durable current
++			// turn after flushing, before removing only positively identified unsent pauses.
++			const branch = this.sessionManager.getBranchView();
++			let sawMessage = false;
++			for (let index = branch.length - 1; index >= 0; index--) {
++				const entry = branch[index];
++				if (entry.type !== "message") continue;
++				const message = entry.message;
++				if (message.role === "assistant") {
++					if (isResumableAdmissionPause(message)) continue;
++					if (!sawMessage || message.stopReason === "error" || message.stopReason === "aborted") return false;
++				}
++				sawMessage = true;
++				if (message.role === "user") break;
++			}
++			if (resumeEnd !== messages.length) this.agent.replaceMessages(messages.slice(0, resumeEnd));
++			this.#queuedMessageDrainBlocked = false;
++			this.#resetPromptMaintenanceState();
++			this.#promptSequence++;
++			this.#activeAgentPromptGeneration = generation;
++			const continuation = this.agent.continue(signal).catch(error => {
++				logger.error("Pending turn continuation failed", { error: String(error) });
++			}).finally(() => this.#endInFlight());
++			this.#trackPostPromptTask(continuation);
++			launched = true;
++			// Admission, not completion: safe to await from session_start without holding its timeout.
++			return true;
++		} finally {
++			if (!launched) this.#endInFlight();
++		}
++	}
++
+ 	/**
+ 	 * Fork the current session, creating a new session file with the exact same state.
+ 	 * Copies all entries and artifacts to the new session.
+diff --git a/packages/coding-agent/src/session/session-advisors.ts b/packages/coding-agent/src/session/session-advisors.ts
+index f99687b..d7ec82a 100644
+--- a/packages/coding-agent/src/session/session-advisors.ts
++++ b/packages/coding-agent/src/session/session-advisors.ts
+@@ -1405,6 +1405,7 @@ export class SessionAdvisors {
+ 				// Read per request so a mid-session `providers.openaiWebsockets` change reaches advisors.
+ 				const options = {
+ 					...streamOptions,
++					requestKind: "ephemeral" as const,
+ 					preferWebsockets: streamOptions?.preferWebsockets ?? this.#host.preferWebsockets(),
+ 				};
+ 				if (requestModel.api === "openai-codex-responses") {
+diff --git a/packages/coding-agent/src/session/session-manager.ts b/packages/coding-agent/src/session/session-manager.ts
+index 0a4bb8f..1c07349 100644
+--- a/packages/coding-agent/src/session/session-manager.ts
++++ b/packages/coding-agent/src/session/session-manager.ts
+@@ -2681,7 +2681,13 @@ export class SessionManager {
+ 	 * Force the session onto disk even with no assistant message yet (ACP
+ 	 * session/new must create a discoverable file immediately).
+ 	 */
+-	async ensureOnDisk(): Promise<void> {
++	async ensureOnDisk(options?: { requireOwnership?: boolean }): Promise<void> {
++		if (options?.requireOwnership) {
++			if (!this.#persist || !this.#sessionFile || this.#released || this.#sessionFileRelocating) {
++				throw new Error("Session persistence requires an active persistent session");
++			}
++			if (this.#sessionOwnedElsewhere()) throw new Error("Session is owned by another writer");
++		}
+ 		if (!this.#persist || !this.#sessionFile) return;
+ 		this.#forceFileCreation = true;
+ 		if (this.#fileIsCurrent && !this.#rewriteRequired) return;
+@@ -2814,6 +2820,20 @@ export class SessionManager {
+ 		if (this.#diskFailure) throw this.#diskFailure;
+ 	}
+ 
++	/** Stable-storage barrier required before an external side effect. */
++	async flushDurably(): Promise<void> {
++		if (!this.#persist || !this.#sessionFile) throw new Error("Persistent session storage required");
++		await this.flush();
++		await this.#scheduleDiskWork(async () => {
++			const writer = this.#appendWriter();
++			if (!writer.flushDurably) {
++				throw new Error("Session storage does not support stable-storage fences");
++			}
++			await writer.flushDurably();
++		});
++		if (this.#diskFailure) throw this.#diskFailure;
++	}
++
+ 	/**
+ 	 * Synchronously makes the current append-only session durable. Avoid rewriting
+ 	 * an already-current file: large restored sessions can contain GiB of compacted
+diff --git a/packages/coding-agent/src/session/session-storage.ts b/packages/coding-agent/src/session/session-storage.ts
+index a8d1802..51d8725 100644
+--- a/packages/coding-agent/src/session/session-storage.ts
++++ b/packages/coding-agent/src/session/session-storage.ts
+@@ -65,6 +65,8 @@ export interface SessionStorageWriter {
+ 	appendSync?(line: string): void;
+ 	/** Resolve once all queued appends complete. No fsync. */
+ 	flush(): Promise<void>;
++	/** Stable-storage barrier for external side-effect fences. Absence means unsupported. */
++	flushDurably?(): Promise<void>;
+ 	/** Drain synchronously flushable queued work when the backend supports it. No fsync. */
+ 	flushSync?(): void;
+ 	/** False once close() has begun/finished. */
+@@ -428,6 +430,31 @@ class FileSessionStorageWriter implements SessionStorageWriter {
+ 		if (this.#error) throw this.#error;
+ 	}
+ 
++	async flushDurably(): Promise<void> {
++		if (this.#closed) throw new Error("Writer closed");
++		if (this.#error) throw this.#error;
++		const sync = () => {
++			this.#reopenIfReplaced();
++			fs.fsyncSync(this.#fd);
++			// Publishing a new transcript/atomic replacement also needs its directory
++			// entry committed. Windows FlushFileBuffers operates on the file handle.
++			if (process.platform !== "win32") {
++				const dir = openCloexecSync(path.dirname(this.#fpath), fs.constants.O_RDONLY);
++				try {
++					fs.fsyncSync(dir);
++				} finally {
++					fs.closeSync(dir);
++				}
++			}
++		};
++		try {
++			if (this.#publishLock) this.#publishLock(sync, () => this.#holdsLivePath());
++			else sync();
++		} catch (error) {
++			throw this.#recordError(error);
++		}
++	}
++
+ 	flushSync(): void {
+ 		if (this.#error) throw this.#error;
+ 	}
+diff --git a/packages/coding-agent/src/session/turn-recovery.ts b/packages/coding-agent/src/session/turn-recovery.ts
+index 3b76bc6..29dab56 100644
+--- a/packages/coding-agent/src/session/turn-recovery.ts
++++ b/packages/coding-agent/src/session/turn-recovery.ts
+@@ -44,6 +44,7 @@ import {
+ 	resolveThinkingLevelForModel,
+ } from "@oh-my-pi/pi-tui/thinking";
+ import type { EditMode } from "@oh-my-pi/pi-tui/tools/edit";
++import { automaticRecoveryVeto } from "./admission-recovery";
+ import type { AgentSessionEvent } from "./agent-session-events";
+ import type { ResetRecoveryResult } from "./codex-auto-reset";
+ import type {
+@@ -590,13 +591,20 @@ export class TurnRecovery {
+ 		return this.#persistTerminalEmptyErrorTurn(message);
+ 	}
+ 
++	/** Admission pauses/stops and uncertain execution require explicit caller action, never automatic recovery. */
++	blocksAutomaticRecovery(message: AssistantMessage): boolean {
++		return automaticRecoveryVeto(message) !== undefined;
++	}
++
+ 	/** Handles empty terminal assistant turns and schedules bounded recovery. */
+ 	handleEmptyAssistantStop(message: AssistantMessage): Promise<"continue" | "terminal" | undefined> {
++		if (this.blocksAutomaticRecovery(message)) return Promise.resolve("terminal");
+ 		return this.#handleEmptyAssistantStop(message);
+ 	}
+ 
+ 	/** Classifies suspicious terminal stops and schedules bounded recovery. */
+ 	handleUnexpectedAssistantStop(message: AssistantMessage): Promise<boolean> {
++		if (this.blocksAutomaticRecovery(message)) return Promise.resolve(false);
+ 		return this.#handleUnexpectedAssistantStop(message);
+ 	}
+ 
+@@ -612,6 +620,7 @@ export class TurnRecovery {
+ 	 * prompt; past the cap the error surfaces as before.
+ 	 */
+ 	handleMalformedFunctionCallStop(message: AssistantMessage): boolean {
++		if (this.blocksAutomaticRecovery(message)) return false;
+ 		if (message.stopReason !== "error") return false;
+ 		const id = this.#classifyRetryMessage(message);
+ 		if (!AIError.is(id, AIError.Flag.MalformedFunctionCall)) {
+@@ -671,6 +680,7 @@ export class TurnRecovery {
+ 	 * is no executed side effect whose resumption policy it could change.
+ 	 */
+ 	handleCommittedTextStreamStall(message: AssistantMessage): boolean {
++		if (this.blocksAutomaticRecovery(message)) return false;
+ 		const id = this.#classifyRetryMessage(message);
+ 		const socketClosed =
+ 			message.stopReason === "error" &&
+@@ -739,6 +749,7 @@ export class TurnRecovery {
+ 		message: AssistantMessage,
+ 		options: { autoContinue: boolean; triggerContextTokens?: number; excludeMediaMethods?: boolean },
+ 	): Promise<RecoveryCompactionResult> {
++		if (this.blocksAutomaticRecovery(message)) return Promise.resolve({ continuationScheduled: false });
+ 		return this.#runRecoveryCompactionWithRollback(reason, message, options);
+ 	}
+ 
+@@ -768,6 +779,7 @@ export class TurnRecovery {
+ 	 * the active account.
+ 	 */
+ 	async recordUsageLimitOutcome(message: AssistantMessage): Promise<boolean> {
++		if (this.blocksAutomaticRecovery(message)) return false;
+ 		if (message.stopReason !== "error") return false;
+ 		const id = this.#classifyRetryMessage(message);
+ 		const activeModel = this.#host.model();
+@@ -1415,6 +1427,7 @@ export class TurnRecovery {
+ 	 * their own marker, not the generic sentinel, so they never match here.
+ 	 */
+ 	isRetryableReasonlessAbort(message: AssistantMessage): boolean {
++		if (this.blocksAutomaticRecovery(message)) return false;
+ 		if (
+ 			(message.stopReason !== "aborted" && message.stopReason !== "error") ||
+ 			// A `fallback` boundary is bookkeeping, not output: a stream aborted
+@@ -1444,6 +1457,7 @@ export class TurnRecovery {
+ 	 * cannot fall through to the generic 408 replay path.
+ 	 */
+ 	async handleResponsesRequestBodyReadTimeout(message: AssistantMessage): Promise<RequestBodyReadTimeoutRecovery> {
++		if (this.blocksAutomaticRecovery(message)) return "handled-terminal";
+ 		if (message.stopReason !== "error" || !AIError.isResponsesRequestBodyReadTimeout(message)) {
+ 			return "not-applicable";
+ 		}
+@@ -1486,6 +1500,7 @@ export class TurnRecovery {
+ 	 * Context overflow is NOT retryable (handled by compaction instead).
+ 	 */
+ 	isRetryableError(message: AssistantMessage): boolean {
++		if (this.blocksAutomaticRecovery(message)) return false;
+ 		if (message.stopReason !== "error") return false;
+ 		if (this.#isUsagePreflightBlocked(message)) return false;
+ 		if (AIError.isResponsesRequestBodyReadTimeout(message)) return false;
+@@ -1583,6 +1598,7 @@ export class TurnRecovery {
+ 	 * unexecuted call must be reissued.
+ 	 */
+ 	classifyResolvedInterruptedToolTurn(message: AssistantMessage): "reasonless-abort" | "stream-stall" | undefined {
++		if (this.blocksAutomaticRecovery(message)) return undefined;
+ 		const id = this.#classifyRetryMessage(message);
+ 		const genericAbort =
+ 			message.errorMessage !== undefined && Object.hasOwn(GENERIC_ABORT_MESSAGES, message.errorMessage);
+@@ -2319,6 +2335,7 @@ export class TurnRecovery {
+ 	 * Requires the base model to exist in the registry.
+ 	 */
+ 	isFireworksFastFallbackEligible(message: AssistantMessage): boolean {
++		if (this.blocksAutomaticRecovery(message)) return false;
+ 		const model = this.#activeFireworksFastModel();
+ 		if (!model) return false;
+ 		if (message.stopReason !== "error") return false;
+@@ -2350,6 +2367,7 @@ export class TurnRecovery {
+ 	 * `pinFallback`), and turns that already emitted replay-unsafe output.
+ 	 */
+ 	isHardErrorFallbackEligible(message: AssistantMessage): boolean {
++		if (this.blocksAutomaticRecovery(message)) return false;
+ 		if (message.stopReason !== "error") return false;
+ 		if (this.#isUsagePreflightBlocked(message)) return false;
+ 		const model = this.#host.model();
+@@ -2490,6 +2508,7 @@ export class TurnRecovery {
+ 	 * @returns true if retry was initiated, false if max retries exceeded or disabled
+ 	 */
+ 	async #handleRetryableError(message: AssistantMessage, options?: RetryPolicyOptions): Promise<boolean> {
++		if (this.blocksAutomaticRecovery(message)) return false;
+ 		try {
+ 			return await this.#applyRetryPolicy(message, options);
+ 		} catch (error) {
+diff --git a/packages/coding-agent/src/task/executor.ts b/packages/coding-agent/src/task/executor.ts
+index 5d3dc5f..b847b4b 100644
+--- a/packages/coding-agent/src/task/executor.ts
++++ b/packages/coding-agent/src/task/executor.ts
+@@ -23,6 +23,7 @@ import {
+ } from "@oh-my-pi/pi-tui/render/render-utils";
+ import { type EditMode, getEditInputPaths } from "@oh-my-pi/pi-tui/tools/edit";
+ import {
++	type AuthenticatedModelResolution,
+ 	formatModelStringWithRouting,
+ 	resolveAgentAdvisorRolePattern,
+ 	resolveAgentAdvisorSelection,
+@@ -434,6 +435,8 @@ export interface ExecutorOptions {
+ 	modelRole?: string;
+ 	/** Extension routing note for the chosen model; surfaced as `resolvedModelRoute`. */
+ 	modelRoute?: string;
++	/** Exact model already admitted by the parent before expensive child allocation. */
++	admittedModelResolution?: AuthenticatedModelResolution;
+ 	/**
+ 	 * Active model selector of the parent session, used as an auth-aware fallback
+ 	 * if the resolved subagent model has no working credentials. See #985.
+@@ -4217,7 +4220,7 @@ export async function runSubprocess(options: ExecutorOptions): Promise<SingleRes
+ 				explicitThinkingLevel,
+ 				authFallbackUsed,
+ 				warning: modelResolutionWarning,
+-			} = await awaitAbortable(
++			} = options.admittedModelResolution ?? await awaitAbortable(
+ 				resolveModelOverrideWithAuthFallback(
+ 					modelPatterns,
+ 					options.parentActiveModelPattern,
+diff --git a/packages/coding-agent/src/task/structured-subagent.ts b/packages/coding-agent/src/task/structured-subagent.ts
+index 7082a19..d58ed52 100644
+--- a/packages/coding-agent/src/task/structured-subagent.ts
++++ b/packages/coding-agent/src/task/structured-subagent.ts
+@@ -7,9 +7,14 @@
+ import * as fs from "node:fs/promises";
+ import * as os from "node:os";
+ import path from "node:path";
+-import { $env, prompt, Snowflake } from "@oh-my-pi/pi-utils";
++import { $env, prompt, Snowflake, untilAborted } from "@oh-my-pi/pi-utils";
+ import { shortenPath } from "@oh-my-pi/pi-tui/render/render-utils";
+-import { resolveAgentModelSelection, resolveConfiguredModelPatterns } from "../config/model-resolver";
++import {
++	type AuthenticatedModelResolution,
++	resolveAgentModelSelection,
++	resolveConfiguredModelPatterns,
++	resolveModelOverrideWithAuthFallback,
++} from "../config/model-resolver";
+ import { type OAuthAccountPools, validateAgentAccountPools } from "../config/account-pools";
+ import {
+ 	type CompactionThresholdPair,
+@@ -770,6 +775,35 @@ function describeSalvagedWork(result: SingleResult): string {
+  */
+ export async function runStructuredSubagent(request: StructuredSubagentRequest): Promise<StructuredSubagentResult> {
+ 	const policy = await applySpawnHook(request, await resolveEffectiveSubagentPolicy(request));
++	const id = await reserveStructuredSubagentId(request.session, {
++		...request.identity,
++		label: request.identity?.label ?? (request.invocationKind === "eval" ? "EvalAgent" : undefined),
++	});
++	let admittedModelResolution: AuthenticatedModelResolution | undefined;
++	const admit = request.session.emitBeforeSubagentAdmission;
++	if (admit) {
++		const signal = request.signal ?? new AbortController().signal;
++		signal.throwIfAborted();
++		const registry = request.session.modelRegistry;
++		if (!registry) throw new StructuredSubagentError("preflight", "Subagent admission requires a model registry.");
++		admittedModelResolution = await untilAborted(signal, () => resolveModelOverrideWithAuthFallback(
++			policy.modelOverride ?? [],
++			policy.parentActiveModelPattern,
++			registry,
++			request.session.settings,
++			id,
++		));
++		const model = admittedModelResolution.model;
++		if (!model) throw new StructuredSubagentError("preflight", "Subagent admission requires a resolved model.");
++		await untilAborted(signal, () => admit({
++			type: "before_subagent_admission",
++			agent: policy.agentName,
++			invocationKind: request.invocationKind,
++			model: `${model.provider}/${model.id}`,
++			signal,
++		}));
++		signal.throwIfAborted();
++	}
+ 	const lease = await leaseArtifacts(request.session, request.invocationKind);
+ 	let changesApplied: boolean | null = null;
+ 	let mergeSummary = "";
+@@ -787,11 +821,8 @@ export async function runStructuredSubagent(request: StructuredSubagentRequest):
+ 			? (result: SingleResult) => request.session.recordEvalSubagentUsage?.(result.usage?.output ?? 0)
+ 			: undefined;
+ 	try {
+-		const id = await reserveStructuredSubagentId(request.session, {
+-			...request.identity,
+-			label: request.identity?.label ?? (request.invocationKind === "eval" ? "EvalAgent" : undefined),
+-		});
+ 		const baseOptions = buildExecutorOptions(request, policy, lease, id);
++		baseOptions.admittedModelResolution = admittedModelResolution;
+ 		baseOptions.onCleanupDeferred = completion => {
+ 			deferredCleanup = completion;
+ 		};
+diff --git a/packages/coding-agent/src/tools/index.ts b/packages/coding-agent/src/tools/index.ts
+index d6af231..053b157 100644
+--- a/packages/coding-agent/src/tools/index.ts
++++ b/packages/coding-agent/src/tools/index.ts
+@@ -12,6 +12,7 @@ import { EditTool } from "../edit";
+ import { checkPythonKernelAvailability } from "../eval/py/kernel";
+ import type { ToolPathWithSource } from "../extensibility/custom-tools";
+ import type {
++	BeforeSubagentAdmissionEvent,
+ 	BeforeSubagentSpawnEvent,
+ 	BeforeSubagentSpawnEventResult,
+ 	PreparedExtension,
+@@ -428,6 +429,8 @@ export interface ToolSession {
+ 		event: BeforeSubagentSpawnEvent,
+ 		signal?: AbortSignal,
+ 	): Promise<BeforeSubagentSpawnEventResult | undefined>;
++	/** Abortable, fail-closed admission inside the existing spawn permit, before child allocation. */
++	emitBeforeSubagentAdmission?(event: BeforeSubagentAdmissionEvent): Promise<void>;
+ 	/** Auth storage for passing to subagents (avoids re-discovery) */
+ 	authStorage?: import("../session/auth-storage").AuthStorage;
+ 	/** Model registry for passing to subagents (avoids re-discovery) */
+diff --git a/packages/coding-agent/test/extensions-runner.test.ts b/packages/coding-agent/test/extensions-runner.test.ts
+index 079e034..c2c39af 100644
+--- a/packages/coding-agent/test/extensions-runner.test.ts
++++ b/packages/coding-agent/test/extensions-runner.test.ts
+@@ -15,7 +15,7 @@ import { getBundledModel } from "@oh-my-pi/pi-catalog/models";
+ import { convertToLlm, wrapSteeringForModel } from "@oh-my-pi/pi-coding-agent/session/messages";
+ import { ModelRegistry } from "@oh-my-pi/pi-coding-agent/config/model-registry";
+ import { Settings } from "@oh-my-pi/pi-coding-agent/config/settings";
+-import { ExtensionRuntime, loadExtensions } from "@oh-my-pi/pi-coding-agent/extensibility/extensions/loader";
++import { ExtensionRuntime, loadExtensionFromFactory, loadExtensions } from "@oh-my-pi/pi-coding-agent/extensibility/extensions/loader";
+ import {
+ 	EXTENSION_HANDLER_TIMEOUT_MS,
+ 	ExtensionRunner,
+@@ -26,6 +26,7 @@ import {
+ import type {
+ 	Extension,
+ 	ExtensionError,
++	ExtensionFactory,
+ 	ExtensionUIContext,
+ 	InputEvent,
+ 	InputEventResult,
+@@ -33,6 +34,7 @@ import type {
+ import { ExtensionToolWrapper } from "@oh-my-pi/pi-coding-agent/extensibility/extensions/wrapper";
+ import { AuthStorage } from "@oh-my-pi/pi-coding-agent/session/auth-storage";
+ import { SessionManager } from "@oh-my-pi/pi-coding-agent/session/session-manager";
++import { EventBus } from "@oh-my-pi/pi-coding-agent/utils/event-bus";
+ import { getProjectAgentDir, logger, TempDir } from "@oh-my-pi/pi-utils";
+ import { createAssistantMessage } from "./helpers/agent-session-setup";
+ 
+@@ -96,6 +98,84 @@ describe("ExtensionRunner", () => {
+ 		};
+ 	};
+ 
++	async function admissionRunner(factory: ExtensionFactory): Promise<ExtensionRunner> {
++		const runtime = new ExtensionRuntime();
++		const extension = await loadExtensionFromFactory(factory, tempDir.path(), new EventBus(), runtime);
++		return new ExtensionRunner([extension], runtime, tempDir.path(), sessionManager, modelRegistry);
++	}
++
++	it("keeps admission waiting beyond the spawn-hook timeout and admits only after release", async () => {
++		testSetExtensionHandlerTimeoutMs(5);
++		const gate = Promise.withResolvers<void>();
++		const entered = Promise.withResolvers<void>();
++		let admitted = false;
++		const runner = await admissionRunner(pi => {
++			pi.on("before_subagent_admission", async event => {
++				expect(event.model).toBe("local/worker");
++				entered.resolve();
++				await gate.promise;
++			});
++			pi.on("before_subagent_spawn", async () => { await gate.promise; });
++		});
++		const signal = new AbortController().signal;
++		const waiting = runner.emitBeforeSubagentAdmission({
++			type: "before_subagent_admission", agent: "worker", invocationKind: "task", model: "local/worker", signal,
++		}).then(() => { admitted = true; });
++		const routing = runner.emitBeforeSubagentSpawn({
++			type: "before_subagent_spawn", agent: "worker", invocationKind: "task", patterns: ["local/worker"],
++		}, signal);
++		try {
++			await entered.promise;
++			await routing;
++			expect(admitted).toBe(false);
++		} finally {
++			gate.resolve();
++			await waiting;
++		}
++		expect(admitted).toBe(true);
++	});
++
++	it("aborts even an admission handler that ignores cancellation, without running later handlers", async () => {
++		const controller = new AbortController();
++		const entered = Promise.withResolvers<void>();
++		const gate = Promise.withResolvers<void>();
++		let later = false;
++		const runner = await admissionRunner(pi => {
++			pi.on("before_subagent_admission", async event => {
++				expect(event.signal).toBe(controller.signal);
++				entered.resolve();
++				await gate.promise;
++			});
++			pi.on("before_subagent_admission", () => { later = true; });
++		});
++		const waiting = runner.emitBeforeSubagentAdmission({
++			type: "before_subagent_admission", agent: "worker", invocationKind: "eval",
++			model: "local/worker", signal: controller.signal,
++		});
++		const outcome = waiting.catch(error => error);
++		await entered.promise;
++		controller.abort(new Error("cancel admission"));
++		try {
++			expect(await outcome).toBeInstanceOf(Error);
++			expect(later).toBe(false);
++		} finally {
++			gate.resolve();
++		}
++	});
++
++	it("fails closed on admission handler errors rather than continuing the middleware chain", async () => {
++		let later = false;
++		const runner = await admissionRunner(pi => {
++			pi.on("before_subagent_admission", () => { throw new Error("admission service unauthorized"); });
++			pi.on("before_subagent_admission", () => { later = true; });
++		});
++		await expect(runner.emitBeforeSubagentAdmission({
++			type: "before_subagent_admission", agent: "worker", invocationKind: "task",
++			model: "local/worker", signal: new AbortController().signal,
++		})).rejects.toThrow("admission service unauthorized");
++		expect(later).toBe(false);
++	});
++
+ 	it("reflects SessionManager.moveTo() changes instead of the constructor-time snapshot (/move)", async () => {
+ 		const dirA = tempDir.join("dirA");
+ 		const dirB = tempDir.join("dirB");
+diff --git a/packages/coding-agent/test/task/structured-subagent.test.ts b/packages/coding-agent/test/task/structured-subagent.test.ts
+index e059c17..14d6ff9 100644
+--- a/packages/coding-agent/test/task/structured-subagent.test.ts
++++ b/packages/coding-agent/test/task/structured-subagent.test.ts
+@@ -29,6 +29,8 @@ import * as discoveryModule from "@oh-my-pi/pi-coding-agent/task/discovery";
+ import { createEvalCustomTools } from "@oh-my-pi/pi-coding-agent/task/eval-tools";
+ import * as executorModule from "@oh-my-pi/pi-coding-agent/task/executor";
+ import * as isolationRunner from "@oh-my-pi/pi-coding-agent/task/isolation-runner";
++import { Semaphore } from "@oh-my-pi/pi-coding-agent/task/parallel";
++import { SpawnRun } from "@oh-my-pi/pi-coding-agent/task/spawn-run";
+ import {
+ 	buildStructuredSubagentRecoveryHint,
+ 	resolveEffectiveSubagentPolicy,
+@@ -532,6 +534,92 @@ describe("structured subagent primitive", () => {
+ 		await fs.rm(settled.artifactsDir, { recursive: true, force: true });
+ 	});
+ 
++	it("holds admission inside the spawn permit and cancels without allocating a child or worktree", async () => {
++		mockDiscovery({ ...AGENT, model: ["mock/mock-model"] });
++		const auth = createInMemoryAuthStorage();
++		const registry = new ModelRegistry(auth);
++		const model = createMockModel();
++		vi.spyOn(registry, "getAvailable").mockReturnValue([model]);
++		const parent = session({ isolationEnabled: true });
++		parent.modelRegistry = registry;
++		const entered = Promise.withResolvers<void>();
++		const secondEntered = Promise.withResolvers<void>();
++		const release = Promise.withResolvers<void>();
++		let admissions = 0;
++		parent.emitBeforeSubagentAdmission = async event => {
++			expect(event.model).toBe("mock/mock-model");
++			admissions++;
++			if (admissions === 1) {
++				entered.resolve();
++				await release.promise;
++			} else {
++				secondEntered.resolve();
++				throw new Error("capacity refused");
++			}
++		};
++		const run = vi.spyOn(executorModule, "runSubprocess");
++		const isolate = vi.spyOn(isolationRunner, "prepareIsolationContext");
++		const semaphore = new Semaphore(1);
++		const permit = { acquire: (signal: AbortSignal) => semaphore.acquire(signal), release: () => semaphore.release() };
++		const spawn = () => new SpawnRun(permit, async ({ signal }) => {
++			const execution = await runStructuredSubagent(request({
++				session: parent, signal, isolation: { requested: true },
++			}));
++			return { content: [{ type: "text", text: execution.result.output }] };
++		}, { detached: false });
++		const first = spawn();
++		const second = spawn();
++		const firstResult = first.result.catch(error => error);
++		const secondResult = second.result.catch(error => error);
++		try {
++			await entered.promise;
++			expect(admissions).toBe(1);
++			expect(artifactsDirsFromRegistry()).toEqual([]);
++			first.discard("cancel waiting child");
++			expect(await firstResult).toBeInstanceOf(Error);
++			await secondEntered.promise;
++			expect(await secondResult).toBeInstanceOf(Error);
++			expect(run).not.toHaveBeenCalled();
++			expect(isolate).not.toHaveBeenCalled();
++			expect(artifactsDirsFromRegistry()).toEqual([]);
++		} finally {
++			release.resolve();
++			first.discard("cleanup");
++			second.discard("cleanup");
++			await Promise.allSettled([first.result, second.result]);
++			auth.close();
++		}
++	});
++
++	it("admits the routed model before dispatch and pins it for child creation", async () => {
++		mockDiscovery({ ...AGENT, model: ["mock/original"] });
++		const auth = createInMemoryAuthStorage();
++		const registry = new ModelRegistry(auth);
++		const original = createMockModel({ id: "original" });
++		const routed = createMockModel({ id: "routed" });
++		vi.spyOn(registry, "getAvailable").mockReturnValue([original, routed]);
++		const parent = session();
++		parent.modelRegistry = registry;
++		parent.emitBeforeSubagentSpawn = async () => ({ model: "mock/routed" });
++		let admitted = false;
++		parent.emitBeforeSubagentAdmission = async event => {
++			expect(event.model).toBe("mock/routed");
++			expect(artifactsDirsFromRegistry()).toEqual([]);
++			admitted = true;
++		};
++		vi.spyOn(executorModule, "runSubprocess").mockImplementation(async options => {
++			expect(admitted).toBe(true);
++			expect(options.admittedModelResolution?.model?.id).toBe("routed");
++			return result();
++		});
++		try {
++			const execution = await runStructuredSubagent(request({ session: parent, invocationKind: "eval", retainArtifacts: true }));
++			await fs.rm(execution.artifactsDir, { recursive: true, force: true });
++		} finally {
++			auth.close();
++		}
++	});
++
+ 	it("rejects dispatch before leasing artifacts when an extension blocks the spawn", async () => {
+ 		mockDiscovery();
+ 		const blockedSession = session();
+@@ -821,25 +909,6 @@ describe("structured subagent primitive", () => {
+ 		await fs.rm(restrictedRun.artifactsDir, { recursive: true, force: true });
+ 	});
+ 
+-	it("unregisters and removes a temporary lease when output ID allocation fails", async () => {
+-		mockDiscovery();
+-		const failingSession = session();
+-		failingSession.agentOutputManager = {
+-			allocate: async () => {
+-				throw new Error("allocate failed");
+-			},
+-		} as unknown as ToolSession["agentOutputManager"];
+-		const remove = vi.spyOn(fs, "rm");
+-
+-		await expect(runStructuredSubagent(request({ session: failingSession }))).rejects.toThrow(
+-			"Subagent execution failed: allocate failed",
+-		);
+-
+-		const artifactsDir = remove.mock.calls[0]?.[0];
+-		expect(typeof artifactsDir).toBe("string");
+-		expect(artifactsDirsFromRegistry()).toEqual([]);
+-		await expect(fs.stat(artifactsDir as string)).rejects.toThrow();
+-	});
+ 
+ 	it("unregisters and removes a temporary lease when plan reference loading fails", async () => {
+ 		mockDiscovery();
+diff --git a/packages/coding-agent/test/turn-recovery-replay-unsafe.test.ts b/packages/coding-agent/test/turn-recovery-replay-unsafe.test.ts
+index 3ca854e..f5f113c 100644
+--- a/packages/coding-agent/test/turn-recovery-replay-unsafe.test.ts
++++ b/packages/coding-agent/test/turn-recovery-replay-unsafe.test.ts
+@@ -135,6 +135,49 @@ describe("TurnRecovery replay-unsafe output classification", () => {
+ 		tempDir.removeSync();
+ 	});
+ 
++	it("never retries, falls back, repairs, or replays bridge terminal outcomes", async () => {
++		const cases: Partial<AssistantMessage>[] = [
++			{ errorType: "execution_unknown", errorStatus: 503, errorMessage: "service unavailable" },
++			{ errorCode: "BRIDGE_EXECUTION_UNKNOWN", errorStatus: 400, errorMessage: "hard provider failure" },
++			{ stopReason: "aborted", errorMessage: '{"error":{"type":"execution_unknown","message":"Request was aborted"}}' },
++			{ errorClassificationMessage: "BRIDGE_EXECUTION_UNKNOWN", errorMessage: "stream stall timeout" },
++			{ errorCode: "BRIDGE_ADMISSION_PAUSED", errorStatus: 400, errorMessage: "budget exhausted" },
++			{ errorCode: "BRIDGE_ADMISSION_STOPPED", errorStatus: 400, errorMessage: "invalid setup" },
++			{ errorMessage: "[BRIDGE_ADMISSION_PAUSED] 503 service unavailable", errorStatus: 503 },
++			{ errorClassificationMessage: "BRIDGE_ADMISSION_STOPPED", errorMessage: "context window exceeded" },
++		];
++		for (const fields of cases) {
++			const message = { ...makeMessage([], model), ...fields };
++			const messages: AgentMessage[] = [{ role: "user", content: "one request", timestamp: 1 }, message];
++			const host = createHost(model, modelRegistry, {
++				messages, fallbackChains: { default: ["anthropic/claude-sonnet-4-5", "openai/gpt-4o-mini"] },
++			});
++			const effects: string[] = [];
++			host.scheduleAgentContinue = () => { effects.push("continue"); };
++			host.setModelWithProviderSessionReset = async () => { effects.push("fallback"); };
++			host.runAutoCompaction = async () => { effects.push("compact"); return { continuationScheduled: true }; };
++			const recovery = new TurnRecovery(host);
++			expect(recovery.isRetryableError(message)).toBe(false);
++			expect(recovery.isRetryableReasonlessAbort(message)).toBe(false);
++			expect(recovery.isHardErrorFallbackEligible(message)).toBe(false);
++			expect(recovery.isFireworksFastFallbackEligible(message)).toBe(false);
++			expect(recovery.classifyResolvedInterruptedToolTurn(message)).toBeUndefined();
++			expect(await recovery.handleRetryableError(message, { hardErrorFallback: true })).toBe(false);
++			expect(await recovery.handleRetryableError(message, { fireworksFastFallback: true })).toBe(false);
++			expect(await recovery.handleEmptyAssistantStop(message)).toBe("terminal");
++			expect(await recovery.handleUnexpectedAssistantStop(message)).toBe(false);
++			expect(recovery.handleMalformedFunctionCallStop(message)).toBe(false);
++			expect(recovery.handleCommittedTextStreamStall(message)).toBe(false);
++			expect(await recovery.handleResponsesRequestBodyReadTimeout(message)).toBe("handled-terminal");
++			expect(await recovery.runRecoveryCompactionWithRollback("overflow", message, { autoContinue: true }))
++				.toEqual({ continuationScheduled: false });
++			expect(effects).toEqual([]);
++			expect(host.agent.state.messages).toEqual(messages);
++			expect(recovery.attempt).toBe(0);
++			expect(recovery.retryPromise).toBeUndefined();
++		}
++	});
++
+ 	it("rolls back a usage fallback cancelled during model reconciliation", async () => {
+ 		const fallback = getBundledModel("openai", "gpt-4o-mini");
+ 		if (!fallback) throw new Error("Expected bundled fallback model");
+diff --git a/packages/utils/CHANGELOG.md b/packages/utils/CHANGELOG.md
+index b0ddf3d..e1ca3b3 100644
+--- a/packages/utils/CHANGELOG.md
++++ b/packages/utils/CHANGELOG.md
+@@ -2,6 +2,12 @@
+ 
+ ## [Unreleased]
+ 
++## [18.12.0-ojak.1] - 2026-10-16
++
++### Changed
++
++- Identify the coupled Ojak durable-admission fork in CLI version output and client metadata.
++
+ ## [18.10.0] - 2026-10-12
+ 
+ ### Added
+diff --git a/packages/utils/package.json b/packages/utils/package.json
+index abe08cf..1e1d3a1 100644
+--- a/packages/utils/package.json
++++ b/packages/utils/package.json
+@@ -1,6 +1,6 @@
+ {
+ 	"name": "@oh-my-pi/pi-utils",
+-	"version": "18.11.0",
++	"version": "18.12.0-ojak.1",
+ 	"description": "Shared utilities for pi packages",
+ 	"keywords": [
+ 		"cli",
+diff --git a/packages/ai/test/provider-request-ownership.test.ts b/packages/ai/test/provider-request-ownership.test.ts
+new file mode 100644
+index 0000000..3ac3829
+--- /dev/null
++++ b/packages/ai/test/provider-request-ownership.test.ts
+@@ -0,0 +1,32 @@
++import { afterEach, expect, it } from "bun:test";
++import { registerCustomApi, unregisterCustomApis } from "@oh-my-pi/pi-ai";
++import { createMockModel } from "@oh-my-pi/pi-ai/providers/mock";
++import { completeSimple, streamSimple } from "@oh-my-pi/pi-ai/stream";
++import type { Api, Context, Model, SimpleStreamOptions } from "@oh-my-pi/pi-ai/types";
++import { AssistantMessageEventStream } from "@oh-my-pi/pi-ai/utils/event-stream";
++
++const SOURCE = "provider-request-ownership-test";
++const API = SOURCE as Api;
++afterEach(() => unregisterCustomApis(SOURCE));
++
++it("admits one-shot side requests without mistaking a missing primary owner for ephemeral work", async () => {
++	const mock = createMockModel({ responses: [{ content: ["side reply"] }] });
++	const model: Model = { ...mock, api: API };
++	const context: Context = { messages: [{ role: "user", content: "classify this", timestamp: 1 }] };
++	registerCustomApi(API, (requestModel: Model, requestContext: Context, options?: SimpleStreamOptions) => {
++		if (options?.requestKind !== "ephemeral") {
++			const rejected = new AssistantMessageEventStream();
++			rejected.fail(new Error("Primary or unknown request requires a durable owner"));
++			return rejected;
++		}
++		return mock.stream(requestModel, requestContext, options);
++	}, SOURCE);
++
++	const side = await completeSimple(model, context, { apiKey: "test" });
++	expect(side.content).toEqual([{ type: "text", text: "side reply" }]);
++	await expect(completeSimple(model, context, { apiKey: "test", requestKind: "primary", sessionId: "unbound" }))
++		.rejects.toThrow("durable owner");
++	await expect(streamSimple(model, context, { apiKey: "test", sessionId: "unbound" }).result())
++		.rejects.toThrow("durable owner");
++	expect(mock.calls).toHaveLength(1);
++});
+diff --git a/packages/coding-agent/src/session/admission-recovery.ts b/packages/coding-agent/src/session/admission-recovery.ts
+new file mode 100644
+index 0000000..98fa494
+--- /dev/null
++++ b/packages/coding-agent/src/session/admission-recovery.ts
+@@ -0,0 +1,32 @@
++import type { AssistantMessage } from "@oh-my-pi/pi-ai";
++
++/** Terminal bridge outcomes have distinct meanings, but all veto automatic provider submission. */
++export function automaticRecoveryVeto(
++	message: AssistantMessage,
++): "execution_unknown" | "admission_paused" | "admission_stopped" | undefined {
++	const classification = message.errorClassificationMessage ?? "";
++	const detail = message.errorMessage ?? "";
++	if (
++		message.errorType === "execution_unknown" || message.errorCode === "BRIDGE_EXECUTION_UNKNOWN" ||
++		/\b(?:execution_unknown|BRIDGE_EXECUTION_UNKNOWN)\b/.test(classification) ||
++		/\b(?:execution_unknown|BRIDGE_EXECUTION_UNKNOWN)\b/.test(detail)
++	) return "execution_unknown";
++	if (
++		message.errorCode === "BRIDGE_ADMISSION_STOPPED" ||
++		/\bBRIDGE_ADMISSION_STOPPED\b/.test(classification) || /\bBRIDGE_ADMISSION_STOPPED\b/.test(detail)
++	) return "admission_stopped";
++	if (
++		message.errorCode === "BRIDGE_ADMISSION_PAUSED" ||
++		/\bBRIDGE_ADMISSION_PAUSED\b/.test(classification) || /\bBRIDGE_ADMISSION_PAUSED\b/.test(detail)
++	) return "admission_paused";
++	return undefined;
++}
++
++/** Explicit continuation is safe only for an output-free, positively identified pre-send pause. */
++export function isResumableAdmissionPause(message: AssistantMessage): boolean {
++	return message.stopReason === "error" && message.errorAfterOutput !== true &&
++		message.content.every(block => block.type === "text" && block.text === "") &&
++		automaticRecoveryVeto(message) === "admission_paused" &&
++		(message.errorCode === "BRIDGE_ADMISSION_PAUSED" ||
++			message.errorMessage?.startsWith("[BRIDGE_ADMISSION_PAUSED]") === true);
++}
+diff --git a/packages/coding-agent/test/extension-session-admission.test.ts b/packages/coding-agent/test/extension-session-admission.test.ts
+new file mode 100644
+index 0000000..5b17cc7
+--- /dev/null
++++ b/packages/coding-agent/test/extension-session-admission.test.ts
+@@ -0,0 +1,421 @@
++import { afterAll, afterEach, beforeAll, describe, expect, it, vi } from "bun:test";
++import * as fs from "node:fs";
++import { type } from "@oh-my-pi/omptype";
++import { Agent, type AgentMessage, type AgentTool } from "@oh-my-pi/pi-agent-core";
++import type { AssistantMessage, SimpleStreamOptions } from "@oh-my-pi/pi-ai";
++import { createMockModel, type MockModelOptions } from "@oh-my-pi/pi-ai/providers/mock";
++import { AssistantMessageEventStream } from "@oh-my-pi/pi-ai/utils/event-stream";
++import { ModelRegistry } from "@oh-my-pi/pi-coding-agent/config/model-registry";
++import { Settings } from "@oh-my-pi/pi-coding-agent/config/settings";
++import { ExtensionRuntime, loadExtensionFromFactory } from "@oh-my-pi/pi-coding-agent/extensibility/extensions/loader";
++import { ExtensionRunner } from "@oh-my-pi/pi-coding-agent/extensibility/extensions/runner";
++import type { ExtensionAgentIdentity, ExtensionContext, ExtensionFactory } from "@oh-my-pi/pi-coding-agent/extensibility/extensions/types";
++import { initializeExtensions } from "@oh-my-pi/pi-coding-agent/modes/runtime-init";
++import { AgentSession } from "@oh-my-pi/pi-coding-agent/session/agent-session";
++import { AuthStorage } from "@oh-my-pi/pi-coding-agent/session/auth-storage";
++import { convertToLlm } from "@oh-my-pi/pi-coding-agent/session/messages";
++import { SessionManager } from "@oh-my-pi/pi-coding-agent/session/session-manager";
++import { EventBus } from "@oh-my-pi/pi-coding-agent/utils/event-bus";
++import { TempDir } from "@oh-my-pi/pi-utils";
++import { createAssistantMessage } from "./helpers/agent-session-setup";
++
++let authStorage: AuthStorage;
++let modelRegistry: ModelRegistry;
++const sessions: AgentSession[] = [];
++const dirs: TempDir[] = [];
++
++beforeAll(async () => {
++	authStorage = await AuthStorage.create(":memory:");
++	authStorage.keys.setRuntime("mock", "test-key");
++	modelRegistry = new ModelRegistry(authStorage);
++});
++afterAll(() => authStorage.close());
++afterEach(async () => {
++	vi.restoreAllMocks();
++	for (const session of sessions.splice(0)) await session.dispose();
++	for (const dir of dirs.splice(0)) await dir.remove();
++});
++
++async function harness(options: {
++	manager?: SessionManager;
++	messages?: AgentMessage[];
++	tools?: AgentTool[];
++	identity?: ExtensionAgentIdentity;
++	extension?: ExtensionFactory;
++	providerSessionId?: string;
++	beforeRequest?: (ctx: ExtensionContext, options?: SimpleStreamOptions) => Promise<void>;
++	model?: MockModelOptions;
++} = {}) {
++	const dir = TempDir.createSync("@pi-pending-turn-");
++	dirs.push(dir);
++	const manager = options.manager ?? SessionManager.create(dir.path(), dir.path());
++	const mock = createMockModel(options.model ?? { responses: [{ content: ["complete"] }] });
++	const settings = Settings.isolated({
++		"compaction.enabled": false, "retry.enabled": false, "todo.enabled": false, "todo.reminders": false,
++	});
++	settings.setModelRole("default", `${mock.provider}/${mock.id}`);
++	const runtime = new ExtensionRuntime();
++	const extensions = options.extension
++		? [await loadExtensionFromFactory(options.extension, dir.path(), new EventBus(), runtime)]
++		: [];
++	const runner = new ExtensionRunner(extensions, runtime, dir.path(), manager, modelRegistry,
++		undefined, settings, undefined, undefined, options.identity);
++	const agent = new Agent({
++		getApiKey: () => "test-key",
++		initialState: { model: mock, systemPrompt: ["Test"], tools: options.tools ?? [],
++			messages: options.messages ?? manager.buildSessionContext().messages },
++		convertToLlm,
++		streamFn: async (model, context, streamOptions) => {
++			await options.beforeRequest?.(runner.createContext(), streamOptions);
++			return mock.stream(model, context, streamOptions);
++		},
++	});
++	const session = new AgentSession({ agent, sessionManager: manager, settings, modelRegistry,
++		providerSessionId: options.providerSessionId,
++		toolRegistry: new Map((options.tools ?? []).map(tool => [tool.name, tool])), extensionRunner: runner });
++	sessions.push(session);
++	await initializeExtensions(session, { reportSendError: () => {}, reportRuntimeError: () => {} });
++	return { session, manager, mock, ctx: runner.createContext(), runner, dir };
++}
++
++const user: AgentMessage = { role: "user", content: [{ type: "text", text: "do the saved work" }], timestamp: 1 };
++
++function completedToolTurn(): AgentMessage[] {
++	return [user, { ...createAssistantMessage(""), stopReason: "toolUse",
++		content: [{ type: "toolCall", id: "effect-1", name: "effect", arguments: {} }], timestamp: 2 },
++		{ role: "toolResult", toolCallId: "effect-1", toolName: "effect", content: [{ type: "text", text: "already done" }],
++			isError: false, timestamp: 3 }];
++}
++
++describe("supported extension session durability and unsent continuation", () => {
++	for (const identity of [
++		{ kind: "main", id: "Main", name: "main", depth: 0 },
++		{ kind: "sub", id: "Child", name: "worker", depth: 1, parentId: "Main" },
++	] satisfies ExtensionAgentIdentity[]) {
++		it(`persists the first ${identity.kind} prompt before provider dispatch without inventing an assistant`, async () => {
++			let durableRoles: string[] = [];
++			const { session, manager } = await harness({ identity, beforeRequest: async (ctx, options) => {
++				if (options?.requestKind !== "primary" || options.sessionId !== ctx.providerSessionId) {
++					throw new Error("Missing primary request owner");
++				}
++				await ctx.persistSession();
++				const file = ctx.sessionManager.getSessionFile();
++				if (!file) throw new Error("missing session path");
++				const entries = Bun.JSONL.parse(await Bun.file(file).text()) as Array<{ type: string; message?: AgentMessage }>;
++				durableRoles = entries.filter(entry => entry.type === "message").map(entry => entry.message!.role);
++			} });
++			await session.prompt("first real prompt");
++			await session.waitForIdle();
++			expect(durableRoles).toEqual(["user"]);
++			expect(manager.getEntries().filter(entry => entry.type === "message" && entry.message.role === "user")).toHaveLength(1);
++		});
++	}
++
++	it("matches primary ownership after provider identity rotation without changing the transcript ID", async () => {
++		const owners: string[] = [];
++		const { session, manager, ctx, runner, mock } = await harness({
++			providerSessionId: "initial-provider-id",
++			beforeRequest: async (context, options) => {
++				if (options?.requestKind !== "primary" || options.sessionId !== context.providerSessionId) {
++					throw new Error("Primary provider request has no matching owner");
++				}
++				await context.persistSession();
++				owners.push(context.providerSessionId!);
++			},
++		});
++		const transcriptId = manager.getSessionId();
++		const commandContext = runner.createCommandContext();
++		await session.prompt("first owner");
++		await session.waitForIdle();
++		const fresh = session.freshSession();
++		expect(fresh?.previousSessionId).toBe("initial-provider-id");
++		expect(ctx.providerSessionId).toBe(fresh?.sessionId);
++		expect(commandContext.providerSessionId).toBe(fresh?.sessionId);
++		expect(manager.getSessionId()).toBe(transcriptId);
++		await session.prompt("fresh owner");
++		await session.waitForIdle();
++		expect(owners).toEqual(["initial-provider-id", fresh!.sessionId]);
++		expect(mock.calls).toHaveLength(2);
++		await session.resetSessionContext();
++		const resetId = ctx.providerSessionId;
++		if (!resetId) throw new Error("Reset provider identity is missing");
++		expect(resetId).not.toBe(fresh!.sessionId);
++		expect(commandContext.providerSessionId).toBe(resetId);
++		expect(manager.getSessionId()).toBe(transcriptId);
++		await session.prompt("reset owner");
++		await session.waitForIdle();
++		expect(owners).toEqual(["initial-provider-id", fresh!.sessionId, resetId]);
++		expect(mock.calls[2].context.messages.filter(message => message.role === "user").map(message => message.content))
++			.toEqual([[{ type: "text", text: "reset owner" }]]);
++	});
++
++	it("leaves an admission pause terminal until explicitly resumed, with one original user", async () => {
++		let paused = true;
++		let attempts = 0;
++		let stopHooks = 0;
++		const { ctx, session, manager, mock } = await harness({
++			beforeRequest: async context => {
++				attempts++;
++				await context.persistSession();
++				if (paused) throw Object.assign(new Error("Admission wait budget exhausted"), {
++					code: "BRIDGE_ADMISSION_PAUSED", status: 400,
++				});
++			},
++			extension: pi => {
++				pi.on("session_stop", () => {
++					stopHooks++;
++					if (paused) return { continue: true, additionalContext: "must not run" };
++				});
++			},
++		});
++		session.setAutoRetryEnabled(true);
++		await session.prompt("single intent");
++		await session.waitForIdle();
++		expect(attempts).toBe(1);
++		expect(stopHooks).toBe(0);
++		expect(mock.calls).toEqual([]);
++		const failure = session.agent.state.messages.at(-1) as AssistantMessage;
++		expect(failure.errorCode).toBe("BRIDGE_ADMISSION_PAUSED");
++		expect(failure.errorType).not.toBe("execution_unknown");
++		paused = false;
++		expect(await ctx.resumePendingTurn()).toBe(true);
++		await session.waitForIdle();
++		expect(attempts).toBe(2);
++		expect(mock.calls[0].context.messages.map(message => message.role)).toEqual(["user"]);
++		expect(manager.getEntries().filter(entry => entry.type === "message" && entry.message.role === "user")).toHaveLength(1);
++		expect(manager.getEntries().filter(entry =>
++			entry.type === "message" && entry.message.role === "assistant" &&
++			entry.message.errorCode === "BRIDGE_ADMISSION_PAUSED")).toHaveLength(1);
++	});
++
++	it("resumes a reopened output-free pause after completed tools without replaying their effects", async () => {
++		let effects = 0;
++		const tool: AgentTool = { name: "effect", label: "Effect", description: "Record an effect", parameters: type({}),
++			execute: async () => { effects++; return { content: [{ type: "text", text: "executed" }] }; } };
++		const pause: AssistantMessage = {
++			...createAssistantMessage(""), content: [], stopReason: "error",
++			errorMessage: "[BRIDGE_ADMISSION_PAUSED] count budget exhausted",
++		};
++		const first = await harness({ messages: [...completedToolTurn(), pause] });
++		await first.ctx.persistSession();
++		// Match terminal recovery: empty error turns are appended separately from ordinary message persistence.
++		first.manager.appendMessage(pause);
++		await first.manager.flush();
++		const file = first.manager.getSessionFile()!;
++		await first.session.dispose();
++		sessions.splice(sessions.indexOf(first.session), 1);
++		const reopened = await SessionManager.open(file);
++		const next = await harness({ manager: reopened, tools: [tool] });
++		expect(await next.ctx.resumePendingTurn()).toBe(true);
++		await next.session.waitForIdle();
++		expect(effects).toBe(0);
++		expect(next.mock.calls).toHaveLength(1);
++		expect(next.mock.calls[0].context.messages.map(message => message.role)).toEqual(["user", "assistant", "toolResult"]);
++	});
++
++	it("never automatically recovers or explicitly resumes permanent admission setup failures", async () => {
++		let attempts = 0;
++		let stopHooks = 0;
++		const { ctx, session, mock } = await harness({
++			beforeRequest: async context => {
++				attempts++;
++				await context.persistSession();
++				throw Object.assign(new Error("[BRIDGE_ADMISSION_STOPPED] invalid admission configuration"), {
++					code: "BRIDGE_ADMISSION_STOPPED", status: 400,
++				});
++			},
++			extension: pi => {
++				pi.on("session_stop", () => { stopHooks++; return { continue: true }; });
++			},
++		});
++		session.setAutoRetryEnabled(true);
++		await session.prompt("must remain saved");
++		await session.waitForIdle();
++		expect(await ctx.resumePendingTurn()).toBe(false);
++		expect(attempts).toBe(1);
++		expect(stopHooks).toBe(0);
++		expect(mock.calls).toEqual([]);
++	});
++
++	it("rejects unsafe paused-looking durable tails even when replay filtering hid the failure", async () => {
++		const unsafe: Partial<AssistantMessage>[] = [
++			{ errorType: "execution_unknown" },
++			{ stopReason: "aborted" },
++			{ content: [{ type: "text", text: "partial answer" }] },
++			{ content: [{ type: "thinking", thinking: "partial reasoning" }] },
++			{ content: [{ type: "toolCall", id: "unsafe-call", name: "effect", arguments: {} }] },
++			{ errorCode: "BRIDGE_ADMISSION_STOPPED" },
++			{ errorCode: undefined, errorMessage: "503 service unavailable" },
++		];
++		for (const fields of unsafe) {
++			const { ctx, manager, mock } = await harness({ messages: [user] });
++			manager.appendMessage(user);
++			manager.appendMessage({
++				...createAssistantMessage(""), content: [], stopReason: "error",
++				errorCode: "BRIDGE_ADMISSION_PAUSED", ...fields,
++			});
++			expect(await ctx.resumePendingTurn()).toBe(false);
++			expect(mock.calls).toEqual([]);
++		}
++	});
++
++	it("does not mistake discarded incomplete tool output for a pre-send pause", async () => {
++		const model = createMockModel({ responses: [] });
++		const partial: AssistantMessage = {
++			...createAssistantMessage(""), stopReason: "toolUse",
++			content: [{ type: "toolCall", id: "partial", name: "effect", arguments: {} }],
++		};
++		const agent = new Agent({
++			initialState: { model, tools: [] },
++			streamFn: () => {
++				const stream = new AssistantMessageEventStream();
++				stream.push({ type: "start", partial });
++				stream.push({ type: "toolcall_start", contentIndex: 0, partial });
++				stream.fail(Object.assign(new Error("[BRIDGE_ADMISSION_PAUSED] invalid after output"), {
++					code: "BRIDGE_ADMISSION_PAUSED",
++				}));
++				return stream;
++			},
++		});
++		await agent.prompt("emit then fail");
++		const failure = agent.state.messages.at(-1);
++		if (failure?.role !== "assistant") throw new Error("expected assistant failure");
++		const { ctx, manager, mock } = await harness({ messages: [user] });
++		manager.appendMessage(user);
++		manager.appendMessage(failure);
++		expect(await ctx.resumePendingTurn()).toBe(false);
++		expect(mock.calls).toEqual([]);
++	});
++
++	it("resumes a reopened queued first user from session_start exactly once", async () => {
++		const first = await harness({ messages: [user] });
++		await first.ctx.persistSession();
++		const file = first.manager.getSessionFile()!;
++		await first.session.dispose();
++		sessions.splice(sessions.indexOf(first.session), 1);
++		const reopened = await SessionManager.open(file);
++		const admissions: boolean[] = [];
++		const next = await harness({ manager: reopened, extension: pi => {
++			pi.on("session_start", async (_event, ctx) => {
++				admissions.push(...await Promise.all([ctx.resumePendingTurn(), ctx.resumePendingTurn()]));
++			});
++		} });
++		await next.session.waitForIdle();
++		expect(admissions).toEqual([true, false]);
++		expect(next.mock.calls).toHaveLength(1);
++		expect(next.mock.calls[0].context.messages.filter(message => message.role === "user").map(message => message.content)).toEqual([user.content]);
++		expect(reopened.getEntries().filter(entry => entry.type === "message" && entry.message.role === "user")).toHaveLength(1);
++		expect(await next.ctx.resumePendingTurn()).toBe(false);
++	});
++
++	it("continues after real tool results without executing their effects again", async () => {
++		let effects = 0;
++		const tool: AgentTool = { name: "effect", label: "Effect", description: "Record an effect", parameters: type({}),
++			execute: async () => { effects++; return { content: [{ type: "text", text: "executed" }] }; } };
++		const { ctx, session, mock } = await harness({ messages: completedToolTurn(), tools: [tool] });
++		expect(await ctx.resumePendingTurn()).toBe(true);
++		await session.waitForIdle();
++		expect(effects).toBe(0);
++		expect(mock.calls).toHaveLength(1);
++		expect(mock.calls[0].context.messages.map(message => message.role)).toEqual(["user", "assistant", "toolResult"]);
++	});
++
++	it("refuses unresolved tool calls rather than replaying them", async () => {
++		const { ctx, mock } = await harness({ messages: completedToolTurn().slice(0, 2) });
++		expect(await ctx.resumePendingTurn()).toBe(false);
++		expect(mock.calls).toEqual([]);
++	});
++
++	it("refuses synthetic tool results instead of treating them as completed effects", async () => {
++		const messages = completedToolTurn();
++		const result = messages[2];
++		if (result.role !== "toolResult") throw new Error("expected tool result");
++		result.details = { __synthetic: true, source: "assistant_stop_error", executed: false };
++		const { ctx, mock } = await harness({ messages });
++		expect(await ctx.resumePendingTurn()).toBe(false);
++		expect(mock.calls).toEqual([]);
++	});
++
++	it("refuses an interrupted assistant even when all tool results exist", async () => {
++		const messages = completedToolTurn();
++		const assistant = messages[1];
++		if (assistant.role !== "assistant") throw new Error("expected assistant");
++		assistant.stopReason = "error";
++		assistant.errorCode = "BRIDGE_EXECUTION_UNKNOWN";
++		const { ctx, mock } = await harness({ messages });
++		expect(await ctx.resumePendingTurn()).toBe(false);
++		expect(mock.calls).toEqual([]);
++	});
++
++	it("fails closed on stable-storage errors before dispatch", async () => {
++		const { ctx, manager, mock } = await harness({ messages: [user] });
++		await ctx.persistSession();
++		const sync = vi.spyOn(fs, "fsyncSync").mockImplementation(() => { throw new Error("disk unavailable"); });
++		try {
++			await expect(ctx.resumePendingTurn()).rejects.toThrow("disk unavailable");
++			expect(mock.calls).toEqual([]);
++		} finally {
++			sync.mockRestore();
++			await manager.recoverPersistenceFromCurrentState();
++		}
++	});
++
++	it("rejects nonpersistent storage rather than claiming the turn is durable", async () => {
++		const { ctx, mock } = await harness({ manager: SessionManager.inMemory(), messages: [user] });
++		await expect(ctx.persistSession()).rejects.toThrow("persistent storage");
++		await expect(ctx.resumePendingTurn()).rejects.toThrow("persistent storage");
++		expect(mock.calls).toEqual([]);
++	});
++
++	it("does not replay an execution-unknown provider request even with automatic retry enabled", async () => {
++		const { session, mock, manager } = await harness({ model: { responses: [
++			{ content: [], stopReason: "error", errorMessage: '503 {"error":{"code":"BRIDGE_EXECUTION_UNKNOWN","message":"service unavailable"}}' },
++			{ content: ["must not be requested"] },
++		] } });
++		session.setAutoRetryEnabled(true);
++		const retries: string[] = [];
++		session.subscribe(event => {
++			if (event.type === "auto_retry_start" || event.type === "retry_fallback_applied") retries.push(event.type);
++		});
++		await session.prompt("send once");
++		await session.waitForIdle();
++		expect(mock.calls).toHaveLength(1);
++		expect(retries).toEqual([]);
++		const errors = manager.getEntries().filter(entry =>
++			entry.type === "message" && entry.message.role === "assistant" && entry.message.stopReason === "error");
++		expect(errors).toHaveLength(1);
++	});
++
++	it("refuses a persisted error removed from provider replay context", async () => {
++		const { ctx, manager, mock } = await harness({ messages: [user] });
++		manager.appendMessage(user);
++		manager.appendMessage({ ...createAssistantMessage(""), stopReason: "error", errorType: "execution_unknown" });
++		expect(await ctx.resumePendingTurn()).toBe(false);
++		expect(mock.calls).toEqual([]);
++	});
++
++	it("rejects saved extension contexts after the session identity changes", async () => {
++		const { ctx, manager, mock } = await harness({ messages: [user] });
++		await manager.newSession();
++		await expect(ctx.persistSession()).rejects.toThrow("another session");
++		await expect(ctx.resumePendingTurn()).rejects.toThrow("another session");
++		expect(mock.calls).toEqual([]);
++	});
++
++	it("cancels a continuation interrupted while persistence is pending", async () => {
++		const { ctx, session, manager, mock } = await harness({ messages: [user] });
++		const entered = Promise.withResolvers<void>();
++		const release = Promise.withResolvers<void>();
++		const flush = manager.flush.bind(manager);
++		vi.spyOn(manager, "flush").mockImplementation(async () => { entered.resolve(); await release.promise; await flush(); });
++		const resume = ctx.resumePendingTurn();
++		const settled = resume.catch(error => error);
++		await entered.promise;
++		const abort = session.abort();
++		release.resolve();
++		await abort;
++		const result = await settled;
++		expect(result === false || result instanceof Error).toBe(true);
++		expect(mock.calls).toEqual([]);
++	});
++});

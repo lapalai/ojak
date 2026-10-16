@@ -83,6 +83,16 @@ npx tauri signer generate -w "$HOME/.tauri/ojak.key"
 
 비밀키가 없는 로컬 빌드에서 `scripts/build.mjs`는 업데이터 산출물만 끄고 앱·설치 파일을 만든다. 키가 있으면 Mac의 `Ojak.app.tar.gz`와 `.sig` 등 업데이터 산출물도 만든다. 빌드 완료와 두 OS 배포 검증 완료는 구분한다.
 
+## 0.13.0 후보 검증 기록 (2026-10-16)
+
+- Windows 로컬 후보: `target/release/bundle/nsis/Ojak_0.13.0_x64-setup.exe`, 11,062,928 bytes, SHA-256 `9582ad7e6bd17ae3d063320be69bc2be1cd12142b8c2f72a3e1b519c6a32afda`. 업데이터 서명이 없는 로컬 빌드이며 공개용 서명 후보를 대신하지 않는다.
+- 수정 소스의 `cargo test`: 426 통과, subprocess 전용 helper 1개는 단독 실행 제외(부모 회귀 테스트에서 실행). `npm run typecheck`, desktop 97개, omp extension 25개 통과. Windows 전체 NSIS 빌드 성공.
+- Windows 핸들 상속 재현은 동일한 3초 분리 자식을 사용해 수정 전 캡처 완료 3,016ms, 수정 후 9ms였다. 격리 0.13.0 실제 서비스의 named-pipe RPC에서 미확인·미지원·로그인 거절·동의 없는 사용 거절·이전 submitted의 unknown 복구·같은 request ID 재사용 차단을 확인했다. 실제 `aam setup --status`는 203ms에 끝났고 서비스는 살아 있었다.
+- 실제 React 초기화권 화면에서 확인란 전 사용 불가, 확인 후 단일 mutation, IPC 중단 후 읽기 전용 복구·재사용 차단, 미지원 공급자 표시를 검증했다. UI 공급자는 격리 fixture이며 실계정 쿠폰 조회·사용 성공을 뜻하지 않는다. 실제 쿠폰 소비는 0회다.
+- Windows 기존 0.11.1 설치본과 실행 중인 서비스·IDE는 교체하거나 재시작하지 않았다. Mac 실기기 설치·일반 사용자 Windows 업그레이드·서명 확인·앱 안 업데이트·공개 배포는 미검증이다. 0.12.0부터의 Ojak·omp `18.12.0-ojak.1`·Orca `1.5.0-ojak.1` 동시 전환 조건을 유지한다.
+- 현재 작업 자격은 저장소 WRITE이며 Admin 태그 권한이 없다. 사용할 수 있는 Mac 접속 정보도 없으므로 위 공개 게이트를 생략하지 않는다.
+
+
 ## 저장소 이름을 바꿀 때
 
 현재 저장소는 `lapalai/ojak`이다. 이름을 바꾸면 다음 항목을 함께 확인한다.

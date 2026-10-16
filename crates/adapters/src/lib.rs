@@ -114,6 +114,12 @@ pub fn check_native_auth_context(tool: &str, profile: &Path, cwd: &Path) -> Resu
     }
 }
 
+/// Subscription account APIs share the native CLI's inherited auth-override policy.
+pub fn check_subscription_auth_env(tool: &str) -> Result<(), ApiError> {
+    known_tool(tool)?;
+    safety::check_env(tool)
+}
+
 fn failed_inspection(mut account: Account, error: ApiError) -> Account {
     // 조회 프로세스의 일시 장애는 기존 로그인 폐기의 근거가 아니다. 새 로그인으로 승격하지 않고,
     // 이미 확인한 binding만 보존한다. 실제 실행·토큰 제공 때의 identity 검사는 그대로 수행한다.

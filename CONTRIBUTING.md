@@ -36,6 +36,14 @@ If `cargo` is on PATH, `cargo test` is enough on Mac too. CI runs `cargo test --
 
 구조와 규칙은 `CLAUDE.md`, `docs/domains/INDEX.md`를 먼저 읽어 주세요. / Read `CLAUDE.md` and `docs/domains/INDEX.md` first.
 
+## Windows 서비스 충돌 진단 / Service crash diagnostics
+
+- `AAM_HOME/logs/service-health.log`는 버전·PID·종료 코드·메모리 수치와 내부 이벤트만 기록합니다. 파일당 256 KiB에서 한 번 회전하며, 오류 원문·패닉 내용·자격 증명은 기록하지 않습니다. / Bounded health logs contain metadata, not error payloads or credentials.
+- `powershell -NoProfile -File scripts/service-crash-dumps.ps1 -Mode Status`로 WER 설정을 확인합니다. 수집은 자동으로 켜지지 않습니다. 관리자 PowerShell에서 `-Mode Enable`로 `aam-service.exe`의 미니덤프만 최대 3개 보존하며, `-Mode Disable`은 이 도구가 만든 변경 없는 설정만 제거하고 덤프는 보존합니다.
+- 덤프에는 토큰·프롬프트가 남을 수 있습니다. 소유자·SYSTEM만 접근하는 로컬 폴더에 보관하고 자동 업로드하거나 저장소에 넣지 마세요. / Dumps may contain secrets; keep them private and never upload automatically.
+- Windows `npm run build`는 서비스 실행 파일과 대응하는 `aam_service.pdb`, SHA-256을 `target/symbols/<version>/`에 보존합니다. 설치기에는 PDB·덤프를 넣지 않습니다. 같은 버전의 다른 바이너리로 증거를 덮어쓰지 않으므로 코드 변경 후 재빌드할 때는 버전을 올리세요.
+- 참고: [Microsoft WER LocalDumps](https://learn.microsoft.com/en-us/windows/win32/wer/collecting-user-mode-dumps), [fast-fail 예외](https://learn.microsoft.com/en-us/cpp/intrinsics/fastfail). `0xc0000409`만으로 메모리 훼손이나 OOM을 확정하지 말고, 종료 하위 코드·동시 시스템 이벤트·대응 PDB가 있는 덤프로 원인을 좁힙니다.
+
 ## PR
 
 - 동작이 바뀌면 테스트와 해당 `docs/domains/*.md`를 함께 고칩니다. / Update tests and the matching `docs/domains/*.md` with behavior changes.

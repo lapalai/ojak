@@ -147,6 +147,15 @@ jobs:
           TAURI_SIGNING_PRIVATE_KEY_PASSWORD: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY_PASSWORD }}
         run: npm run build
 
+      - name: Retain matching Windows service symbols
+        if: runner.os == 'Windows'
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: service-symbols-${{ github.ref_name }}-windows-x86_64
+          path: target/symbols/
+          if-no-files-found: error
+          retention-days: 90
+
       - name: Collect artifacts
         run: |
           set -eu
@@ -205,6 +214,7 @@ jobs:
 
       - uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
         with:
+          pattern: ojak-*
           path: ${{ runner.temp }}/dist
           merge-multiple: true
 

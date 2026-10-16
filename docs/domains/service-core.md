@@ -4,17 +4,32 @@
 `aam-service` 데몬. 로컬 RPC 서버(macOS Unix socket, Windows named pipe) + SQLite 저장소. 계정·정책·lease/세션·라우팅·배정·takeover·quota refresh·진단 내보내기를 맡는다. omp 브릿지는 [omp-bridge](omp-bridge.md) 참조.
 
 ## 진입점
-- `main.rs:1` — `aam-service --foreground`
+- `main.rs` — Windows 기본 실행/`--supervise`는 독립 감독 프로세스, `--worker`는 그 자식 서비스다. `--foreground`는 감독 없는 개발 실행이며 macOS의 기존 실행 방식은 유지한다.
 - `server::run` (`server.rs:92`) — `service.lock` 단일 인스턴스(`server.rs:112-117`), peer uid == euid 검사(`server.rs:70-77`), 연결 최대 64개(`server.rs:159`)
 - `Service::dispatch` (`lib.rs:346`) — RPC 분기
 - `Service::start_background` (`lib.rs:1557`) — reconcile 2초 주기, quota refresh 225–375초(지터), 브릿지 시작
 
+### Windows 복구와 런타임 진단
+- `supervisor.rs`는 작업자 종료를 확인한 뒤 1초부터 최대 60초까지 지수 간격으로 재시작한다. 연속 실패 8회면 멈추고, 120초 이상 안정적으로 실행한 작업자 뒤에는 실패 횟수를 초기화한다. 응답 지연·준비 시간 초과만으로 작업자를 죽이거나 lease를 반환하지 않는다.
+- 중지·업데이트는 `Fence`로 생성만 일시 정지하고, lease 검사와 실제 작업자 종료를 확인한 뒤에만 감독 종료를 확정한다. 거절되면 관문을 놓아 자동 복구가 계속된다. 시작 중인 자식과 감독 없이 실행된 peer도 보호한다.
+- `AAM_HOME/service-supervisor.{lock,gate,retire,child,process}`는 현재 사용자 전용 조정 파일이다. PID는 생성 시각과 프로세스 핸들로 검증하며, 실행 파일 복원 전에는 단순 잠금 해제가 아니라 프로세스 종료도 확인한다.
+- `runtime_health.rs`는 `logs/service-health.log`에 버전·PID·시작·비정상 이전 실행·종료·재시작·메모리 수치만 기록한다. 파일당 256 KiB에서 한 번 회전한다. 패닉은 소스 위치만 남기며 패닉 메시지·오류 원문·토큰·이메일·프롬프트는 남기지 않는다. WER 미니덤프와 대응 PDB 보존 절차는 [기여 안내](../../CONTRIBUTING.md#windows-서비스-충돌-진단--service-crash-diagnostics)를 따른다.
+- Windows commit 여유를 10초마다 관측한다. 여유가 `max(512 MiB, commit 한도 × 2%)` 미만이면 새 모델 요청만 제한하며, 그 기준의 두 배 이상을 3회 연속 관측하면 해제한다. 표본 실패는 회복 연속 횟수를 초기화한다. 표본 부재·마지막 성공 표본 45초 초과·미지원 OS는 `unknown`으로 보고하고 새 요청을 막지 않는다.
+
 ## RPC 메서드 (`lib.rs:346-452`)
 `status.read`의 Snapshot은 `serviceVersion`(서비스 실행 파일의 `CARGO_PKG_VERSION`)을 담는다. 앱·`aam`이 자기 버전과 비교해 덮어쓴 앱 뒤에 남은 예전 서비스를 찾는 데 쓴다. 이 필드가 없던 서비스는 응답에 빠져 있고, 받는 쪽은 '알 수 없음'(재시작 필요)으로 본다. `service.prepareUninstall`은 `aam service restart`도 쓰는 lease 검사 창구다.
 `status.read`·`quota.refresh`에 `{"observe": false}`를 주면 omp 프로세스 관측(`discover_sessions`)을 건너뛰고 저장된 상태만 돌려준다(`observedSessions`가 비고 관측 알림도 없다). 관측은 Windows에서 조회 한 번에 수십~수백 ms라, 관측 세션을 쓰지 않는 트레이·회복 감시·팝오버 조회는 이 옵션을 쓴다. 이 매개변수를 모르는 예전 서비스는 무시하고 전체 스냅샷을 돌려준다.
-`status.read`, `quota.refresh`, `service.prepareUninstall`, `service.cancelUninstall`, `service.resumeAdmission`, `route.resolve`, `route.explain`, `takeover.adopt`, `takeover.release`, `lease.validate-child`, `policy.update`, `bridge.status`, `diagnostics.export`, `account.register`, `account.update`, `lease.acquire`, `lease.starting`, `lease.started`, `lease.heartbeat`, `lease.release`, `lease.abort`. 나머지는 `METHOD_NOT_FOUND`.
+`status.read`, `quota.refresh`, `service.prepareUninstall`, `service.cancelUninstall`, `service.resumeAdmission`, `route.resolve`, `route.explain`, `takeover.adopt`, `takeover.release`, `lease.validate-child`, `policy.update`, `bridge.status`, `diagnostics.export`, `account.register`, `account.update`, `lease.acquire`, `lease.starting`, `lease.started`, `lease.heartbeat`, `lease.release`, `lease.abort`, `resetCredits.read`, `resetCredits.redeem`. 나머지는 `METHOD_NOT_FOUND`.
 `bridge.status`는 기존 gateway·세션·차단 목록 외에 `connections{totalLimit,public,native,modelQueue}`, `authRefresh{active,waiting,limit}`, `nativeAuth[]`, `nativeErrors`를 돌려준다. 연결 lane은 `active/limit`, `longActive/longLimit`, `rejected`, `listening`, `port`, 모델 대기열은 대기·만료·본문 예약 수를 담는다. `nativeAuth`의 익명 키·실패 코드·실제 단계·소요 시간·회복 횟수로 연결 혼잡과 공식 CLI 인증 작업 실패를 구분한다. 상세 예산·deadline·로그 규약은 [omp-bridge](omp-bridge.md)를 따른다.
 native 인증 요청의 사전검증은 해당 계정 한 행만 읽고, 전체 계정·한도 JSON을 매번 다시 해석하지 않는다. 미확인 인증 상태는 503, 명시적인 로그인 필요는 401, 배정 제외·프로필 연결 변경은 409로 구분하며, 캐시된 자격 증명으로 검증을 건너뛰지 않는다.
+
+## 계정별 초기화권
+- `reset_credits.rs`가 `resetCredits.read`·`resetCredits.redeem`을 처리한다. 자동 배정·사용량 갱신은 쿠폰을 소비하지 않는다. Claude·Codex native 프로필과 정확한 identity로 연결된 omp OAuth 계정만 지원하며 다른 공급자는 `unsupported`, 조회 실패는 수량 미확인이다.
+- `reset_provider.rs`는 고정된 Anthropic/Codex 원본 API만 호출한다. Claude Cedar/Juniper와 Codex rate-limit reset credit을 정규화한다. HTTP redirect·재시도는 끄고 요청 12초·연결 3초·본문 1 MiB 한도를 둔다. 공식 CLI의 native Source와 omp broker가 기존 규칙대로 토큰을 갱신하며 인증 덮어쓰기 충돌·identity 검사를 우회하지 않는다.
+- SQLite FULL metadata의 `resetQuote:`는 2분 유효한 단일 사용 확인, `resetRequest:`는 request UUID별 사용 기록, `resetGate:`는 익명화한 물리 계정별 직렬화 관문이다. fresh 공급자 제안·계정 binding을 다시 검사한 뒤 `submitted`를 디스크에 저장하고 POST를 한 번 보낸다. 토큰·이메일·원문 응답은 이 기록에 저장하지 않는다.
+- 서비스 instance UUID가 달라졌을 때 미전송 `preparing`은 `declined`, 전송된 `submitted`는 `unknown`으로만 복구한다. 불명확한 응답·연결 종료는 자동 재전송하지 않으며 다른 alias의 쿠폰도 막는다. 명시적 조회에서 기존 쿠폰의 소진·만료가 확인되면 `resolved`; Cedar 잔여량의 일부 감소만으로는 해제하지 않고 request-id가 없는 Juniper는 이전 주기 종료와 새 주기 확인이 필요하다.
+- 확정 성공 뒤에만 기존 강제 한도 갱신을 요청한다. lease·사용 중인 세션·다른 모델 한도를 직접 해제하지 않으며, 쿠폰 사용 후 낡은 잔여량은 미확인으로 표시한다.
+
 
 ## 저장소 (`store.rs:62-104`)
 SQLite `state.sqlite3`, WAL, `synchronous=FULL`, busy_timeout 5초. 테이블 `accounts`, `metadata`, `leases`. `user_version` 1보다 크면 거부.

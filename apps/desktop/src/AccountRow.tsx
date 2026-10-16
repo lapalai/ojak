@@ -3,6 +3,7 @@ import type { CSSProperties } from "react";
 import { Bell, BellRing, ChevronRight, RefreshCw } from "lucide-react";
 import { ActionFeedback, Badge, Busy, Sparkline } from "./components";
 import { ProviderLoginDialog } from "./LoginDialog";
+import { ResetCreditsPanel } from "./ResetCreditsPanel";
 import { reloginRequest } from "./login";
 import { fullTime, privacyText, projectName, providerColor, relativeTime, shortTime, toolNames, useAction } from "./state";
 import { limitLabel, t } from "./i18n";
@@ -201,6 +202,7 @@ export function AccountRow(props: AccountRowProps) {
           </p>}
           {row.notes.filter(note => !(verdict?.kind === "excluded" && note === t("allocation.excluded"))).map(note => <p className="note" key={note}>{note}</p>)}
           {group && canPin && !manual && <button type="button" className="text-button pin-button" disabled={!online || pinPending} onClick={props.onPin}>{t("usage.pin.fix")}</button>}
+          {group && <ResetCreditsPanel key={group.primary.id} accountId={group.primary.id} name={name} online={online} onReload={props.onReload} />}
         </section>
         {row.quotas.length > 0 && <section aria-label={t("usage.detail.limits")}>
           <h4>{t("usage.detail.limits")}</h4>

@@ -124,6 +124,20 @@ pub fn run(paths: Paths) -> Result<(), ApiError> {
         }
     }
     let _lock = service_lifetime_lock(&paths)?;
+    // 진단은 부가 기능이다. 로그 경로를 준비하지 못해도 서비스는 시작한다(상태에는 압박 여부가 unknown으로 드러난다).
+    if let Err(error) = crate::runtime_health::start(&paths) {
+        eprintln!("{}: {}", error.code, error.message);
+    }
+    // 수명 잠금을 쥔 동안에만 실행 표식을 정리한다. 다른 서비스가 이미 실행 중이면 위에서 돌아가 이 표식을 건드리지 않는다.
+    let result = serve(&paths);
+    match &result {
+        Ok(()) => crate::runtime_health::finish_clean(&paths),
+        Err(error) => crate::runtime_health::finish_error(&paths, error),
+    }
+    result
+}
+
+fn serve(paths: &Paths) -> Result<(), ApiError> {
     let _database_file = private_file(&paths.database)?;
     for suffix in ["-wal", "-shm"] {
         let path = std::path::PathBuf::from(format!("{}{suffix}", paths.database.display()));

@@ -4,7 +4,7 @@ members = ["crates/protocol", "crates/adapters", "crates/service", "crates/launc
 default-members = ["crates/protocol", "crates/adapters", "crates/service", "crates/launcher"]
 
 [workspace.package]
-version = "0.10.1"
+version = "0.13.0"
 edition = "2021"
 license = "MIT"
 authors = ["lapal"]
@@ -18,3 +18,7 @@ serde_json = "1"
 uuid = { version = "1", features = ["v4"] }
 libc = "0.2"
 sha2 = "0.10"
+
+# Preserve matching service symbols for Windows WER crash analysis.
+[profile.release.package.aam-service]
+debug = 1

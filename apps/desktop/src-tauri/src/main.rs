@@ -557,6 +557,8 @@ async fn rpc(method: String, params: Value) -> Result<Value, ApiError> {
         "policy.update",
         "account.register",
         "account.update",
+        "resetCredits.read",
+        "resetCredits.redeem",
     ]
     .contains(&method.as_str())
     {

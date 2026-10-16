@@ -12,13 +12,13 @@ use std::{
     collections::BTreeMap,
     fs,
     ffi::OsString,
-    os::windows::{ffi::OsStringExt, fs::{MetadataExt, OpenOptionsExt}, io::{AsRawHandle, FromRawHandle, OwnedHandle}},
+    os::windows::{ffi::OsStringExt, fs::{MetadataExt, OpenOptionsExt}, io::{AsRawHandle, FromRawHandle, IntoRawHandle, OwnedHandle}},
     path::{Path, PathBuf},
     thread,
     time::{Duration, Instant},
 };
 use windows_sys::Win32::{
-    Foundation::{CloseHandle, ERROR_FILE_NOT_FOUND, WAIT_OBJECT_0, WAIT_TIMEOUT},
+    Foundation::{ERROR_FILE_NOT_FOUND, WAIT_OBJECT_0, WAIT_TIMEOUT},
     Storage::FileSystem::{FILE_FLAG_OPEN_REPARSE_POINT, FILE_SHARE_READ},
     System::{
         Registry::{
@@ -27,10 +27,8 @@ use windows_sys::Win32::{
             REG_SZ, RRF_NOEXPAND, RRF_RT_REG_EXPAND_SZ, RRF_RT_REG_SZ,
         },
         Threading::{
-            CreateProcessW, OpenProcess, QueryFullProcessImageNameW, TerminateProcess, WaitForSingleObject,
-            CREATE_BREAKAWAY_FROM_JOB, CREATE_NEW_PROCESS_GROUP, CREATE_NO_WINDOW,
-            DETACHED_PROCESS, PROCESS_INFORMATION, PROCESS_QUERY_LIMITED_INFORMATION, PROCESS_SYNCHRONIZE, PROCESS_TERMINATE,
-            STARTUPINFOW,
+            OpenProcess, QueryFullProcessImageNameW, TerminateProcess, WaitForSingleObject,
+            PROCESS_QUERY_LIMITED_INFORMATION, PROCESS_SYNCHRONIZE, PROCESS_TERMINATE,
         },
     },
     UI::WindowsAndMessaging::{
@@ -488,35 +486,32 @@ fn running(paths: &Paths) -> bool {
 }
 
 /// 콘솔·작업 창과 분리해 서비스를 시작한다. 터미널이나 원격 세션이 닫혀도 함께 끝나지 않게 한다.
+/// 새 서비스 실행 파일은 인자 없이 시작하면 감독 프로세스가 되어 서비스(작업자)를 자식으로 띄운다. 감독이 없던 이전 판의
+/// 실행 파일은 같은 명령으로 서비스 자신이 된다. 그래서 인자를 넘기지 않아 복구(이전 판 되돌리기)도 같은 경로를 쓴다.
+/// 돌려주는 객체는 방금 만든 프로세스(감독 프로세스일 수 있다)이며, 서비스는 `started_worker`로 pipe에서 따로 찾는다.
 fn start_detached(binary: &Path, paths: &Paths) -> Result<ServiceProcess, ApiError> {
-    let command = wide(&format!("\"{}\"", binary.display()));
-    let mut command = command;
-    let mut startup: STARTUPINFOW = unsafe { std::mem::zeroed() };
-    startup.cb = std::mem::size_of::<STARTUPINFOW>() as u32;
-    let mut info: PROCESS_INFORMATION = unsafe { std::mem::zeroed() };
-    // 환경(AAM_HOME 포함)은 이 실행기에서 물려받는다.
-    let _ = paths;
+    use std::{os::windows::process::CommandExt, process::{Command, Stdio}};
+    const DETACHED_PROCESS: u32 = 0x0000_0008;
+    const CREATE_NEW_PROCESS_GROUP: u32 = 0x0000_0200;
+    const CREATE_NO_WINDOW: u32 = 0x0800_0000;
+    const CREATE_BREAKAWAY_FROM_JOB: u32 = 0x0100_0000;
     let base = DETACHED_PROCESS | CREATE_NEW_PROCESS_GROUP | CREATE_NO_WINDOW;
+    aam_protocol::winutil::prevent_stdio_inheritance()
+        .map_err(|_| error("SERVICE_START_FAILED", "준비 명령의 출력 연결을 분리하지 못해 서비스를 시작하지 않았습니다."))?;
     for flags in [base | CREATE_BREAKAWAY_FROM_JOB, base] {
-        let ok = unsafe {
-            CreateProcessW(
-                std::ptr::null(),
-                command.as_mut_ptr(),
-                std::ptr::null(),
-                std::ptr::null(),
-                0,
-                flags,
-                std::ptr::null(),
-                std::ptr::null(),
-                &startup,
-                &mut info,
-            )
-        };
-        if ok != 0 {
-            unsafe { CloseHandle(info.hThread); }
+        let spawned = Command::new(binary)
+            // 서비스가 이 실행기와 같은 상태 폴더(와 그 이름의 pipe)를 쓰도록 명시한다. 기본 경로 추정에 맡기지 않는다.
+            .env("AAM_HOME", &paths.home)
+            .stdin(Stdio::null())
+            .stdout(Stdio::null())
+            .stderr(Stdio::null())
+            .creation_flags(flags)
+            .spawn();
+        if let Ok(child) = spawned {
+            let pid = child.id();
             return Ok(ServiceProcess {
-                handle: unsafe { OwnedHandle::from_raw_handle(info.hProcess as _) },
-                pid: info.dwProcessId,
+                handle: unsafe { OwnedHandle::from_raw_handle(child.into_raw_handle()) },
+                pid,
                 image: None,
             });
         }
@@ -550,12 +545,14 @@ pub fn service_install(paths: &Paths) -> Result<String, ApiError> {
         &ServiceRecord { owner: OWNER.into(), binary_path: binary.clone(), run_value: run_value.clone(), uninstall_permit: None },
     )?;
     write_value(&key, RUN_VALUE, &run_value, REG_SZ)?;
-    if !running(paths) {
+    // 서비스는 떠 있어도 감독 프로세스가 없으면(이전 판이 시작한 서비스) 감독 프로세스를 시작한다. 감독 프로세스는 이미 도는
+    // 서비스를 재시작 없이 넘겨받아 지켜보므로 이 단계가 서비스를 끄지 않는다.
+    if !running(paths) || !aam_service::supervisor::running(paths) {
         start_detached(&binary, paths)?;
         let deadline = Instant::now() + Duration::from_secs(15);
-        while !running(paths) {
+        while !(running(paths) && aam_service::supervisor::running(paths)) {
             if Instant::now() >= deadline {
-                return Err(error("SERVICE_START_TIMEOUT", "로그인 시 자동 실행은 등록했지만 서비스 시작을 확인하지 못했습니다."));
+                return Err(error("SERVICE_START_TIMEOUT", "로그인 시 자동 실행은 등록했지만 서비스와 감독 프로세스 시작을 확인하지 못했습니다."));
             }
             thread::sleep(Duration::from_millis(200));
         }
@@ -569,9 +566,10 @@ pub fn service_status(paths: &Paths) -> Result<String, ApiError> {
     let key = open_key(RUN_KEY, false)?;
     let registered = read_value(&key, RUN_VALUE)?.is_some();
     Ok(format!(
-        "로그인 시 자동 실행: {} · 서비스: {}",
+        "로그인 시 자동 실행: {} · 서비스: {} · 감독: {}",
         if registered { "등록됨" } else { "미등록" },
-        if running(paths) { "실행 중" } else { "중지됨" }
+        if running(paths) { "실행 중" } else { "중지됨" },
+        if aam_service::supervisor::running(paths) { "실행 중" } else { "없음" }
     ))
 }
 
@@ -643,9 +641,75 @@ impl ServiceProcess {
     }
     fn stop(&self) -> bool {
         unsafe {
-            TerminateProcess(self.handle.as_raw_handle() as _, 0) != 0
-                && WaitForSingleObject(self.handle.as_raw_handle() as _, 10_000) == WAIT_OBJECT_0
+            // 이미 끝난 프로세스에는 TerminateProcess가 실패한다. 중요한 것은 종료됐다는 사실이라 결과는 종료 대기로 확인한다.
+            // 중지 도중 충돌한 서비스도 종료로 본다. 관문이 있어 감독 프로세스가 되살리지 않는다.
+            let _ = TerminateProcess(self.handle.as_raw_handle() as _, 0);
+            WaitForSingleObject(self.handle.as_raw_handle() as _, 10_000) == WAIT_OBJECT_0
         }
+    }
+}
+
+/// 감독 프로세스가 끝났다는 확인을 기다리는 최대 시간.
+const SUPERVISOR_EXIT_WAIT: Duration = Duration::from_secs(15);
+/// 감독 프로세스가 막 시작한 서비스의 pipe가 열리기를 기다리는 최대 시간.
+const WORKER_STARTUP_WAIT: Duration = Duration::from_secs(30);
+
+/// 관문을 쥔 채로 서비스에 연결한다. pipe가 아직 없어도 감독 프로세스가 살아 있고 서비스를 만들고 있을 수 있으면(막 시작 중) 기다린다.
+/// 감독 프로세스가 없거나, 있어도 관문 때문에 멈춘 채 작업자가 없다고 스스로 증명하면(충돌 뒤 재시작 대기) 서비스가 없는 것이다.
+/// 시작 중인 서비스를 시간 초과만으로 끝내지 않는다. 확인하지 못하면 아무것도 중지하지 않고 오류를 낸다.
+fn connect_fenced(paths: &Paths, binary: &Path, fence: &mut aam_service::supervisor::Fence) -> Result<Option<ServiceProcess>, ApiError> {
+    let deadline = Instant::now() + WORKER_STARTUP_WAIT;
+    loop {
+        if let Some(process) = ServiceProcess::connect(paths, binary)? {
+            return Ok(Some(process));
+        }
+        if !fence.supervisor_alive() || fence.supervisor_idle() {
+            return Ok(None);
+        }
+        if Instant::now() >= deadline {
+            return Err(error("SERVICE_STARTING", "서비스가 시작되는 중이라 안전 확인을 끝내지 못했습니다. 아무것도 중지하지 않았습니다. 잠시 뒤 다시 시도해 주세요."));
+        }
+        thread::sleep(Duration::from_millis(100));
+    }
+}
+
+/// 서비스는 응답하지 않는데 감독 프로세스만 남은 상태(충돌 뒤 재시작 대기 등)를 끝낸다. 새 감독 프로세스가 겹쳐 시작하지 않게 하고,
+/// 서비스가 그 사이 다시 떴다면(승인한 적 없는 프로세스를 끄지 않도록) 아무것도 하지 않고 오류를 낸다.
+/// 감독 프로세스가 작업자 없이 멈춰 있다고 증명한 뒤에만 끝내기로 확정한다. 증명하지 못하고 시간이 다하면 확정하지 않아 감독이 계속된다.
+fn retire_idle_supervisor(paths: &Paths, binary: &Path) -> Result<(), ApiError> {
+    let mut fence = aam_service::supervisor::engage(paths)?;
+    let deadline = Instant::now() + SUPERVISOR_EXIT_WAIT;
+    while fence.supervisor_alive() && !fence.supervisor_idle() {
+        if ServiceProcess::connect(paths, binary)?.is_some() {
+            return Err(error("SERVICE_RESTARTED_MEANWHILE", "서비스가 그 사이 다시 시작되어 건드리지 않았습니다. 다시 시도해 주세요."));
+        }
+        if Instant::now() >= deadline {
+            return Err(error("SUPERVISOR_STOP_FAILED", "서비스 감독 프로세스가 작업자 없이 멈춘 것을 확인하지 못했습니다. 감독을 그대로 두었습니다."));
+        }
+        thread::sleep(Duration::from_millis(100));
+    }
+    if ServiceProcess::connect(paths, binary)?.is_some() {
+        return Err(error("SERVICE_RESTARTED_MEANWHILE", "서비스가 그 사이 다시 시작되어 건드리지 않았습니다. 다시 시도해 주세요."));
+    }
+    fence.commit_retirement();
+    fence.wait_supervisor_exit(SUPERVISOR_EXIT_WAIT)
+}
+
+/// `start_detached`로 시작한 프로세스(새 판은 감독 프로세스, 감독이 없던 이전 판은 서비스 자신)가 띄운 서비스를 pipe에서 찾는다.
+/// 감독 프로세스는 서비스가 충돌하면 다시 띄우므로 서비스가 오기 전까지 기다린다. 시작한 프로세스도 감독 프로세스도 없으면 바로 실패한다.
+fn started_worker(paths: &Paths, binary: &Path, started: &ServiceProcess) -> Result<ServiceProcess, ApiError> {
+    let deadline = Instant::now() + Duration::from_secs(15);
+    loop {
+        if let Some(worker) = ServiceProcess::connect(paths, binary)? {
+            return Ok(worker);
+        }
+        if !started.alive() && !aam_service::supervisor::running(paths) {
+            return Err(error("SERVICE_START_FAILED", "서비스가 준비되기 전에 시작한 프로세스가 종료됐습니다. 복구 기록을 보존했습니다."));
+        }
+        if Instant::now() >= deadline {
+            return Err(error("SERVICE_START_TIMEOUT", "서비스 시작을 확인하지 못했습니다. 복구 기록을 보존했습니다."));
+        }
+        thread::sleep(Duration::from_millis(100));
     }
 }
 /// macOS와 같은 안전 절차: 신규 배정 차단과 lease 안전 검사(permit) → 서비스 종료 확인 → 기록 정리.
@@ -660,21 +724,7 @@ fn service_shutdown(paths: &Paths, remove_installation: bool) -> Result<String, 
     if record.owner != OWNER {
         return Err(error("FOREIGN_INSTALL", "앱 소유 서비스 기록이 아니므로 제거하지 않습니다."));
     }
-    if let Some(process) = ServiceProcess::connect(paths, &record.binary_path)? {
-        let permit = process.prepare(paths)?;
-        record.uninstall_permit = Some(permit);
-        save(&record_path, &record)?;
-        let stopped = process.stop();
-        if !stopped || running(paths) {
-            if process.call(paths, "service.cancelUninstall", json!({ "permit": record.uninstall_permit })).is_ok() {
-                record.uninstall_permit = None;
-                save(&record_path, &record)?;
-            }
-            return Err(error("SERVICE_STOP_FAILED", "서비스 종료를 확인하지 못했습니다. 설치 기록은 보존했습니다."));
-        }
-    } else if paths.database.exists() && record.uninstall_permit.is_none() {
-        return Err(error("LEASE_STATE_UNKNOWN", "서비스가 꺼져 있지만 저장된 lease의 생존 여부를 확인할 수 없습니다. 서비스를 다시 시작하여 안전하게 제거하세요."));
-    }
+    let _fence = retire_registered(paths, &record_path, &mut record, false)?;
     if !remove_installation {
         return Ok("신규 배정과 활성·불확실 lease의 안전 조건을 확인한 뒤 관리 서비스를 중지했습니다. 자동 실행 등록과 계정·프로필·로그는 보존했습니다.".into());
     }
@@ -689,6 +739,45 @@ fn service_shutdown(paths: &Paths, remove_installation: bool) -> Result<String, 
     Ok("신규 배정과 활성·불확실 lease의 안전 조건을 확인한 뒤 자동 실행 등록만 제거했습니다. 계정·프로필·로그는 보존했습니다.".into())
 }
 
+/// 앱이 등록한 서비스를 내려 실행 파일을 바꿀 수 있는 상태로 만들고, 그 관문을 돌려준다. 호출자는 파일 작업이 끝날 때까지 관문을 쥔다.
+/// 먼저 관문을 걸어(감독 프로세스는 작업자를 만들지 않고 멈춘다) 서비스 pipe를 찾는다. 서비스가 있으면 같은 프로세스 객체에 대해 lease 안전 검사(permit)와
+/// 종료를 하고, 감독 프로세스를 끝내기로 확정한다. 서비스가 없을 때(감독 프로세스만 재시작을 기다리거나 아무것도 없음)는 `rollback`이 아니면
+/// 저장된 lease의 생존을 확인할 수 없으므로 거절한다. `rollback`은 파일만 되돌리고 서비스를 다시 시작해 lease를 새로 확인하므로 서비스가 없어도 진행한다.
+/// 거절·실패로 돌아가면 감독 프로세스는 확정하지 않았으므로 관문을 놓는 순간 작업자 감독을 이어 가서 자동 복구가 살아 있다.
+fn retire_registered(paths: &Paths, record_path: &Path, record: &mut ServiceRecord, rollback: bool) -> Result<aam_service::supervisor::Fence, ApiError> {
+    let mut fence = aam_service::supervisor::engage(paths)?;
+    if let Some(process) = connect_fenced(paths, &record.binary_path, &mut fence)? {
+        let permit = process.prepare(paths)?;
+        record.uninstall_permit = Some(permit);
+        save(record_path, record)?;
+        let stopped = process.stop();
+        if !stopped || running(paths) {
+            if process.call(paths, "service.cancelUninstall", json!({ "permit": record.uninstall_permit })).is_ok() {
+                record.uninstall_permit = None;
+                save(record_path, record)?;
+            }
+            return Err(error("SERVICE_STOP_FAILED", "서비스 종료를 확인하지 못했습니다. 설치 기록은 보존했습니다."));
+        }
+    } else if !rollback && paths.database.exists() && record.uninstall_permit.is_none() {
+        return Err(error("LEASE_STATE_UNKNOWN", "서비스가 꺼져 있지만 저장된 lease의 생존 여부를 확인할 수 없습니다. 서비스를 다시 시작하여 안전하게 제거하세요."));
+    }
+    fence.commit_retirement();
+    fence.wait_supervisor_exit(SUPERVISOR_EXIT_WAIT)?;
+    Ok(fence)
+}
+
+/// 업데이트 복구가 파일을 되돌리기 전에 등록된 서비스와 감독 프로세스를 끝낸다. 파일 복구가 끝날 때까지 관문을 쥐고 돌려준다.
+/// 서비스 pipe가 없어도(충돌 뒤 재시작 대기 중인 감독 프로세스) 감독 프로세스를 독립적으로 끝내고 확인한다.
+pub(super) fn service_stop_for_rollback(paths: &Paths) -> Result<aam_service::supervisor::Fence, ApiError> {
+    let record_path = paths.home.join("service-install.json");
+    let mut record: ServiceRecord = read_owned(&record_path)?
+        .ok_or_else(|| error("UNMANAGED_SERVICE", "앱 소유 서비스 설치 기록이 없어 중지하지 않았습니다."))?;
+    if record.owner != OWNER {
+        return Err(error("FOREIGN_INSTALL", "앱 소유 서비스 기록이 아니므로 중지하지 않습니다."));
+    }
+    retire_registered(paths, &record_path, &mut record, true)
+}
+
 
 /// 앱 업데이트 뒤 서비스 교체(macOS `launchctl kickstart -k`에 해당). 앱이 등록한 서비스일 때만 하고,
 /// 등록 기록이 없으면 아무것도 하지 않는다. 종료 확인 뒤 기록된 실행 파일로 다시 시작한다.
@@ -701,6 +790,8 @@ pub fn service_restart(paths: &Paths) -> Result<(), ApiError> {
     }
     if running(paths) {
         service_stop(paths)?;
+    } else if aam_service::supervisor::running(paths) {
+        retire_idle_supervisor(paths, &record.binary_path)?;
     }
     start_detached(&record.binary_path, paths)?;
     let deadline = Instant::now() + Duration::from_secs(15);
@@ -723,7 +814,7 @@ pub fn confirm_removal_target(paths: &Paths, install_dir: &Path) -> Result<(), A
         if record.owner != OWNER || record.binary_path.parent().and_then(|path| path.canonicalize().ok()).as_ref() != Some(&install_dir) {
             return Err(error("FOREIGN_INSTALL", "다른 설치가 관리하는 서비스는 제거하지 않습니다."));
         }
-    } else if running(paths) {
+    } else if running(paths) || aam_service::supervisor::running(paths) {
         return Err(error("UNMANAGED_SERVICE", "등록되지 않은 실행 중 서비스가 있어 제거하지 않았습니다."));
     }
     Ok(())
