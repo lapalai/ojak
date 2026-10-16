@@ -15,6 +15,30 @@ function groupTitle(group: AccountGroup, masked: boolean): string {
   return `${provider}, ${identity}`;
 }
 
+export function CreditSettings({ snapshot, online, masked, onReload }: { snapshot: Snapshot; online: boolean; masked: boolean; onReload: () => Promise<void> }) {
+  const action = useAction();
+  const { policy } = snapshot;
+  const update = (patch: Partial<Policy>) => action.run(async () => {
+    try { return await rpc<Policy>("policy.update", { expectedRevision: policy.revision, ...patch }); }
+    finally { await onReload(); }
+  });
+  const codex = groupAccounts(snapshot.accounts.filter(account => account.tool === "codex"));
+  return <section className="panel" aria-labelledby="credit-settings-title">
+    <header><h2 id="credit-settings-title">{t("paid.settings")}</h2></header>
+    <div className="rules">
+      <div className="rule"><div className="t">{t("policy.credits")}</div><div className="d">{t("policy.creditsDesc")} <strong>{t("policy.creditsWarn")}</strong></div><div className="ctl"><Switch checked={policy.useCreditsAfterLimit ?? false} disabled={!online || action.pending} label={t("policy.credits")} onChange={useCreditsAfterLimit => { void update({ useCreditsAfterLimit }); }} /></div></div>
+      <div className="rule"><div className="t">{t("policy.extraUsage")}</div><div className="d">{t("policy.extraUsageDesc")} <strong>{t("policy.extraUsageWarn")}</strong></div><div className="ctl"><Switch checked={policy.useExtraUsageAfterLimit ?? false} disabled={!online || action.pending} label={t("policy.extraUsage")} onChange={useExtraUsageAfterLimit => { void update({ useExtraUsageAfterLimit }); }} /></div></div>
+    </div>
+    {codex.map(group => {
+      const credits = group.members.map(account => account.credits).filter(credit => credit != null).sort((a, b) => b.observedAt - a.observedAt)[0];
+      const fresh = credits && credits.observedAt <= snapshot.generatedAt && snapshot.generatedAt - credits.observedAt <= policy.staleAfterSeconds * 1000;
+      const key = !fresh ? "paid.unknown" : !credits.available ? "paid.empty" : credits.ordinaryUsageAllowed == null ? "paid.unknown" : !credits.ordinaryUsageAllowed ? "paid.providerBlocked" : !policy.useCreditsAfterLimit ? "paid.off" : "paid.eligible";
+      return <p className="sub" key={group.key}>{groupTitle(group, masked)} — {t(key)}</p>;
+    })}
+    <ActionFeedback error={action.error} message={action.message} />
+  </section>;
+}
+
 /// 사용 현황 아래 "배정 설정" 안에 들어가는 공통 설정: 자동 배정 방식, 안전 여유량, 계정 순서·배정 포함, 프로젝트 경로.
 /// 공급자별 자동/수동과 수동 계정 선택은 사용 현황의 공급자 카드에서 한다.
 export function AllocationSettings({ snapshot, online, masked, onReload }: { snapshot: Snapshot; online: boolean; masked: boolean; onReload: () => Promise<void> }) {
@@ -93,8 +117,6 @@ export function AllocationSettings({ snapshot, online, masked, onReload }: { sna
           <label>{t("policy.expiringMin")} <input type="number" min={1} max={100} step={5} value={minPercent} aria-label={t("policy.expiringMinAria")} disabled={!online || action.pending} onChange={event => setMinPercent(event.target.value)} onBlur={saveExpiring} />%</label>
         </form></div>
         <div className="rule"><div className="t">{t("policy.expiringBoost")}</div><div className="d">{mode === "smart" ? t("policy.expiringBoostDesc") : t("policy.expiringBoostPriority")}</div><div className="ctl"><Switch checked={policy.expiringBoost ?? false} disabled={!online || action.pending} label={t("policy.expiringBoost")} onChange={expiringBoost => { void action.run(() => update({ expiringBoost }), () => expiringBoost ? t("policy.expiringBoostOn") : t("policy.expiringBoostOff")); }} /></div></div>
-        <div className="rule"><div className="t">{t("policy.credits")}</div><div className="d">{t("policy.creditsDesc")} <strong>{t("policy.creditsWarn")}</strong></div><div className="ctl"><Switch checked={policy.useCreditsAfterLimit ?? false} disabled={!online || action.pending} label={t("policy.credits")} onChange={useCreditsAfterLimit => { void action.run(() => update({ useCreditsAfterLimit }), () => useCreditsAfterLimit ? t("policy.creditsOn") : t("policy.creditsOff")); }} /></div></div>
-        <div className="rule"><div className="t">{t("policy.extraUsage")}</div><div className="d">{t("policy.extraUsageDesc")} <strong>{t("policy.extraUsageWarn")}</strong></div><div className="ctl"><Switch checked={policy.useExtraUsageAfterLimit ?? false} disabled={!online || action.pending} label={t("policy.extraUsage")} onChange={useExtraUsageAfterLimit => { void action.run(() => update({ useExtraUsageAfterLimit }), () => useExtraUsageAfterLimit ? t("policy.extraUsageOn") : t("policy.extraUsageOff")); }} /></div></div>
         <div className="rule"><div className="t">{t("policy.pinning")}</div><div className="d">{t("policy.pinningDesc")}</div><div className="ctl"><span className="tag">{t("policy.fixed")}</span></div></div>
         <div className="rule"><div className="t">{t("policy.exhausted")}</div><div className="d">{t("policy.exhaustedDesc")}</div><div className="ctl"><span className="tag">{t("policy.fixed")}</span></div></div>
         <div className="rule"><div className="t">{t("policy.stale")}</div><div className="d">{t("policy.staleDesc", { minutes: Math.round(policy.staleAfterSeconds / 60) })}</div><div className="ctl"><span className="tag">{t("policy.fixed")}</span></div></div>

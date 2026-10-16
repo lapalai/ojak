@@ -83,6 +83,14 @@ npx tauri signer generate -w "$HOME/.tauri/ojak.key"
 
 비밀키가 없는 로컬 빌드에서 `scripts/build.mjs`는 업데이터 산출물만 끄고 앱·설치 파일을 만든다. 키가 있으면 Mac의 `Ojak.app.tar.gz`와 `.sig` 등 업데이터 산출물도 만든다. 빌드 완료와 두 OS 배포 검증 완료는 구분한다.
 
+## 0.13.1 후보 검증 기록 (2026-10-17)
+
+- Windows 로컬 통합 후보: `target/release/bundle/nsis/Ojak_0.13.1_x64-setup.exe`, 11,060,658 bytes, SHA-256 `06acc92b33f4f3ecd51ad3925110b7d7aff270304cda0e996db55246dba9ac86`. 업데이터 서명이 없는 로컬 빌드다.
+- Rust 426개 통과(helper 단독 실행 1개 제외), desktop 97개, omp extension 25개, 타입 검사 통과. 전체 Windows NSIS 빌드 성공. 기존 Windows 전용 `STOP_GRACE` 미사용 경고는 남아 있다.
+- 실제 Codex CLI 신원 검사를 사용한 격리 DB·실제 Service dispatch에서 첫 프로필 등록, 같은 identity의 다른 프로필 거절(`ACCOUNT_ALREADY_CONNECTED`), 동일 프로필 재등록 후 계정 1행 유지를 확인했다. 사용자 로그인 파일을 복사하거나 기존 서비스 DB를 변경하지 않았다.
+- 실제 React 컴포넌트를 브라우저에서 렌더링해 상시 표시된 크레딧 스위치, 한 번 클릭 시 revision 4의 설정 mutation 1회, 공급자 일반 사용 제한 안내 유지, 기존 중복 프로필의 동일 계정·한도 공유 표시를 확인했다. IPC는 격리 fixture이며 실제 과금 설정은 바꾸지 않았다.
+- 실제 설치 사전 검사는 `service.prepareUninstall`의 `SESSION_BUSY`로 차단됐다. 강제 종료·lease 삭제·재부팅·기존 Windows 설치본 교체는 하지 않았다. Mac 실기기와 서명된 동일 후보 설치·공개 배포는 미검증이며, 필수 리뷰와 Admin 태그·공개 승인도 필요하다. 0.12.0의 전체 클라이언트 동시 전환 요구는 유지한다.
+
 ## 0.13.0 후보 검증 기록 (2026-10-16)
 
 - Windows 로컬 후보: `target/release/bundle/nsis/Ojak_0.13.0_x64-setup.exe`, 11,062,928 bytes, SHA-256 `9582ad7e6bd17ae3d063320be69bc2be1cd12142b8c2f72a3e1b519c6a32afda`. 업데이터 서명이 없는 로컬 빌드이며 공개용 서명 후보를 대신하지 않는다.

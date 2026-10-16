@@ -84,18 +84,22 @@ fn intent() -> LaunchIntent {
 }
 
 #[test]
-fn relogin_of_same_identity_supersedes_other_profile_binding() {
-    let now = now_ms();
-    let old = account_fixture("old", now);
-    let mut renewed = account_fixture("renewed", now);
-    renewed.identity_key = old.identity_key.clone();
-    // 만료 후 새 프로필로 다시 로그인한 같은 계정은 기존 행을 대체합니다.
-    assert!(supersedes(&renewed, &old));
-    // 비활성화해 둔 중복도 같은 계정이므로 흡수 대상입니다.
+fn duplicate_registration_preserves_existing_identity_and_profile() {
+    let old = account_fixture("old", now_ms());
+    let mut duplicate = account_fixture("duplicate", now_ms());
+    duplicate.identity_key = old.identity_key.clone();
+    assert_eq!(reject_duplicate_profile(&duplicate, std::slice::from_ref(&old)).unwrap_err().code, "ACCOUNT_ALREADY_CONNECTED");
     let mut disabled = old.clone();
     disabled.enabled = false;
-    disabled.can_launch = false;
-    assert!(supersedes(&renewed, &disabled));
+    assert_eq!(reject_duplicate_profile(&duplicate, &[disabled]).unwrap_err().code, "ACCOUNT_ALREADY_CONNECTED");
+    duplicate.profile_path = old.profile_path.clone();
+    assert!(reject_duplicate_profile(&duplicate, std::slice::from_ref(&old)).is_ok());
+    duplicate.profile_path = Some("/another".into());
+    duplicate.identity_key = Some("different-workspace".into());
+    assert!(reject_duplicate_profile(&duplicate, std::slice::from_ref(&old)).is_ok());
+    duplicate.identity_key = old.identity_key.clone();
+    duplicate.tool = "codex".into();
+    assert!(reject_duplicate_profile(&duplicate, &[old]).is_ok());
 }
 
 #[test]

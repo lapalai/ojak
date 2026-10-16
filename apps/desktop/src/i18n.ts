@@ -50,6 +50,14 @@ type Plural = { one: string; other: string };
 type Message = string | Plural;
 
 const en = {
+  "paid.settings": "Credits & extra usage",
+  "paid.unknown": "Credit availability or provider permission has not been confirmed recently.",
+  "paid.empty": "No available credits were reported.",
+  "paid.providerBlocked": "Credits are present, but the provider does not allow ordinary requests to use them. Turning this setting on does not override that restriction.",
+  "paid.off": "Credits are present and provider permission is confirmed. Ojak credit use is off.",
+  "paid.eligible": "Credit fallback is enabled. Subscription quota is used first; credit use still requires a fresh provider allowance.",
+  "account.sharedProfiles": "Shared account",
+  "account.sharedQuota": "{count} profiles use the same login and share one quota. They are not separate accounts.",
   "reset.title": "Saved limit resets",
   "reset.description": "Reset coupons are separate from paid credits. Nothing is spent automatically.",
   "reset.unsupported": "Reset-coupon lookup and redemption are not supported for this provider.",
@@ -1157,6 +1165,14 @@ const en = {
 export type MessageKey = keyof typeof en;
 
 const ko: Record<MessageKey, Message> = {
+  "paid.settings": "크레딧·추가 사용량 설정",
+  "paid.unknown": "최근 크레딧 보유 여부 또는 공급자의 사용 허용 여부를 확인하지 못했어요.",
+  "paid.empty": "공급자가 사용 가능한 크레딧이 없다고 보고했어요.",
+  "paid.providerBlocked": "크레딧은 있지만 공급자가 일반 요청에 사용하도록 허용하지 않았어요. 설정을 켜도 이 제한은 해제되지 않아요.",
+  "paid.off": "크레딧 보유와 공급자의 사용 허용을 확인했어요. Ojak의 크레딧 사용 설정은 꺼져 있어요.",
+  "paid.eligible": "크레딧 사용에 동의한 상태예요. 구독 한도를 먼저 쓰며, 전환할 때도 공급자의 신선한 사용 허용 확인이 필요해요.",
+  "account.sharedProfiles": "동일 계정 연결",
+  "account.sharedQuota": "프로필 {count}개가 같은 로그인과 한도를 공유해요. 별도 계정이 아니에요.",
   "reset.title": "초기화권",
   "reset.description": "유료 크레딧과 다른 한도 초기화 쿠폰이에요. 자동으로 사용하지 않아요.",
   "reset.unsupported": "이 공급자의 초기화권 조회·사용은 지원하지 않아요.",
@@ -2247,6 +2263,14 @@ const ko: Record<MessageKey, Message> = {
 };
 
 const id: Record<MessageKey, Message> = {
+  "paid.settings": "Kredit & pemakaian tambahan",
+  "paid.unknown": "Ketersediaan kredit atau izin penyedia belum dikonfirmasi baru-baru ini.",
+  "paid.empty": "Penyedia melaporkan tidak ada kredit yang tersedia.",
+  "paid.providerBlocked": "Ada kredit, tetapi penyedia tidak mengizinkannya untuk permintaan biasa. Mengaktifkan pengaturan ini tidak menghapus batasan tersebut.",
+  "paid.off": "Kredit dan izin penyedia telah dikonfirmasi. Penggunaan kredit Ojak nonaktif.",
+  "paid.eligible": "Penggunaan kredit diaktifkan. Kuota langganan didahulukan dan izin penyedia yang baru tetap diperlukan.",
+  "account.sharedProfiles": "Akun bersama",
+  "account.sharedQuota": "{count} profil memakai login yang sama dan berbagi satu kuota, bukan akun terpisah.",
   "reset.title": "Kupon reset batas",
   "reset.description": "Kupon reset berbeda dari kredit berbayar. Tidak digunakan secara otomatis.",
   "reset.unsupported": "Pemeriksaan dan penggunaan kupon reset belum didukung untuk penyedia ini.",

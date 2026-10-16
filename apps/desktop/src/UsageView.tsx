@@ -3,7 +3,7 @@ import { isTauri } from "@tauri-apps/api/core";
 import type { CSSProperties } from "react";
 import { ActionFeedback, Badge, Dot, ErrorMessage, Sparkline } from "./components";
 import { AccountRow, accountText } from "./AccountRow";
-import { AllocationSettings } from "./AllocationSettings";
+import { AllocationSettings, CreditSettings } from "./AllocationSettings";
 import { FirstSuccessNotice, OnboardingCard } from "./OnboardingCard";
 import { getRecoveryWatches, rpc, setRecoveryWatch, toApiError } from "./api";
 import { canonicalProvider, fullTime, groupAccounts, isCurrentGroup, projectName, providerNames, relativeTime, timeZoneLabel, useAction, useBridge, useCharacters, useWindowVisible } from "./state";
@@ -157,6 +157,7 @@ export function UsageView({ snapshot, masked, online, refreshing, onReload, onRe
     {online && <FirstSuccessNotice snapshot={snapshot} masked={masked} />}
     {online && isTauri() && <OnboardingCard snapshot={snapshot} request={setupRequest} revision={setupRevision} onAdd={onAdd} onSetup={onSetup} />}
     <div className="notice"><p>{bridgeOn ? t("usage.scope") : t("usage.scope.accounts")} <button type="button" className="text-button" onClick={onSessions}>{t("nav.sessions")}</button> · <button type="button" className="text-button" onClick={onConnect}>{t("nav.connect")}</button></p></div>
+    <CreditSettings snapshot={snapshot} masked={masked} online={online} onReload={onReload} />
     <details className="settings-strip">
       <summary>{t("usage.settings.summary", { mode: (snapshot.policy.allocationMode ?? "smart") === "priority" ? t("policy.mode.priority") : t("policy.mode.smart"), reserve })}</summary>
       <AllocationSettings snapshot={snapshot} masked={masked} online={online} onReload={onReload} />
