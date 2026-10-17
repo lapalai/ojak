@@ -95,6 +95,7 @@ npx tauri signer generate -w "$HOME/.tauri/ojak.key"
 - Orca 네이티브 입력은 공식 `v1.4.224` Windows 배포 파일에서 가져왔다. GitHub asset digest와 실제 파일 SHA-256은 모두 `d192a7f1142b58a8c9bc855275fb37cd41dff7f152fd3cbac3acdd96331ec849`이며, 봉인된 원본 템플릿의 9개 대상 파일 해시 검증을 통과했다. 두 upstream 간 lockfile·node-pty 소스 패치·Node runtime pin의 바이트 일치를 확인하고 네이티브 파일을 수정하지 않았다. ELF의 실제 GLIBC 요구 버전을 읽고 N-API 8 초과 심볼을 거절한 뒤 슬롯을 가져왔다. 모든 OS에서 새로 컴파일하거나 실행했다고 주장하지 않는다.
 - 수정한 `v1.4.227` 소스로 9개 대상 원격 JS 템플릿을 재생성하고 `ORCA_REQUIRE_ORCAD_TEMPLATE=1`로 전체 NSIS를 빌드했다. packaged main 의존성·ConPTY 프로세스 트리 소유권·daemon 진입점·CLI 5개 명령·모바일 웹·플러그인·9개 원격 대상 검증을 모두 통과했다. 원격 템플릿을 생략한 이전 개발 후보는 교체 후보로 사용하지 않는다.
 - 실제 Windows orcad를 임시 HOME·프로필·loopback 포트에서 실행해 pairing → repo/worktree 생성 → terminal RPC → 실제 PTY 명령 출력 왕복 → 종료를 확인했다(`terminal round trip OK`, `PASS`). 테스트 프로세스가 남지 않았음을 확인하고 임시 HOME·worktree를 제거했다. Ojak Rust 426개·desktop 97개·omp extension 25개와 타입 검사 및 전체 Windows NSIS 빌드도 통과했다.
+- Mac 클라이언트 검증은 Actions run `38991344093`(수정본 `a9e4d9f`)에서 통과했다. macOS 15·Swift 6 이상, upstream `install:release`의 x64·arm64 의존성으로 omp 실제 버전 출력, Orca 전체 Mac 패키징, 9개 원격 대상 봉인 검증, 격리 HOME의 실제 원격 터미널 왕복과 artifact 업로드를 완료했다. 초기 실패 원인은 Swift 5.10 및 x64 네이티브 의존성 누락이었으며 기능·검증을 생략하지 않고 빌드 환경을 수정했다. 이는 Developer ID 서명·공증이나 실제 사용자 Mac의 이전 버전 업그레이드 검증이 아니다.
 - 사용자는 점검 재부팅 대신 **현재 세션 유지**를 명시 선택했다. `SESSION_BUSY`를 무시하는 기존 서비스 교체·강제 종료·lease 삭제·재부팅은 하지 않는다. PR 필수 검토자는 `Liopark`, 현재 작업 자격은 WRITE이며 SSH 등록 호스트도 없다. Windows 기존 설치본·Mac 실기기 설치·서명된 동일 후보·공개 릴리스는 아직 미검증이다.
 
 ## 0.13.1 후보 검증 기록 (2026-10-17)
