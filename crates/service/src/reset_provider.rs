@@ -72,7 +72,8 @@ impl Provider {
 
     #[cfg(test)]
     pub(super) fn for_test(base: String) -> Self {
-        Self { client: Client::builder().no_proxy().timeout(Duration::from_secs(2))
+        // Fixtures close each socket; do not let a stale pooled socket replace the intended POST loss.
+        Self { client: Client::builder().no_proxy().pool_max_idle_per_host(0).timeout(Duration::from_secs(2))
             .redirect(reqwest::redirect::Policy::none()).retry(reqwest::retry::never()).build().unwrap(),
             base: Cow::Owned(base) }
     }
