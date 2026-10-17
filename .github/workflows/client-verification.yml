@@ -9,7 +9,7 @@ concurrency:
   cancel-in-progress: true
 jobs:
   mac-clients:
-    runs-on: macos-14
+    runs-on: macos-15
     timeout-minutes: 120
     env:
       CSC_IDENTITY_AUTO_DISCOVERY: 'false'
@@ -30,6 +30,8 @@ jobs:
       - name: Install build tools
         run: |
           set -eu
+          swift --version
+          swift --version | python3 -c 'import re,sys; text=sys.stdin.read(); match=re.search(r"Swift version (\d+)",text); sys.exit(0 if match and int(match.group(1)) >= 6 else "Swift 6 or newer is required")'
           curl -fsSL https://bun.sh/install | bash -s 'bun-v1.4.3'
           echo "$HOME/.bun/bin" >> "$GITHUB_PATH"
           corepack enable

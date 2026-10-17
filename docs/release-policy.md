@@ -85,6 +85,8 @@ npx tauri signer generate -w "$HOME/.tauri/ojak.key"
 
 브랜치·PR CI는 `node scripts/build.mjs --verify-build`로 Windows NSIS·Mac DMG 전체 빌드를 검증하고 `verification-only-*` Actions artifact에 7일 보관한다. 서명 키를 받지 않으며 업데이터 산출물·태그·Release를 만들지 않는다. 태그나 다른 이벤트에서 이 옵션을 사용하면 거절한다. 이 빌드 성공은 설치·서명·공개 승인 검증을 대신하지 않는다.
 
+`Client verification`은 고정된 omp·Orca 수정본을 별도 Mac runner에서 빌드한다. omp 실행 파일의 실제 버전 출력, Orca 전체 Mac 설치 파일(9개 원격 대상 포함), 격리 HOME의 실제 원격 터미널 왕복을 검사한다. 결과는 `verification-only-mac-clients`에만 보관하며 upstream이나 Ojak Release로 게시하지 않는다. 공식 네이티브 입력은 고정 SHA-256과 원본 템플릿 봉인 검증을 모두 통과해야 가져온다. 작업 실행·성공 여부는 각 Actions run의 실제 결과로 확인한다.
+
 ## 0.13.2 통합 배포 준비 기록 (2026-10-17)
 
 - Ojak Windows 후보: `target/release/bundle/nsis/Ojak_0.13.2_x64-setup.exe`, 11,061,609 bytes, SHA-256 `b0dd6ef9cb800a22ca278c2077dcc82614d69de4dd9f0ddf7d7e1ce6fb821eab`. 로컬 업데이터 서명은 없다.
