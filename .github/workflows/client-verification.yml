@@ -50,7 +50,7 @@ jobs:
         working-directory: ${{ runner.temp }}/clients/orca
         run: |
           set -eu
-          corepack pnpm install --frozen-lockfile
+          corepack pnpm run install:release
           corepack pnpm --dir mobile install --frozen-lockfile
       - name: Verify and import matching official native matrix
         run: |
