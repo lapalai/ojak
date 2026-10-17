@@ -24,7 +24,11 @@ impl Server {
                 stream.set_read_timeout(Some(Duration::from_secs(2))).unwrap();
                 let mut bytes = Vec::new(); let mut buffer = [0u8; 4096];
                 let parsed = loop {
-                    let Ok(n) = stream.read(&mut buffer) else { break None; };
+                    let n = match stream.read(&mut buffer) {
+                        Ok(n) => n,
+                        Err(error) if error.kind() == std::io::ErrorKind::Interrupted => continue,
+                        Err(_) => break None,
+                    };
                     if n == 0 || bytes.len() > 1024 * 1024 { break None; }
                     bytes.extend_from_slice(&buffer[..n]);
                     if let Some(end) = bytes.windows(4).position(|w| w == b"\r\n\r\n") {
@@ -35,7 +39,8 @@ impl Server {
                         }
                     }
                 };
-                if let Some(request) = parsed { seen.lock().push(request); }
+                let Some(request) = parsed else { continue; };
+                seen.lock().push(request);
                 if let Some(Some((status, body))) = replies.pop_front() {
                     let body = body.to_string();
                     let _ = write!(stream, "HTTP/1.1 {status} Fixture\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}", body.len());
@@ -48,4 +53,20 @@ impl Server {
 }
 impl Drop for Server {
     fn drop(&mut self) { self.stop.store(true, Ordering::SeqCst); self.worker.take().unwrap().join().unwrap(); }
+}
+
+#[test]
+fn incomplete_connection_does_not_consume_the_next_response() {
+    use std::net::{Shutdown, TcpStream};
+    let expected = serde_json::json!({"available_count": 1});
+    let server = Server::new(vec![Some((200, expected.clone()))]);
+    let mut incomplete = TcpStream::connect(server.url.trim_start_matches("http://")).unwrap();
+    incomplete.write_all(b"GET /incomplete HTTP/1.1\r\n").unwrap();
+    incomplete.shutdown(Shutdown::Both).unwrap();
+    drop(incomplete);
+    let actual: Value = reqwest::blocking::Client::builder()
+        .no_proxy().timeout(Duration::from_secs(2)).build().unwrap()
+        .get(&server.url).send().unwrap().json().unwrap();
+    assert_eq!(actual, expected);
+    assert_eq!(server.requests.lock()[0].0, "GET / HTTP/1.1");
 }
