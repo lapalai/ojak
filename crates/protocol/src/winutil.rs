@@ -14,7 +14,7 @@ use windows_sys::Win32::{
         GetLastError, LocalFree, ERROR_ACCESS_DENIED, ERROR_BROKEN_PIPE, ERROR_INVALID_PARAMETER,
         ERROR_IO_PENDING, ERROR_NOT_FOUND, ERROR_NO_DATA, ERROR_PIPE_BUSY, ERROR_PIPE_CONNECTED,
         FILETIME, GENERIC_READ, GENERIC_WRITE, HANDLE, INVALID_HANDLE_VALUE, WAIT_OBJECT_0,
-        WAIT_TIMEOUT,
+        WAIT_TIMEOUT, SetHandleInformation, HANDLE_FLAG_INHERIT,
     },
     Security::{
         Authorization::{
@@ -33,6 +33,7 @@ use windows_sys::Win32::{
         OPEN_EXISTING, PIPE_ACCESS_DUPLEX,
     },
     System::{
+        Console::{GetStdHandle, STD_INPUT_HANDLE, STD_OUTPUT_HANDLE, STD_ERROR_HANDLE},
         Diagnostics::ToolHelp::{
             CreateToolhelp32Snapshot, Process32FirstW, Process32NextW, PROCESSENTRY32W,
             TH32CS_SNAPPROCESS,
@@ -70,6 +71,21 @@ const STILL_ACTIVE: u32 = 259;
 
 pub fn wide(text: &str) -> Vec<u16> {
     text.encode_utf16().chain(std::iter::once(0)).collect()
+}
+
+/// Detached descendants must not keep their launcher's captured output alive.
+/// Redirecting Command's stdio does not remove the original inherited handles
+/// from the Windows handle table. Leave these originals non-inheritable;
+/// foreground Command children can still explicitly duplicate/inherit stdio.
+pub fn prevent_stdio_inheritance() -> io::Result<()> {
+    for kind in [STD_INPUT_HANDLE, STD_OUTPUT_HANDLE, STD_ERROR_HANDLE] {
+        let handle = unsafe { GetStdHandle(kind) };
+        if handle.is_null() || handle == INVALID_HANDLE_VALUE { continue; }
+        if unsafe { SetHandleInformation(handle, HANDLE_FLAG_INHERIT, 0) } == 0 {
+            return Err(io_error());
+        }
+    }
+    Ok(())
 }
 
 fn path_wide(path: &Path) -> io::Result<Vec<u16>> {
@@ -1105,4 +1121,62 @@ pub fn lock_down_handle(file: &std::fs::File) -> io::Result<()> {
 pub fn job_name(pid: u32, started_at: &str) -> String {
     let safe: String = started_at.chars().filter(char::is_ascii_digit).collect();
     format!(r"Local\aam-job-{pid}-{safe}")
+}
+
+#[cfg(test)]
+mod stdio_tests {
+    use super::*;
+    use std::{os::windows::process::CommandExt, process::{Command, Stdio}, time::{Duration, Instant}};
+
+    #[test]
+    #[ignore = "subprocess fixture for detached_stdio_releases_capture"]
+    fn stdio_fixture() {
+        let release = std::env::var_os("AAM_STDIO_RELEASE").expect("fixture release path");
+        match std::env::var("AAM_STDIO_STAGE").unwrap().as_str() {
+            "daemon" => {
+                let deadline = Instant::now() + Duration::from_secs(10);
+                while !Path::new(&release).exists() && Instant::now() < deadline {
+                    std::thread::sleep(Duration::from_millis(10));
+                }
+            }
+            "foreground" => println!("\nFOREGROUND_OUTPUT"),
+            "launcher" => {
+                prevent_stdio_inheritance().unwrap();
+                let mut daemon = fixture("daemon", &release);
+                let child = daemon.stdin(Stdio::null()).stdout(Stdio::null()).stderr(Stdio::null())
+                    .creation_flags(0x0800_0208).spawn().unwrap();
+                println!("\nOJAK_CHILD={}", child.id());
+                assert!(fixture("foreground", &release).status().unwrap().success());
+                println!("\nSETUP_COMPLETE");
+            }
+            _ => panic!("unknown fixture stage"),
+        }
+    }
+
+    fn fixture(stage: &str, release: &std::ffi::OsStr) -> Command {
+        let mut command = Command::new(std::env::current_exe().unwrap());
+        command.args(["--exact", "winutil::stdio_tests::stdio_fixture", "--ignored", "--nocapture"])
+            .env("AAM_STDIO_STAGE", stage).env("AAM_STDIO_RELEASE", release);
+        command
+    }
+
+    #[test]
+    fn detached_stdio_releases_capture() {
+        let release = std::env::temp_dir().join(format!("aam-stdio-{}", crate::new_id()));
+        let output = fixture("launcher", release.as_os_str()).output().unwrap();
+        let text = String::from_utf8(output.stdout).unwrap();
+        let pid: u32 = text.lines().find_map(|line| line.strip_prefix("OJAK_CHILD=")).unwrap().parse().unwrap();
+        let still_running = crate::process_identity(pid).is_ok();
+        // Release only our fixture, including on regression failure.
+        std::fs::write(&release, b"done").unwrap();
+        let deadline = Instant::now() + Duration::from_secs(5);
+        while crate::process_identity(pid).is_ok() && Instant::now() < deadline {
+            std::thread::sleep(Duration::from_millis(10));
+        }
+        let _ = std::fs::remove_file(release);
+        assert!(output.status.success());
+        assert!(text.contains("FOREGROUND_OUTPUT"), "foreground inheritance must still work");
+        assert!(text.contains("SETUP_COMPLETE"));
+        assert!(still_running, "capture must finish before the detached service exits");
+    }
 }

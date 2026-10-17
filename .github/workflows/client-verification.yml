@@ -1,0 +1,93 @@
+name: Client verification
+on:
+  push:
+  pull_request:
+permissions:
+  contents: read
+concurrency:
+  group: clients-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+jobs:
+  mac-clients:
+    runs-on: macos-15
+    timeout-minutes: 120
+    env:
+      CSC_IDENTITY_AUTO_DISCOVERY: 'false'
+      ORCA_REQUIRE_ORCAD_TEMPLATE: '1'
+      GH_TOKEN: ${{ github.token }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+        with:
+          persist-credentials: false
+      - uses: dtolnay/rust-toolchain@89b12181fb390509a0842a86cc55eeb8eb928c1d
+        with:
+          toolchain: stable
+      - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020
+        with:
+          node-version: 24.18.0
+      - name: Prepare pinned source forks
+        run: node scripts/prepare-client-forks.mjs "$RUNNER_TEMP/clients"
+      - name: Install build tools
+        run: |
+          set -eu
+          swift --version
+          swift --version | python3 -c 'import re,sys; text=sys.stdin.read(); match=re.search(r"Swift version (\d+)",text); sys.exit(0 if match and int(match.group(1)) >= 6 else "Swift 6 or newer is required")'
+          curl -fsSL https://bun.sh/install | bash -s 'bun-v1.4.3'
+          echo "$HOME/.bun/bin" >> "$GITHUB_PATH"
+          corepack enable
+          brew install sevenzip
+          python3 -m venv "$RUNNER_TEMP/elf-tools"
+          "$RUNNER_TEMP/elf-tools/bin/pip" install pyelftools==0.33
+      - name: Build and execute omp
+        working-directory: ${{ runner.temp }}/clients/oh-my-pi
+        run: |
+          set -eu
+          bun install --frozen-lockfile
+          bun run build:native
+          bun --cwd=packages/coding-agent run build
+          packages/coding-agent/dist/omp --version
+      - name: Install Orca dependencies
+        working-directory: ${{ runner.temp }}/clients/orca
+        run: |
+          set -eu
+          corepack pnpm run install:release
+          corepack pnpm --dir mobile install --frozen-lockfile
+      - name: Verify and import matching official native matrix
+        run: |
+          set -eu
+          stage="$RUNNER_TEMP/native-source"
+          gh release download v1.4.224 --repo stablyai/orca --pattern orca-windows-setup.exe --dir "$stage"
+          echo 'd192a7f1142b58a8c9bc855275fb37cd41dff7f152fd3cbac3acdd96331ec849  '"$stage/orca-windows-setup.exe" | shasum -a 256 -c -
+          7zz x "$stage/orca-windows-setup.exe" -o"$stage/extracted" -y
+          7zz x "$stage/extracted/\$PLUGINSDIR/app-64.7z" 'resources/orcad-template/*' -o"$stage/app" -y
+          cd "$RUNNER_TEMP/clients/orca"
+          node -e "require('./config/scripts/verify-packaged-orcad-template.cjs').verifyPackagedOrcadTemplate(process.argv[1])" "$stage/app/resources"
+          "$RUNNER_TEMP/elf-tools/bin/python" "$GITHUB_WORKSPACE/scripts/import-client-native-slots.py" "$stage/app/resources/orcad-template" "$PWD"
+          node config/scripts/build-orcad-prebuilds.mjs --require-slots
+      - name: Build complete Mac Orca candidate
+        working-directory: ${{ runner.temp }}/clients/orca
+        run: |
+          set -eu
+          corepack pnpm run build:desktop
+          corepack pnpm run build:native
+          corepack pnpm run verify:computer-native
+          corepack pnpm run build:orcad-template
+          corepack pnpm run ensure:electron-runtime
+          corepack pnpm exec electron-builder --config config/electron-builder.config.cjs --mac --arm64 --publish never
+      - name: Exercise real isolated remote terminal
+        working-directory: ${{ runner.temp }}/clients/orca
+        run: |
+          set -eu
+          node config/scripts/build-orcad-node.mjs --target darwin-arm64 --out-dir out/orcad
+          home=$(mktemp -d "$RUNNER_TEMP/client-smoke.XXXXXX")
+          trap 'rm -rf "$home"' EXIT
+          HOME="$home" ORCA_SMOKE_PORT_OFFSET=24112 node config/scripts/runtime-serve-terminal-smoke.mjs --target orcad
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a
+        with:
+          name: verification-only-mac-clients
+          path: |
+            ${{ runner.temp }}/clients/oh-my-pi/packages/coding-agent/dist/omp
+            ${{ runner.temp }}/clients/orca/dist/*.dmg
+            ${{ runner.temp }}/clients/orca/dist/*mac.zip
+          if-no-files-found: error
+          retention-days: 7

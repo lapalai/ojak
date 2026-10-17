@@ -10,6 +10,7 @@ mod native;
 mod admission;
 
 use crate::{scheduler, store::{accounts, policy}, Service};
+use crate::runtime_health::{self, ResourceGuard, ResourceStatus};
 use aam_protocol::{now_ms, Account, ApiError, Paths, QuotaBucket};
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
@@ -101,6 +102,10 @@ const QUOTA_BLOCK_MS: i64 = 30 * 60_000;
 const RATE_BLOCK_MS: i64 = 60_000;
 const MAX_HEAD: usize = 64 * 1024;
 const MAX_BODY: usize = 64 * 1024 * 1024;
+/// 응답 뒤 연결을 닫기 전에 상대가 아직 보내는 바이트를 버리는 한도(`finish`). 바이트·전체 시간·무소식 시간 모두 유한하다.
+const CLOSE_DRAIN_MAX: usize = MAX_BODY + MAX_HEAD;
+const CLOSE_DRAIN_DEADLINE: Duration = Duration::from_secs(3);
+const CLOSE_DRAIN_IDLE: Duration = Duration::from_millis(250);
 const PEEK_LIMIT: usize = 64 * 1024;
 /// bridge.log·gateway 로그가 이 크기를 넘으면 회전한다.
 const LOG_ROTATE_BYTES: u64 = 4 * 1024 * 1024;
@@ -622,6 +627,8 @@ pub struct Status {
     pub blocks: Vec<BlockStatus>,
     pub connections: ConnectionsStatus,
     pub auth_refresh: AuthRefreshStatus,
+    /// 서비스 프로세스의 시스템 메모리(commit) 상태와 압박 보호 상태. 표본이 없거나 오래되면 `state`가 `unknown`이고 새 요청은 막히지 않는다.
+    pub resources: ResourceStatus,
     /// 프로필별 공식 CLI 인증 진단(별칭순).
     pub native_auth: Vec<NativeAuthStatus>,
     /// 동기화가 마지막으로 정한 공급자별 차단 코드. 일시 실패로 gateway를 유지한 프로필은 여기 없다.
@@ -654,6 +661,7 @@ impl Status {
                 },
             },
             auth_refresh: AuthRefreshStatus { active: 0, limit: admission::REFRESH_PARALLELISM, waiting: 0 },
+            resources: runtime_health::shared_guard().status(runtime_health::monotonic_ms()),
             native_auth: vec![],
             native_errors: BTreeMap::new(),
         }
@@ -683,7 +691,7 @@ pub struct Bridge {
 
 impl Bridge {
     pub fn start(service: &Arc<Service>) -> Arc<Self> {
-        let bridge = Self::with_config(service, REQUEST_TIMEOUT, admission::Config::from_env(), user_home().map(|home| home.join(".omp/auth-gateway.token")));
+        let bridge = Self::with_guard(service, REQUEST_TIMEOUT, admission::Config::from_env(), user_home().map(|home| home.join(".omp/auth-gateway.token")), runtime_health::shared_guard());
         let worker = Arc::clone(&bridge);
         std::thread::spawn(move || loop {
             worker.tick();
@@ -692,8 +700,13 @@ impl Bridge {
         bridge
     }
 
-    /// listener도 감독 스레드도 띄우지 않은 Bridge. `serve`로 listener를 붙인다.
+    #[cfg(test)]
     fn with_config(service: &Arc<Service>, request_timeout: Duration, config: admission::Config, gateway_token_path: Option<PathBuf>) -> Arc<Self> {
+        Self::with_guard(service, request_timeout, config, gateway_token_path, ResourceGuard::new())
+    }
+
+    /// listener도 감독 스레드도 띄우지 않은 Bridge. `serve`로 listener를 붙인다. `guard`는 새 모델 요청 admission이 읽는 시스템 메모리 상태다.
+    fn with_guard(service: &Arc<Service>, request_timeout: Duration, config: admission::Config, gateway_token_path: Option<PathBuf>, guard: Arc<ResourceGuard>) -> Arc<Self> {
         Arc::new(Self {
             service: Arc::clone(service),
             paths: service.paths.clone(),
@@ -702,7 +715,7 @@ impl Bridge {
             listening: AtomicBool::new(false),
             native_listening: AtomicBool::new(false),
             native_port: AtomicU16::new(0),
-            admission: admission::Admission::with_config(config),
+            admission: admission::Admission::with_guard(config, guard),
             refresh_budget: Arc::new(native::RefreshBudget::new(admission::REFRESH_PARALLELISM)),
             request_timeout,
             overload_log: parking_lot::Mutex::new(HashMap::new()),
@@ -756,10 +769,17 @@ impl Bridge {
             Ok(permit) => permit,
             Err(overload) => {
                 let _ = stream.set_write_timeout(Some(Duration::from_secs(1)));
-                // 방금 도착한 요청 바이트를 한 번만 비운다(최대 20ms). 읽지 않은 채 닫으면 RST로 503 응답이 사라질 수 있다.
+                // accept 스레드는 하나뿐이라 오래 붙잡을 수 없다. 방금 도착한 요청 바이트를 한 번만 비운다(최대 20ms).
+                // 읽지 않은 채 닫으면 RST로 503 응답이 사라질 수 있다. 쓰기 쪽만 닫고 바로 돌아온다.
                 let _ = stream.set_read_timeout(Some(Duration::from_millis(20)));
                 let _ = stream.read(&mut [0u8; 4096]);
-                return self.refuse(&mut stream, overload);
+                self.log_overload(overload);
+                write_response(&mut stream, 503, &json!({
+                    "error": { "type": "admission_wait", "code": overload.code(),
+                        "message": overload.message(), "submitted": false }
+                }));
+                let _ = stream.shutdown(Shutdown::Write);
+                return;
             }
         };
         let _ = stream.set_write_timeout(Some(self.request_timeout));
@@ -1123,6 +1143,7 @@ impl Bridge {
                 },
             },
             auth_refresh: AuthRefreshStatus { active: self.refresh_budget.active(), limit: self.refresh_budget.limit(), waiting: self.refresh_budget.waiting() },
+            resources: self.admission.resource_status(),
             native_auth,
             native_errors: state.native_errors.clone(),
         }
@@ -1148,10 +1169,13 @@ impl Bridge {
     /// 포화 응답. 503에 구조화 코드를 달고 비밀 없는 한 줄을 남긴다. 복구 시각을 모르므로 Retry-After는 붙이지 않는다.
     fn refuse(&self, client: &mut TcpStream, overload: admission::Overload) {
         self.log_overload(overload);
-        respond(client, 503, &json!({ "error": overload.message(), "code": overload.code() }));
+        respond(client, 503, &json!({
+            "error": { "type": "admission_wait", "code": overload.code(),
+                "message": overload.message(), "submitted": false }
+        }));
     }
 
-    /// 포화 한 줄: `<ms> bridge/overload session=- outcome=overload scope=<public|native> class=<connection|model|queue|queue_timeout|payload|poll> active=<n> limit=<n> suppressed=<n>`.
+    /// 포화 한 줄: `<ms> bridge/overload session=- outcome=overload scope=<public|native> class=<connection|model|queue|queue_timeout|payload|poll|resource> active=<n> limit=<n> suppressed=<n>`.
     /// 사용량(`->`) 줄이 아니고 `outcome=blocked`도 아니라 집계와 한도 차단 표시에 들어가지 않는다. 같은 종류는 5초에 한 줄만 남긴다.
     fn log_overload(&self, overload: admission::Overload) {
         let now = now_ms();
@@ -1189,6 +1213,23 @@ impl Bridge {
         if request.method == "POST" && request.path == "/v1/pi/stream" {
             return self.handle_model_request(client, permit, request, rest);
         }
+        if request.method == "GET" && request.path == "/v1/admission" {
+            let resources = self.admission.resource_status();
+            let snapshot = self.admission.snapshot();
+            let reason = if resources.state == "pressure" {
+                "resource_pressure"
+            } else if resources.platform_supported && resources.state != "normal" {
+                "resource_unknown"
+            } else if snapshot.counts.models >= snapshot.limits.models || snapshot.counts.waiting > 0 {
+                "model_capacity"
+            } else {
+                "ready"
+            };
+            return respond(client, 200, &json!({
+                "version": 1, "ready": reason == "ready", "reason": reason,
+                "poll_after_ms": 2000, "resources": resources
+            }));
+        }
         let request = match read_body(client, request, rest, deadline) {
             Ok(request) => request,
             Err(message) => return respond(client, 400, &json!({ "error": message })),
@@ -1204,11 +1245,18 @@ impl Bridge {
     /// 1) 선언된 본문 길이만 검사한다(본문은 읽지 않는다). 2) 모델 몫을 얻는다 — 없으면 유한한 FIFO 대기열에서 기다리고,
     /// 기다리는 동안 소켓이 끊기면 접는다. 3) 합계 본문 메모리 예산을 예약한 뒤에야 본문을 읽는다.
     /// 대기 중에는 본문 바이트·JSON을 하나도 잡지 않는다. 모든 거절은 구조화된 503이며 upstream 호출은 일어나지 않았다.
+    /// 2)와 3)의 앞뒤(대기열 승격 직전 포함)에서 시스템 메모리 압박을 확인해 `BRIDGE_RESOURCE_PRESSURE`로 거절한다. 이미 쥔 몫·예약은 건드리지 않는다.
     fn handle_model_request(&self, client: &mut TcpStream, permit: &mut admission::Permit, request: Request, rest: Vec<u8>) {
         let length = match declared_length(&request) {
             Ok(length) => length,
             Err(message) => return respond(client, 400, &json!({ "error": message })),
         };
+        if request.header("x-ojak-admission") != Some("1") {
+            return respond(client, 409, &json!({
+                "error": "작업 보존·재전송 방지 기능이 있는 omp 수정본과 Ojak 확장이 필요해요. 요청은 보내지 않았어요.",
+                "code": "BRIDGE_CLIENT_UPGRADE_REQUIRED"
+            }));
+        }
         if let Err(denied) = permit.promote_wait(&|| native::client_gone(client)) {
             match denied {
                 // 기다리는 동안 상대가 떠났다. 응답할 곳이 없다.
@@ -1351,11 +1399,11 @@ impl Bridge {
             }
             Err(_) => match self.state().known.clone() {
                 Some(view) => view,
-                None => return respond(client, 503, &json!({ "error": "Ojak이 계정 한도를 아직 읽지 못했어요. 잠시 뒤 다시 시도해 주세요." })),
+                None => return respond_not_submitted(client, "Ojak이 계정 한도를 아직 읽지 못했어요. 계정 상태를 확인한 뒤 다시 시작해 주세요."),
             },
         };
         let Some(token) = self.gateway_token() else {
-            return respond(client, 503, &json!({ "error": "omp 로그인 연결 토큰이 없어요." }));
+            return respond_not_submitted(client, "omp 로그인 연결 토큰이 없어요.");
         };
         let mut tried = Vec::new();
         let mut last_limited: Option<Vec<u8>> = None;
@@ -1430,16 +1478,17 @@ impl Bridge {
             tried.push(candidate.key.clone());
             let mut upstream = match forward(*port, &token, &request, &upstream_body) {
                 Ok(stream) => stream,
-                Err(_) => {
+                Err(failure) => {
                     self.mark_unhealthy(&candidate.key, now);
-                    continue;
+                    if matches!(failure, ForwardFailure::NotSent) { continue; }
+                    return respond_execution_unknown(client);
                 }
             };
             let (head, peek) = match peek_response(&mut upstream) {
                 Ok(value) => value,
                 Err(_) => {
                     self.mark_unhealthy(&candidate.key, now);
-                    continue;
+                    return respond_execution_unknown(client);
                 }
             };
             if let Some(Limit { quota, retry_ms }) = limit_signal(&head, &peek) {
@@ -1493,15 +1542,15 @@ impl Bridge {
             if client.write_all(&head).and_then(|_| client.write_all(&peek)).is_ok() {
                 let _ = io::copy(&mut upstream, client);
             }
-            let _ = client.shutdown(Shutdown::Both);
+            finish(client);
             return;
         }
         match last_limited {
             Some(bytes) => {
                 let _ = client.write_all(&bytes);
-                let _ = client.shutdown(Shutdown::Both);
+                finish(client);
             }
-            None => respond(client, 503, &json!({ "error": format!("Ojak: {model}에 쓸 수 있는 {provider} 계정이 없어요.") })),
+            None => respond_not_submitted(client, &format!("Ojak: {model}에 쓸 수 있는 {provider} 계정이 없어요.")),
         }
     }
 
@@ -1677,6 +1726,58 @@ pub(crate) fn account_inventory(existing: &[Account]) -> Result<Option<Vec<Accou
     let body = http_get(BROKER_PORT, "/v1/snapshot", &token)
         .map_err(|_| ApiError::new("OMP_INVENTORY_UNAVAILABLE", "omp 로그인 목록에 닿지 못했어요."))?;
     aam_adapters::omp_inventory(&body, existing).map(Some)
+}
+
+impl Bridge {
+    /// Use the same official-CLI refresh owner/budget as inference. Tokens remain in memory.
+    pub(crate) fn reset_auth(&self, account: &Account, provider: &'static str) -> Result<crate::reset_provider::Auth, ApiError> {
+        let credential = if matches!(account.tool.as_str(), "claude" | "codex") {
+            let (native_provider, identity) = native::identity(account)
+                .ok_or_else(|| ApiError::new("PROFILE_UNVERIFIED", "공식 CLI의 계정 연결을 확인해 주세요."))?;
+            if native_provider != provider { return Err(ApiError::new("ACCOUNT_MISMATCH", "공급자 계정이 일치하지 않아요.")); }
+            let source = {
+                let mut sources = self.native_sources.lock().unwrap_or_else(|e| e.into_inner());
+                if sources.get(&account.id).is_some_and(|old| old.account.identity_key != account.identity_key
+                    || old.account.profile_path != account.profile_path || old.account.binary_path != account.binary_path) {
+                    sources.remove(&account.id);
+                }
+                Arc::clone(sources.entry(account.id.clone()).or_insert_with(|| Arc::new(native::Source::new(
+                    account.clone(), provider, identity, Arc::downgrade(&self.service), Arc::clone(&self.refresh_budget),
+                ).with_log(self.native_log_sink()))))
+            };
+            source.reset_credential()?
+        } else {
+            let failure = || ApiError::new("AUTH_REQUIRED", "omp의 해당 구독 계정 로그인을 확인해 주세요.");
+            let token = broker_token().ok_or_else(failure)?;
+            let select = |body: Value| -> Result<(u64, Value), ApiError> {
+                let rows = body["credentials"].as_array().ok_or_else(failure)?;
+                let mut found = rows.iter().filter(|row| {
+                    let c = &row["credential"];
+                    row["provider"].as_str() == Some(provider) && c["type"].as_str() == Some("oauth")
+                        && aam_adapters::omp_credential_identity(provider, c["email"].as_str(), c["accountId"].as_str(),
+                            c["orgId"].as_str(), c["projectId"].as_str()).as_ref() == account.identity_key.as_ref()
+                });
+                let row = found.next().ok_or_else(failure)?;
+                if found.next().is_some() { return Err(ApiError::new("ACCOUNT_AMBIGUOUS", "같은 계정의 로그인이 여러 개여서 초기화권을 사용하지 않았어요.")); }
+                Ok((row["id"].as_u64().ok_or_else(failure)?, row["credential"].clone()))
+            };
+            let (id, mut credential) = select(http_get(BROKER_PORT, "/v1/snapshot", &token).map_err(|_| failure())?)?;
+            if credential["expires"].as_i64().unwrap_or(0) <= now_ms() + 60_000 {
+                broker_post(&format!("/v1/credential/{id}/refresh"), &token, "{}").map_err(|_| failure())?;
+                credential = select(http_get(BROKER_PORT, "/v1/snapshot", &token).map_err(|_| failure())?)?.1;
+            }
+            credential
+        };
+        if credential["expires"].as_i64().unwrap_or(0) <= now_ms() {
+            return Err(ApiError::new("AUTH_REQUIRED", "구독 로그인이 만료됐어요. 원래 공급자에서 갱신해 주세요."));
+        }
+        let access = credential["access"].as_str().filter(|s| !s.is_empty())
+            .ok_or_else(|| ApiError::new("AUTH_REQUIRED", "구독 인증을 확인하지 못했어요."))?.to_owned();
+        Ok(crate::reset_provider::Auth { provider, access,
+            account_id: credential["accountId"].as_str().map(str::to_owned),
+            email: credential["email"].as_str().map(str::to_owned),
+            org_id: credential["orgId"].as_str().map(str::to_owned) })
+    }
 }
 
 fn parse_broker_identities(body: &Value) -> Result<BrokerIdentities, String> {
@@ -2007,7 +2108,23 @@ fn read_body(stream: &mut TcpStream, request: Request, mut body: Vec<u8>, deadli
     Ok(Request { body, ..request })
 }
 
-fn respond(stream: &mut TcpStream, status: u16, body: &Value) {
+fn respond_not_submitted(client: &mut TcpStream, message: &str) {
+    respond(client, 503, &json!({ "error": {
+        "type": "admission_stopped", "code": "BRIDGE_ADMISSION_STOPPED",
+        "message": message, "submitted": false
+    }}));
+}
+
+fn respond_execution_unknown(client: &mut TcpStream) {
+    respond(client, 502, &json!({ "error": {
+        "type": "execution_unknown", "code": "BRIDGE_EXECUTION_UNKNOWN",
+        "message": "요청 전달 결과를 확인할 수 없어 자동으로 다시 보내지 않았어요.",
+        "submitted": true
+    }}));
+}
+
+/// 오류 봉투를 입혀 응답 하나를 한 번에 쓴다. 닫지는 않는다.
+fn write_response(stream: &mut TcpStream, status: u16, body: &Value) {
     // pi-native decodes error.message/type. A flat string makes omp print the
     // entire JSON envelope instead of the actionable message.
     let text = if let Some(message) = body.get("error").and_then(Value::as_str) {
@@ -2036,12 +2153,46 @@ fn respond(stream: &mut TcpStream, status: u16, body: &Value) {
         404 => "Not Found",
         _ => "Service Unavailable",
     };
-    let _ = write!(
-        stream,
+    let response = format!(
         "HTTP/1.1 {status} {reason}\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{text}",
         text.len()
     );
-    let _ = stream.shutdown(Shutdown::Both);
+    let _ = stream.write_all(response.as_bytes());
+}
+
+/// 응답하고 연결을 닫는다(읽지 않은 요청 바이트가 있어도 응답이 살아남도록 `finish`).
+fn respond(stream: &mut TcpStream, status: u16, body: &Value) {
+    write_response(stream, status, body);
+    finish(stream);
+}
+
+/// 응답을 다 쓴 뒤 연결을 닫는다. 읽지 않은 요청 바이트가 남은 채 소켓을 닫으면 OS가 RST를 보내고, 상대는 이미 받은 응답까지 잃어
+/// `ECONNRESET`을 본다(본문을 읽기 전에 하는 거절은 모두 이 경우다). 그래서 쓰기 쪽만 닫아 응답 끝(FIN)을 알리고,
+/// 상대가 닫거나 `CLOSE_DRAIN_*` 한도에 닿을 때까지 들어오는 바이트를 버린다. 버리기만 하며 할당하지 않고 해석하지 않는다.
+/// 한도가 유한하므로 느리거나 악의적인 상대도 이 연결 스레드를 `CLOSE_DRAIN_DEADLINE` 넘게 잡지 못한다.
+fn finish(stream: &mut TcpStream) {
+    let _ = stream.flush();
+    let _ = stream.shutdown(Shutdown::Write);
+    drain(stream);
+}
+
+/// 상대가 닫거나(EOF) 오류·`CLOSE_DRAIN_DEADLINE`·`CLOSE_DRAIN_MAX` 바이트·`CLOSE_DRAIN_IDLE` 동안 무소식 중 먼저 오는 것까지 읽어 버린다.
+fn drain(stream: &mut TcpStream) {
+    let deadline = Instant::now() + CLOSE_DRAIN_DEADLINE;
+    let mut chunk = [0u8; 32 * 1024];
+    let mut total = 0usize;
+    while total < CLOSE_DRAIN_MAX {
+        let left = deadline.saturating_duration_since(Instant::now());
+        if left.is_zero() || stream.set_read_timeout(Some(left.min(CLOSE_DRAIN_IDLE))).is_err() {
+            break;
+        }
+        match stream.read(&mut chunk) {
+            Ok(0) => break,
+            Ok(read) => total += read,
+            Err(error) if error.kind() == io::ErrorKind::Interrupted => {}
+            Err(_) => break,
+        }
+    }
 }
 
 /// 후보 한 개가 지금 요청을 못 받는 이유. 선택(`choose`)이 후보를 거르는 조건과 같은 순서로 판정한다.
@@ -2176,7 +2327,8 @@ pub(crate) fn format_reject_line(at: i64, provider: &str, model: &str, session: 
 }
 
 /// 연결 예산 초과 한 줄. 데스크톱 사용량 파서는 `outcome=`가 있는 줄을 건너뛰고, 차단·거절 집계(`blocked`/`rejected`)에도 들어가지 않는다.
-/// `<ms> bridge/overload session=- outcome=overload scope=<public|native> class=<connection|model|queue|queue_timeout|payload|poll> active=<n> limit=<n> suppressed=<n>`
+/// `<ms> bridge/overload session=- outcome=overload scope=<public|native> class=<connection|model|queue|queue_timeout|payload|poll|resource> active=<n> limit=<n> suppressed=<n>`
+/// `class=resource`는 시스템 commit 압박으로 새 모델 요청을 거절한 것이며 `active`는 그 시점 commit 여유, `limit`는 압박 진입 기준이고 둘 다 MiB다.
 fn format_overload_line(at: i64, overload: admission::Overload, suppressed: u64) -> String {
     format!(
         "{at} bridge/overload session=- outcome=overload scope={} class={} active={} limit={} suppressed={suppressed}",
@@ -2313,14 +2465,21 @@ fn respond_quota(stream: &mut TcpStream, provider: &str, model: &str, recovery: 
         "HTTP/1.1 429 Too Many Requests\r\nContent-Type: application/json\r\nRetry-After: {seconds}\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",
         body.len()
     );
-    let _ = stream.shutdown(Shutdown::Both);
+    finish(stream);
 }
 
-fn forward(port: u16, token: &str, request: &Request, body: &[u8]) -> io::Result<TcpStream> {
-    let mut stream = TcpStream::connect_timeout(&([127, 0, 0, 1], port).into(), Duration::from_secs(2))?;
+#[derive(Debug)]
+enum ForwardFailure {
+    NotSent,
+    Unknown,
+}
+
+fn forward(port: u16, token: &str, request: &Request, body: &[u8]) -> Result<TcpStream, ForwardFailure> {
+    let mut stream = TcpStream::connect_timeout(&([127, 0, 0, 1], port).into(), Duration::from_secs(2))
+        .map_err(|_| ForwardFailure::NotSent)?;
     // gateway가 멈춰도 이 연결의 스레드가 무기한 잠기지 않게 한다. 스트리밍 응답은 토큰 사이 간격 기준이다.
-    stream.set_read_timeout(Some(UPSTREAM_READ_TIMEOUT))?;
-    stream.set_write_timeout(Some(REQUEST_TIMEOUT))?;
+    stream.set_read_timeout(Some(UPSTREAM_READ_TIMEOUT)).map_err(|_| ForwardFailure::NotSent)?;
+    stream.set_write_timeout(Some(REQUEST_TIMEOUT)).map_err(|_| ForwardFailure::NotSent)?;
     let mut head = format!(
         "{} {} HTTP/1.1\r\nHost: 127.0.0.1:{port}\r\nAuthorization: Bearer {token}\r\nContent-Length: {}\r\nConnection: close\r\n",
         request.method,
@@ -2334,8 +2493,8 @@ fn forward(port: u16, token: &str, request: &Request, body: &[u8]) -> io::Result
         }
     }
     head.push_str("\r\n");
-    stream.write_all(head.as_bytes())?;
-    stream.write_all(body)?;
+    stream.write_all(head.as_bytes()).map_err(|_| ForwardFailure::Unknown)?;
+    stream.write_all(body).map_err(|_| ForwardFailure::Unknown)?;
     Ok(stream)
 }
 
@@ -3195,7 +3354,7 @@ mod tests {
         exchange(address, &format!("GET {path} HTTP/1.1\r\nHost: localhost\r\n{auth}Connection: close\r\n\r\n"))
     }
     fn post(address: SocketAddr, path: &str, token: &str, body: &str) -> String {
-        exchange(address, &format!("POST {path} HTTP/1.1\r\nHost: localhost\r\nAuthorization: Bearer {token}\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}", body.len()))
+        exchange(address, &format!("POST {path} HTTP/1.1\r\nHost: localhost\r\nAuthorization: Bearer {token}\r\nX-Ojak-Admission: 1\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}", body.len()))
     }
     fn wait_idle(bridge: &Bridge) {
         for _ in 0..100 {
@@ -3326,7 +3485,7 @@ mod tests {
         assert!(post(h.public, "/v1/pi/stream", "wrong", "{}").starts_with("HTTP/1.1 401 "));
         {
             let mut client = TcpStream::connect(h.public).unwrap();
-            write!(client, "POST /v1/pi/stream HTTP/1.1\r\nAuthorization: Bearer {}\r\nContent-Length: 100\r\n\r\nshort", h.public_token).unwrap();
+            write!(client, "POST /v1/pi/stream HTTP/1.1\r\nAuthorization: Bearer {}\r\nX-Ojak-Admission: 1\r\nContent-Length: 100\r\n\r\nshort", h.public_token).unwrap();
         }
         // 헤더를 조금씩 흘려 보내 read마다 timeout을 새로 얻으려는 연결은 전체 deadline에서 끊긴다.
         for address in [h.public, h.native] {
@@ -3450,6 +3609,10 @@ mod tests {
         }
     }
     fn synthetic_gateway(h: &Harness) -> Synthetic {
+        synthetic_gateway_with_disconnect(h, false)
+    }
+
+    fn synthetic_gateway_with_disconnect(h: &Harness, disconnect: bool) -> Synthetic {
         use std::sync::atomic::AtomicUsize;
         let listener = TcpListener::bind(("127.0.0.1", 0)).unwrap();
         let port = listener.local_addr().unwrap().port();
@@ -3469,6 +3632,7 @@ mod tests {
                         }
                     }
                     served.fetch_add(1, Ordering::SeqCst);
+                    if disconnect { return; }
                     let _ = stream.write_all(b"HTTP/1.1 200 OK\r\nContent-Type: text/event-stream\r\nConnection: close\r\n\r\ndata: {\"type\":\"start\"}\n\n");
                     held.fetch_add(1, Ordering::SeqCst);
                     while !release.load(Ordering::SeqCst) {
@@ -3489,7 +3653,7 @@ mod tests {
             aam_protocol::spawn_in_job(&mut command, true, true, false).unwrap()
         };
         h.bridge.state().gateways.push(Gateway {
-            provider: "anthropic".into(), identity: "email:synthetic@example.test|org:o".into(), email: "synthetic@example.test".into(),
+            provider: "anthropic".into(), identity: format!("email:synthetic-{port}@example.test|org:o"), email: format!("synthetic-{port}@example.test"),
             org: "o".into(), native_account: None, native_port: 0, port, child: Some(child), spawned_at: 0, unhealthy_until: 0,
         });
         Synthetic { release, held, served }
@@ -3497,7 +3661,34 @@ mod tests {
 
     fn stream_request(token: &str, session: usize) -> String {
         let body = json!({"modelId": "anthropic/claude-test", "options": {"model": {"id": "claude-test", "provider": "anthropic"}, "sessionId": format!("s-{session}")}}).to_string();
-        format!("POST /v1/pi/stream HTTP/1.1\r\nHost: localhost\r\nAuthorization: Bearer {token}\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}", body.len())
+        format!("POST /v1/pi/stream HTTP/1.1\r\nHost: localhost\r\nAuthorization: Bearer {token}\r\nX-Ojak-Admission: 1\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}", body.len())
+    }
+
+    #[test]
+    fn lost_upstream_response_never_replays_on_another_account() {
+        let h = harness(Duration::from_secs(5));
+        let first = synthetic_gateway_with_disconnect(&h, true);
+        let second = synthetic_gateway_with_disconnect(&h, true);
+        let response = exchange(h.public, &stream_request(&h.public_token, 1));
+        assert!(response.starts_with("HTTP/1.1 502 "), "{response}");
+        let body: Value = serde_json::from_str(response.split_once("\r\n\r\n").unwrap().1).unwrap();
+        assert_eq!(body["error"]["code"], "BRIDGE_EXECUTION_UNKNOWN");
+        assert_eq!(body["error"]["submitted"], true);
+        assert_eq!(first.served.load(Ordering::SeqCst) + second.served.load(Ordering::SeqCst), 1);
+        wait_idle(&h.bridge);
+    }
+
+    #[test]
+    fn clients_without_execution_fencing_are_refused_before_forwarding() {
+        let h = harness(Duration::from_secs(5));
+        let gateway = synthetic_gateway(&h);
+        let request = stream_request(&h.public_token, 1).replace("X-Ojak-Admission: 1\r\n", "");
+        let response = exchange(h.public, &request);
+        assert!(response.starts_with("HTTP/1.1 409 "), "{response}");
+        let body: Value = serde_json::from_str(response.split_once("\r\n\r\n").unwrap().1).unwrap();
+        assert_eq!(body["error"]["code"], "BRIDGE_CLIENT_UPGRADE_REQUIRED");
+        assert_eq!(gateway.served.load(Ordering::SeqCst), 0);
+        wait_idle(&h.bridge);
     }
 
     fn eventually(what: &str, condition: impl Fn() -> bool) {
@@ -3583,7 +3774,7 @@ mod tests {
             let (address, token) = (h.public, h.public_token.clone());
             std::thread::spawn(move || {
                 // 64 MiB를 선언만 하고 본문은 보내지 않는다. 몫을 얻기 전에는 읽지 않으므로 서버는 본문을 기다리지 않는다.
-                let head = format!("POST /v1/pi/stream HTTP/1.1\r\nHost: x\r\nAuthorization: Bearer {token}\r\nContent-Length: {}\r\nConnection: close\r\n\r\n", 64 << 20);
+                let head = format!("POST /v1/pi/stream HTTP/1.1\r\nHost: x\r\nAuthorization: Bearer {token}\r\nX-Ojak-Admission: 1\r\nContent-Length: {}\r\nConnection: close\r\n\r\n", 64 << 20);
                 exchange(address, &head)
             })
         };
@@ -3622,7 +3813,7 @@ mod tests {
         let first = {
             let (address, token) = (h.public, h.public_token.clone());
             std::thread::spawn(move || {
-                let head = format!("POST /v1/pi/stream HTTP/1.1\r\nHost: x\r\nAuthorization: Bearer {token}\r\nContent-Length: {}\r\nConnection: close\r\n\r\n", 64 << 20);
+                let head = format!("POST /v1/pi/stream HTTP/1.1\r\nHost: x\r\nAuthorization: Bearer {token}\r\nX-Ojak-Admission: 1\r\nContent-Length: {}\r\nConnection: close\r\n\r\n", 64 << 20);
                 // 본문을 보내지 않고 연결을 붙잡는다.
                 let mut client = TcpStream::connect(address).unwrap();
                 client.set_read_timeout(Some(Duration::from_secs(10))).unwrap();
@@ -3643,6 +3834,172 @@ mod tests {
         assert!(response.starts_with("HTTP/1.1 400 "), "{response}");
         wait_idle(&h.bridge);
         assert_eq!(h.bridge.admission.snapshot().body_bytes, 0);
+    }
+
+    /// 시스템 commit 압박: 새 모델 요청만 인증 뒤·본문 예약 전에 `BRIDGE_RESOURCE_PRESSURE`(503, Retry-After 없음)로 거절한다.
+    /// 이미 몫을 쥔 스트림과 짧은 제어·native 경로는 영향이 없고, 한도 차단(quota)으로 기록되지 않으며, 해제 기준을 충분히 넘으면 회복한다.
+    #[test]
+    fn memory_pressure_refuses_only_new_model_requests_before_the_body_and_recovers() {
+        use crate::runtime_health::{monotonic_ms, Sample};
+        const MIB: u64 = 1024 * 1024;
+        let h = harness_with(Duration::from_secs(10), admission::Config::default());
+        register_native(&h, "acc");
+        let guard = Arc::clone(h.bridge.admission.guard());
+        let observe = |available: u64| {
+            guard.observe(Sample { commit_limit: 16 * 1024 * MIB, commit_available: available, process_private: Some(300 * MIB), process_working_set: Some(200 * MIB) }, monotonic_ms());
+        };
+        // 표본이 없으면 unknown이며 새 요청을 막지 않는다.
+        assert_eq!(serde_json::to_value(h.bridge.status()).unwrap()["resources"]["state"], "unknown");
+        let mut running = h.bridge.admission.admit(admission::Scope::Public).unwrap();
+        assert_eq!(running.promote_wait(&|| false), Ok(false));
+
+        observe(100 * MIB);
+        assert!(get(h.public, "/v1/admission", None).starts_with("HTTP/1.1 401 "));
+        let readiness = get(h.public, "/v1/admission", Some(&h.public_token));
+        let readiness: Value = serde_json::from_str(readiness.split_once("\r\n\r\n").unwrap().1).unwrap();
+        assert_eq!(readiness["ready"], false);
+        assert_eq!(readiness["reason"], "resource_pressure");
+        // 64 MiB를 선언만 하고 본문은 보내지 않는다. 압박이면 본문을 읽기 전에 거절하므로 바로 응답이 온다.
+        let head = format!("POST /v1/pi/stream HTTP/1.1\r\nHost: x\r\nAuthorization: Bearer {}\r\nX-Ojak-Admission: 1\r\nContent-Length: {}\r\nConnection: close\r\n\r\n", h.public_token, 64 << 20);
+        let started = std::time::Instant::now();
+        let refused = exchange(h.public, &head);
+        assert!(refused.starts_with("HTTP/1.1 503 ") && refused.contains("BRIDGE_RESOURCE_PRESSURE"), "{refused}");
+        let rejection: Value = serde_json::from_str(refused.split_once("\r\n\r\n").unwrap().1).unwrap();
+        assert_eq!(rejection["error"]["type"], "admission_wait");
+        assert_eq!(rejection["error"]["submitted"], false);
+        assert!(!refused.to_ascii_lowercase().contains("retry-after") && !refused.contains("BRIDGE_BUSY") && !refused.contains("QUEUE_TIMEOUT"), "{refused}");
+        assert!(started.elapsed() < Duration::from_secs(3), "{:?}", started.elapsed());
+        assert_eq!(h.bridge.admission.snapshot().body_bytes, 0);
+        // 쥐고 있던 스트림, 짧은 제어, 모델 목록, native 제어는 그대로다.
+        assert_eq!(h.bridge.admission.snapshot().counts.models, 1);
+        assert!(get(h.public, "/healthz", None).starts_with("HTTP/1.1 200 "));
+        assert!(!get(h.public, "/v1/models", Some(&h.public_token)).contains("BRIDGE_RESOURCE_PRESSURE"));
+        assert!(get(h.native, "/native/acc/v1/healthz", None).starts_with("HTTP/1.1 200 "));
+        // 사용자 한도 차단이나 사용량 집계가 아니라 관측 가능한 overload 줄과 상태로만 남는다.
+        assert!(h.bridge.state().blocks.is_empty());
+        let log = fs::read_to_string(h.home.join("logs/bridge.log")).unwrap();
+        assert!(log.contains("outcome=overload scope=public class=resource active=100 limit=512"), "{log}");
+        assert!(!log.contains("->"), "{log}");
+        let status = serde_json::to_value(h.bridge.status()).unwrap();
+        assert_eq!((status["resources"]["state"].as_str(), status["resources"]["sample"].as_str()), (Some("pressure"), Some("fresh")));
+        assert_eq!((status["resources"]["commitAvailableBytes"].as_u64(), status["resources"]["modelRejections"].as_u64()), (Some(100 * MIB), Some(1)));
+        assert_eq!((status["resources"]["processPrivateBytes"].as_u64(), status["connections"]["public"]["rejected"].as_u64()), (Some(300 * MIB), Some(1)));
+
+        // 해제 기준 아래 반등은 압박을 유지하고, 기준 이상이 연속 세 번이어야 회복한다.
+        observe(700 * MIB);
+        assert!(exchange(h.public, &head).contains("BRIDGE_RESOURCE_PRESSURE"));
+        for _ in 0..3 {
+            observe(4 * 1024 * MIB);
+        }
+        let admitted = post(h.public, "/v1/pi/stream", &h.public_token, "{}");
+        assert!(!admitted.contains("BRIDGE_RESOURCE_PRESSURE"), "{admitted}");
+        assert_eq!(serde_json::to_value(h.bridge.status()).unwrap()["resources"]["state"], "normal");
+        let readiness = get(h.public, "/v1/admission", Some(&h.public_token));
+        let readiness: Value = serde_json::from_str(readiness.split_once("\r\n\r\n").unwrap().1).unwrap();
+        assert_eq!(readiness["ready"], true);
+        drop(running);
+        wait_idle(&h.bridge);
+    }
+
+    /// 실제 TCP로 요청 머리 뒤에 본문을 `body_len`바이트 올리면서 응답을 읽는다. 서버가 응답한 뒤에도 보내는 쪽은 계속 올린다.
+    /// 돌려주는 값: (올리기 결과, 받은 응답 또는 읽기 오류). 응답이 reset으로 사라지면 둘 중 하나가 Err다.
+    fn upload(address: SocketAddr, head: &str, body_len: usize) -> (io::Result<()>, io::Result<String>) {
+        let mut client = TcpStream::connect(address).unwrap();
+        client.set_read_timeout(Some(Duration::from_secs(10))).unwrap();
+        let mut writer = client.try_clone().unwrap();
+        let head = head.to_owned();
+        let sender = std::thread::spawn(move || -> io::Result<()> {
+            writer.set_write_timeout(Some(Duration::from_secs(10)))?;
+            writer.write_all(head.as_bytes())?;
+            let chunk = vec![b'x'; 64 * 1024];
+            let mut left = body_len;
+            while left > 0 {
+                let size = left.min(chunk.len());
+                writer.write_all(&chunk[..size])?;
+                left -= size;
+            }
+            Ok(())
+        });
+        let mut bytes = Vec::new();
+        let read = client.read_to_end(&mut bytes).map(|_| String::from_utf8_lossy(&bytes).into_owned());
+        (sender.join().unwrap(), read)
+    }
+
+    /// 본문을 읽기 전에 하는 모든 거절(압박·인증·상한·경로)은 보내는 쪽이 아직 올리는 중이어도 응답이 reset 없이 끝까지 도착한다.
+    /// 이전에는 읽지 않은 본문이 남은 채 소켓을 닫아 RST가 나가고 `fetch`가 `ECONNRESET`을 봤다. 인증 검사는 그대로이고 본문은 어디에도 쌓지 않는다.
+    #[test]
+    fn early_rejections_survive_an_upload_that_is_still_in_flight() {
+        use crate::runtime_health::{monotonic_ms, Sample};
+        const MIB: u64 = 1024 * 1024;
+        let h = harness_with(Duration::from_secs(10), admission::Config::default());
+        h.bridge.admission.guard().observe(
+            Sample { commit_limit: 16 * 1024 * MIB, commit_available: 100 * MIB, process_private: Some(300 * MIB), process_working_set: Some(200 * MIB) },
+            monotonic_ms(),
+        );
+        let head = |path: &str, token: &str, declared: usize| format!("POST {path} HTTP/1.1\r\nHost: x\r\nAuthorization: Bearer {token}\r\nX-Ojak-Admission: 1\r\nContent-Type: application/json\r\nContent-Length: {declared}\r\nConnection: close\r\n\r\n");
+        let cases: Vec<(&str, String, usize, &str)> = vec![
+            // 압박: 인증 뒤·본문 예약 전. 1 MiB 본문을 실제로 올린다.
+            ("pressure", head("/v1/pi/stream", &h.public_token, MIB as usize), MIB as usize, "HTTP/1.1 503 "),
+            // 인증 실패는 본문을 읽지 않는다.
+            ("unauthenticated", head("/v1/pi/stream", "wrong-token", 4 << 20), 4 << 20, "HTTP/1.1 401 "),
+            // 선언이 상한(64 MiB)을 넘는 요청은 400. 선언만 크고 실제로는 8 MiB를 올린다.
+            ("oversize", head("/v1/pi/stream", &h.public_token, MAX_BODY + 1), 8 << 20, "HTTP/1.1 400 "),
+            ("unknown path", head("/native/acc/v1/snapshot", &h.public_token, 2 << 20), 2 << 20, "HTTP/1.1 404 "),
+        ];
+        for (name, request_head, body_len, status) in cases {
+            let (sent, response) = upload(h.public, &request_head, body_len);
+            let response = response.unwrap_or_else(|error| panic!("{name}: response lost: {error}"));
+            assert!(response.starts_with(status), "{name}: {response}");
+            assert!(response.contains("\"error\""), "{name}: {response}");
+            sent.unwrap_or_else(|error| panic!("{name}: upload was reset: {error}"));
+        }
+        assert!(h.bridge.state().blocks.is_empty(), "a refusal is not a provider limit");
+        assert_eq!(h.bridge.admission.snapshot().body_bytes, 0, "refused requests hold no body memory");
+        wait_idle(&h.bridge);
+    }
+
+    /// 응답 뒤 버리기는 유한하다. 끝없이 조금씩 보내는 상대는 시간 한도에서, 아무것도 안 보내고 연결만 쥔 상대는 무소식 한도에서
+    /// 잘리고, 둘 다 연결 몫(permit)이 돌아온다. 새 연결도 그동안 받는다.
+    #[test]
+    fn draining_after_an_early_rejection_is_finite_for_slow_and_silent_peers() {
+        let h = harness_with(Duration::from_secs(10), admission::Config::default());
+        let head = format!("POST /v1/pi/stream HTTP/1.1\r\nHost: x\r\nAuthorization: Bearer wrong-token\r\nContent-Length: {}\r\nConnection: close\r\n\r\n", 64 << 20);
+
+        // 조용히 연결만 쥔다: 응답은 바로 오고, 무소식 한도(250ms) 뒤 연결이 정리된다.
+        let mut silent = TcpStream::connect(h.public).unwrap();
+        silent.set_read_timeout(Some(Duration::from_secs(5))).unwrap();
+        silent.write_all(head.as_bytes()).unwrap();
+        let mut response = String::new();
+        silent.read_to_string(&mut response).unwrap();
+        assert!(response.starts_with("HTTP/1.1 401 "), "{response}");
+        let started = std::time::Instant::now();
+        wait_idle(&h.bridge);
+        assert!(started.elapsed() < Duration::from_secs(2), "a silent peer must not hold the slot: {:?}", started.elapsed());
+
+        // 끝없이 한 바이트씩 흘린다. 서버는 전체 한도(3초)에서 끊고 permit을 돌려준다. 그 뒤의 쓰기는 오류로 끝난다.
+        let mut trickle = TcpStream::connect(h.public).unwrap();
+        trickle.set_read_timeout(Some(Duration::from_secs(5))).unwrap();
+        trickle.write_all(head.as_bytes()).unwrap();
+        let mut writer = trickle.try_clone().unwrap();
+        let started = std::time::Instant::now();
+        let sender = std::thread::spawn(move || {
+            let until = std::time::Instant::now() + Duration::from_secs(15);
+            while std::time::Instant::now() < until {
+                if writer.write_all(b"x").is_err() {
+                    return true;
+                }
+                std::thread::sleep(Duration::from_millis(10));
+            }
+            false
+        });
+        let mut response = String::new();
+        trickle.read_to_string(&mut response).unwrap();
+        assert!(response.starts_with("HTTP/1.1 401 "), "{response}");
+        // 흘리는 연결이 남아 있어도 새 연결은 바로 처리된다.
+        assert!(get(h.public, "/healthz", None).starts_with("HTTP/1.1 200 "));
+        wait_idle(&h.bridge);
+        assert!(started.elapsed() < CLOSE_DRAIN_DEADLINE + Duration::from_secs(3), "{:?}", started.elapsed());
+        assert!(sender.join().unwrap(), "the server must close the connection once the drain window ends");
     }
 
 }

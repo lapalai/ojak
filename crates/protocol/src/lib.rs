@@ -1,5 +1,7 @@
 mod ipc;
 mod process;
+mod reset;
+pub use reset::{ResetCredit, ResetInventory, ResetOperation};
 pub mod secure;
 #[cfg(windows)]
 pub mod winutil;
@@ -733,7 +735,7 @@ fn call_inner(paths: &Paths, method: &str, params: Value, expected_pid: Option<u
     let _ = expected_pid;
     let mut stream = stream;
     stream
-        .set_read_timeout(Some(std::time::Duration::from_secs(60)))
+        .set_read_timeout(Some(std::time::Duration::from_secs(if matches!(method, "resetCredits.read" | "resetCredits.redeem") { 90 } else { 60 })))
         .map_err(|e| ApiError::new("IPC_ERROR", e.to_string()))?;
     stream
         .set_write_timeout(Some(std::time::Duration::from_secs(5)))

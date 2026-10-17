@@ -80,3 +80,15 @@ jobs:
           AAM_OBSERVER_TEST_WRITER="$writer" node --test \
             integrations/omp/aam-accounts.test.mjs \
             integrations/omp/aam-observer.test.mjs
+
+      - name: Build complete unsigned verification installers
+        run: node scripts/build.mjs --verify-build
+
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: verification-only-${{ matrix.os }}
+          path: |
+            target/release/bundle/nsis/*-setup.exe
+            target/release/bundle/dmg/*.dmg
+          if-no-files-found: error
+          retention-days: 7

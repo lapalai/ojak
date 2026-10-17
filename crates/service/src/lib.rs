@@ -4,8 +4,13 @@ mod managed_sessions;
 mod process;
 mod quota_summary;
 mod readiness;
+mod reset_credits;
+mod reset_provider;
 mod routes;
+pub mod runtime_health;
 pub mod scheduler;
+#[cfg(windows)]
+pub mod supervisor;
 mod server;
 mod store;
 
@@ -73,6 +78,7 @@ pub struct Service {
     /// 마지막으로 배정 요청이 계정·한도 미확인 때문에 조회를 시작한 시각(ms). 전체 조회 시각과 별개이며 저장하지 않는다.
     last_probe_at: AtomicI64,
     started_at: i64,
+    reset_instance_id: String,
     prepared_ms: i64,
     suspect_ms: i64,
     /// 백그라운드 시작 뒤에만 생긴다. 테스트용 서비스는 브릿지를 띄우지 않는다.
@@ -328,6 +334,7 @@ impl Service {
             refreshing: AtomicBool::new(false),
             last_probe_at: AtomicI64::new(0),
             started_at: now_ms(),
+            reset_instance_id: new_id(),
             prepared_ms: config_ms("AAM_PREPARED_TIMEOUT_MS", 30_000, 1_000, 300_000),
             suspect_ms: config_ms("AAM_SUSPECT_THRESHOLD_MS", 45_000, 10_000, 600_000),
             bridge: OnceLock::new(),
@@ -441,6 +448,8 @@ impl Service {
             // `observe: false`는 관측 세션을 건너뛴다(응답의 observedSessions가 비고 관측 알림도 없다).
             "status.read" if params.get("observe").and_then(Value::as_bool) == Some(false) => value(self.stored_snapshot()?),
             "status.read" => value(self.snapshot()?),
+            "resetCredits.read" => value(self.reset_read(parse(params)?)?),
+            "resetCredits.redeem" => value(self.reset_redeem(parse(params)?)?),
             "quota.refresh" => {
                 // 사용자가 직접 누른 새로고침만 omp의 5분 보고 캐시를 건너뛴다. 정기 조회는 캐시를 존중한다.
                 self.start_refresh_with(params.get("force").and_then(Value::as_bool).unwrap_or(false));
@@ -839,9 +848,10 @@ impl Service {
             .connection
             .transaction_with_behavior(TransactionBehavior::Immediate)
             .map_err(db_error)?;
-        // 같은 프로필의 기존 binding과, 다른 프로필에 있는 같은 native 계정(재로그인·갱신)을
-        // 함께 모읍니다. 후자는 새 binding으로 흡수해 계정이 하나만 남게 합니다.
-        let related: Vec<_> = accounts(&tx)?
+        let existing = accounts(&tx)?;
+        reject_duplicate_profile(&registered, &existing)?;
+        // 같은 프로필의 기존 binding만 갱신합니다. 다른 프로필의 동일 계정은 위에서 거절합니다.
+        let related: Vec<_> = existing
             .into_iter()
             .filter(|item| {
                 item.tool == registered.tool
@@ -1872,21 +1882,37 @@ impl Service {
     }
 }
 
-/// 새로 등록하는 binding이 기존 계정 행을 대체하는지 판단합니다.
-/// - 같은 프로필의 미로그인 binding
-/// - 다른 프로필에 등록된 같은 native identity (만료 후 재로그인, 프로필 이전)
-/// 같은 프로필에 다른 identity가 있던 경우는 대체가 아니라 이력 보존 대상입니다.
+fn reject_duplicate_profile(registered: &Account, existing: &[Account]) -> Result<(), ApiError> {
+    let Some(identity) = registered.identity_key.as_deref().filter(|key| !key.is_empty()) else {
+        return Ok(());
+    };
+    if existing.iter().any(|previous| {
+        previous.tool == registered.tool
+            && previous.profile_path == registered.profile_path
+            && previous.identity_key.as_deref() == Some(identity)
+    }) {
+        return Ok(());
+    }
+    if existing.iter().any(|previous| {
+        previous.tool == registered.tool
+            && previous.identity_key.as_deref() == Some(identity)
+            && previous.profile_path != registered.profile_path
+    }) {
+        return Err(ApiError::new(
+            "ACCOUNT_ALREADY_CONNECTED",
+            "이미 연결된 계정입니다. 다른 프로필로 연결해도 한도는 늘어나지 않아요. 기존 계정을 사용하거나 공식 로그인에서 다른 계정을 선택해 주세요.",
+        ));
+    }
+    Ok(())
+}
+
+/// 같은 프로필의 미로그인 binding만 등록된 identity로 대체합니다.
+/// 다른 identity의 과거 binding은 이력으로 보존합니다.
 fn supersedes(registered: &Account, previous: &Account) -> bool {
-    if previous.id == registered.id || previous.tool != registered.tool {
-        return false;
-    }
-    if previous.profile_path == registered.profile_path {
-        return previous.identity_key.is_none();
-    }
-    registered
-        .identity_key
-        .as_deref()
-        .is_some_and(|key| !key.is_empty() && previous.identity_key.as_deref() == Some(key))
+    previous.id != registered.id
+        && previous.tool == registered.tool
+        && previous.profile_path == registered.profile_path
+        && previous.identity_key.is_none()
 }
 fn refresh_interval_ms() -> i64 {
     let random = uuid::Uuid::new_v4();

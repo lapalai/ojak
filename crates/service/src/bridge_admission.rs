@@ -7,6 +7,9 @@
 //! - 본문 메모리는 전체 가중 합계 예산(`reserve_body`, 선언 길이 × `BODY_COST_FACTOR`)으로 묶는다. 연결 수 × 요청당 상한(64 MiB)이
 //!   메모리 상한이 되지 않게 한다. 예산이 모자라면 대기 시간 안에서 기다렸다가 `payload`로 거절한다. 최악 입력의 메모리 보증은 아니다.
 //! - 한도는 새 연결을 받을 때만 적용한다. 이미 받은 연결은 예산이 줄어도 끊지 않는다.
+//! - Windows commit 여유가 위험 수준으로 내려가면(`runtime_health::ResourceGuard`) **새** 모델 요청만 `BRIDGE_RESOURCE_PRESSURE`(503)로 거절한다.
+//!   판단은 모델 몫 대기 전, 대기열의 승격 직전, 본문 예약 전·대기 중에 한다(본문을 읽거나 할당하기 전). 이미 몫·예약을 쥔 스트림, 짧은 제어
+//!   (healthz·모델 목록)와 native 경로는 영향이 없다. 표본이 없거나 오래돼 `unknown`이면 막지 않는다.
 //! - 모든 허가·대기 표·본문 예약은 RAII라 오류·취소·조기 반환·패닉에서도 반드시 돌아온다. 잠금은 짧은 계수 갱신에만 쓰고 I/O는 하지 않는다.
 use parking_lot::{Condvar, Mutex};
 use std::{
@@ -17,6 +20,7 @@ use std::{
     },
     time::{Duration, Instant},
 };
+use crate::runtime_health::{monotonic_ms, ResourceGuard, ResourceStatus};
 
 pub(super) const MIN_TOTAL: usize = 64;
 pub(super) const MAX_TOTAL: usize = 512;
@@ -158,7 +162,8 @@ pub(super) struct Counts {
 pub(super) struct Overload {
     pub scope: Scope,
     /// `connection`(전체), `model`(대기 없이 거절), `queue`(대기열 가득), `queue_timeout`(기다렸지만 자리가 나지 않음),
-    /// `payload`(본문 메모리 예산), `poll` 중 어느 몫이 찼는지.
+    /// `payload`(본문 메모리 예산), `poll`, `resource`(시스템 메모리 압박) 중 어느 몫이 찼는지.
+    /// `resource`는 `active`가 지금 commit 여유, `limit`가 압박 진입 기준이며 단위가 MiB다.
     pub class: &'static str,
     pub active: usize,
     pub limit: usize,
@@ -167,12 +172,14 @@ impl Overload {
     pub(super) fn code(&self) -> &'static str {
         match self.class {
             "queue_timeout" => "BRIDGE_QUEUE_TIMEOUT",
+            "resource" => "BRIDGE_RESOURCE_PRESSURE",
             _ => self.scope.busy_code(),
         }
     }
     pub(super) fn message(&self) -> &'static str {
         match self.class {
             "queue_timeout" => "Ojak 모델 연결 자리가 정해진 시간 안에 나지 않았어요. 잠시 뒤 다시 시도해 주세요.",
+            "resource" => "Windows 메모리 여유가 매우 부족해서 Ojak이 새 모델 요청을 잠시 받지 않아요. 이미 진행 중인 요청은 계속 처리돼요. 잠시 뒤 다시 시도해 주세요.",
             "payload" => "Ojak이 처리 중인 요청 본문 메모리가 가득 찼어요. 잠시 뒤 다시 시도해 주세요.",
             _ => self.scope.busy_message(),
         }
@@ -220,6 +227,8 @@ pub(super) struct Admission {
     rejected_native: AtomicU64,
     waited: AtomicU64,
     wait_timeouts: AtomicU64,
+    /// 새 모델 요청 admission이 읽는 시스템 메모리 상태. 읽기만 하며 요청 경로에서 표본을 만들지 않는다.
+    guard: Arc<ResourceGuard>,
 }
 
 impl Admission {
@@ -228,7 +237,12 @@ impl Admission {
         Self::with_config(Config::default())
     }
 
+    #[cfg(test)]
     pub(super) fn with_config(config: Config) -> Arc<Self> {
+        Self::with_guard(config, ResourceGuard::new())
+    }
+
+    pub(super) fn with_guard(config: Config, guard: Arc<ResourceGuard>) -> Arc<Self> {
         let config = Config { total: config.total.clamp(MIN_TOTAL, MAX_TOTAL), ..config };
         Arc::new(Self {
             config,
@@ -239,6 +253,7 @@ impl Admission {
             rejected_native: AtomicU64::new(0),
             waited: AtomicU64::new(0),
             wait_timeouts: AtomicU64::new(0),
+            guard,
         })
     }
 
@@ -249,6 +264,23 @@ impl Admission {
 
     pub(super) fn limits(&self) -> Limits {
         Limits::derive(self.profiles.load(Ordering::SeqCst), self.config.total)
+    }
+
+    #[cfg(test)]
+    pub(super) fn guard(&self) -> &Arc<ResourceGuard> {
+        &self.guard
+    }
+
+    pub(super) fn resource_status(&self) -> ResourceStatus {
+        self.guard.status(monotonic_ms())
+    }
+
+    /// 새 모델 작업을 받아도 되는지. 신선한 표본이 압박일 때만 거절한다. 원자값만 읽으므로 admission 잠금 밖에서 부른다.
+    fn pressure_check(&self) -> Result<(), Overload> {
+        const MIB: u64 = 1024 * 1024;
+        self.guard
+            .check(monotonic_ms())
+            .map_err(|pressure| self.reject(Scope::Public, "resource", (pressure.available / MIB) as usize, (pressure.enter_below / MIB) as usize))
     }
 
     pub(super) fn snapshot(&self) -> Snapshot {
@@ -307,6 +339,8 @@ impl Admission {
     /// `cancel`은 잠금 밖에서 부르며 참이면 접는다(`Denied::Cancelled`).
     pub(super) fn reserve_body(self: &Arc<Self>, length: usize, cancel: &dyn Fn() -> bool) -> Result<BodyReservation, Denied> {
         let cost = length.saturating_mul(BODY_COST_FACTOR);
+        // 본문 예약 전에 시스템 메모리 압박을 본다. 압박이면 아무것도 예약하지 않는다.
+        self.pressure_check().map_err(Denied::Overload)?;
         let deadline = Instant::now() + self.config.model_wait;
         let mut inner = self.inner.lock();
         loop {
@@ -326,6 +360,8 @@ impl Admission {
             if cancel() {
                 return Err(Denied::Cancelled);
             }
+            // 기다리는 동안 압박이 시작됐으면 본문을 읽기 전에 접는다.
+            self.pressure_check().map_err(Denied::Overload)?;
             inner = self.inner.lock();
         }
     }
@@ -371,6 +407,9 @@ impl Permit {
         if self.special {
             return Ok(());
         }
+        if self.scope == Scope::Public {
+            self.admission.pressure_check()?;
+        }
         let limits = self.admission.limits();
         let mut inner = self.admission.inner.lock();
         let (active, limit, class) = match self.scope {
@@ -395,6 +434,8 @@ impl Permit {
         if self.special {
             return Ok(false);
         }
+        // 몫을 얻기 전에 압박을 본다. 압박이면 대기열에도 들어가지 않는다. 이미 쥔 몫(`special`)은 위에서 그대로 돌려줬다.
+        self.admission.pressure_check().map_err(Denied::Overload)?;
         debug_assert_eq!(self.scope, Scope::Public);
         let admission = Arc::clone(&self.admission);
         let limits = admission.limits();
@@ -448,6 +489,8 @@ impl Permit {
             if cancel() {
                 return Err(Denied::Cancelled);
             }
+            // 대기열 승격 직전에 압박을 다시 본다. 압박이면 표(`Ticket`)가 대기열에서 빠지고 구조화된 거절을 받는다.
+            admission.pressure_check().map_err(Denied::Overload)?;
             inner = admission.inner.lock();
         }
     }
@@ -816,5 +859,139 @@ mod tests {
         assert!(started.elapsed() < Duration::from_secs(1));
         drop(held);
         assert_eq!(admission.snapshot().body_bytes, 0);
+    }
+
+    mod pressure {
+        use super::*;
+        use crate::runtime_health::Sample;
+
+        const MIB: u64 = 1024 * 1024;
+        const GIB: u64 = 1024 * MIB;
+
+        fn sample(available: u64) -> Sample {
+            Sample { commit_limit: 16 * GIB, commit_available: available, process_private: None, process_working_set: None }
+        }
+        fn observe(guard: &ResourceGuard, available: u64) {
+            guard.observe(sample(available), monotonic_ms());
+        }
+        /// 해제 기준(진입의 2배) 이상을 연속으로 관측해 정상으로 돌린다.
+        fn recover(guard: &ResourceGuard) {
+            for _ in 0..3 {
+                observe(guard, 4 * GIB);
+            }
+        }
+        fn setup(wait_ms: u64) -> (Arc<Admission>, Arc<ResourceGuard>) {
+            let guard = ResourceGuard::with_support(true);
+            (Admission::with_guard(config(64, wait_ms), Arc::clone(&guard)), guard)
+        }
+        fn resource(denied: Result<bool, Denied>) -> Overload {
+            match denied {
+                Err(Denied::Overload(over)) => over,
+                other => panic!("{other:?}"),
+            }
+        }
+
+        #[test]
+        fn pressure_refuses_new_model_work_keeps_held_work_and_recovers_with_hysteresis() {
+            let (admission, guard) = setup(0);
+            let never = || false;
+            // 압박 전에 이미 모델 몫과 본문 예약을 쥔 스트림.
+            let mut active = admission.admit(Scope::Public).unwrap();
+            assert_eq!(active.promote_wait(&never), Ok(false));
+            let reservation = admission.reserve_body(1 << 20, &never).unwrap();
+            // 표본이 없는 동안(unknown)에는 막지 않는다.
+            assert_eq!(admission.resource_status().state, "unknown");
+            let mut before = admission.admit(Scope::Public).unwrap();
+            assert_eq!(before.promote_wait(&never), Ok(false));
+
+            observe(&guard, 100 * MIB);
+            let mut fresh = admission.admit(Scope::Public).unwrap();
+            let refused = resource(fresh.promote_wait(&never));
+            assert_eq!((refused.scope, refused.class, refused.code()), (Scope::Public, "resource", "BRIDGE_RESOURCE_PRESSURE"));
+            assert_eq!((refused.active, refused.limit), (100, 512), "MiB");
+            assert!(refused.message().contains("진행 중인 요청은 계속"));
+            assert_ne!(refused.code(), "BRIDGE_BUSY");
+            assert_ne!(refused.code(), "BRIDGE_QUEUE_TIMEOUT");
+            assert!(matches!(admission.reserve_body(1, &never), Err(Denied::Overload(over)) if over.class == "resource"));
+            // 이미 쥔 몫·본문 예약·연결은 그대로다. 새 연결(짧은 제어·healthz)과 native도 받는다.
+            let counts = admission.snapshot().counts;
+            assert_eq!((counts.models, counts.public), (2, 3));
+            assert_eq!(admission.snapshot().body_bytes, (1 << 20) * BODY_COST_FACTOR);
+            let control = admission.admit(Scope::Public).unwrap();
+            admission.set_native_profiles(1);
+            let mut poll = admission.admit(Scope::Native).unwrap();
+            assert!(poll.promote().is_ok());
+            // 이미 몫을 쥔 permit이 다시 승격을 부르는 것은 그대로 성공한다.
+            assert_eq!(active.promote_wait(&never), Ok(false));
+            let status = admission.resource_status();
+            assert_eq!((status.state, status.model_rejections), ("pressure", 2));
+            assert_eq!(admission.snapshot().rejected_public, 2);
+
+            // 진입과 해제 사이에서는 압박이 유지되고, 해제 기준 이상이 연속 세 번이어야 정상이 된다.
+            observe(&guard, 800 * MIB);
+            assert!(matches!(fresh.promote_wait(&never), Err(Denied::Overload(_))));
+            observe(&guard, 4 * GIB);
+            observe(&guard, 4 * GIB);
+            assert!(matches!(fresh.promote_wait(&never), Err(Denied::Overload(_))), "two healthy samples are not enough");
+            observe(&guard, 4 * GIB);
+            assert_eq!(fresh.promote_wait(&never), Ok(false));
+            let reservation_two = admission.reserve_body(1 << 20, &never).unwrap();
+            assert_eq!(admission.resource_status().state, "normal");
+            assert_eq!(admission.resource_status().transitions, 1, "the first sample is not a transition");
+            // 회복 뒤에도 처음부터 쥐고 있던 것은 그대로였다.
+            assert_eq!(admission.snapshot().counts.models, 3);
+            drop((active, before, fresh, control, poll, reservation, reservation_two));
+            let snapshot = admission.snapshot();
+            assert_eq!((snapshot.counts, snapshot.body_bytes), (Counts::default(), 0));
+        }
+
+        #[test]
+        fn a_queued_waiter_is_refused_when_pressure_starts_and_held_permits_stay() {
+            let (admission, guard) = setup(5_000);
+            let mut held = fill_models(&admission);
+            let waiter = {
+                let admission = Arc::clone(&admission);
+                std::thread::spawn(move || {
+                    let mut permit = admission.admit(Scope::Public).unwrap();
+                    let started = Instant::now();
+                    (permit.promote_wait(&|| false), started.elapsed())
+                })
+            };
+            eventually("waiter queued", || admission.snapshot().counts.waiting == 1);
+            let models = held.len();
+            observe(&guard, 100 * MIB);
+            let (result, waited) = waiter.join().unwrap();
+            assert_eq!(resource(result).class, "resource");
+            assert!(waited < Duration::from_secs(2), "{waited:?}");
+            let snapshot = admission.snapshot();
+            assert_eq!((snapshot.counts.waiting, snapshot.counts.models, snapshot.wait_timeouts), (0, models, 0));
+            // 압박이 풀리고 몫이 돌아오면 다시 받는다.
+            recover(&guard);
+            held.pop();
+            let mut again = admission.admit(Scope::Public).unwrap();
+            assert_eq!(again.promote_wait(&|| false), Ok(false));
+            drop((held, again));
+            assert_eq!(admission.snapshot().counts, Counts::default());
+        }
+
+        #[test]
+        fn a_waiting_body_reservation_is_refused_before_any_body_is_read_when_pressure_starts() {
+            let guard = ResourceGuard::with_support(true);
+            let admission = Admission::with_guard(Config { body_budget: 512 << 20, model_wait: Duration::from_secs(5), ..Config::default() }, Arc::clone(&guard));
+            let held = admission.reserve_body(64 << 20, &|| false).unwrap();
+            let waiter = {
+                let admission = Arc::clone(&admission);
+                std::thread::spawn(move || admission.reserve_body(1, &|| false).map(|_| ()))
+            };
+            std::thread::sleep(Duration::from_millis(150));
+            observe(&guard, 100 * MIB);
+            match waiter.join().unwrap() {
+                Err(Denied::Overload(over)) => assert_eq!((over.class, over.code()), ("resource", "BRIDGE_RESOURCE_PRESSURE")),
+                other => panic!("{other:?}"),
+            }
+            assert_eq!(admission.snapshot().body_bytes, 512 << 20, "the running request keeps its reservation");
+            drop(held);
+            assert_eq!(admission.snapshot().body_bytes, 0);
+        }
     }
 }

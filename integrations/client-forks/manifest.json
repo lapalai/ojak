@@ -1,0 +1,21 @@
+{
+  "version": 1,
+  "clients": [
+    {
+      "directory": "oh-my-pi",
+      "repository": "https://github.com/can1357/oh-my-pi.git",
+      "tag": "v18.11.0",
+      "revision": "c2cb79e4c227aa4b22c4ccb933ff72fd88bceba4",
+      "version": "18.12.0-ojak.1",
+      "sha256": "1cea10beabb89786ec536f01d1db20aecb89f491932ae9ab986436f6c4c914e5"
+    },
+    {
+      "directory": "orca",
+      "repository": "https://github.com/stablyai/orca.git",
+      "tag": "v1.4.227",
+      "revision": "f51e82c4c26745f6a15e215e4391f533327697e2",
+      "version": "1.5.0-ojak.2",
+      "sha256": "07af72f298de0b926b5cbe9074ef6e8f5d34535207cf7cde35e322a0178c0551"
+    }
+  ]
+}

@@ -15,6 +15,7 @@ Tauri 2 + React 19/Vite 메뉴바 앱(제품명 Ojak, bundle id `ai.aam.desktop`
 공통: `App.tsx`, `state.ts`(`useSnapshot`, `useBridge`, `useAction`, 공급자 별칭), `api.ts`, `types.ts`, `dialogs.tsx`, `components.tsx`, `i18n.ts`.
 - `useSnapshot(observe = true)`는 상태 조회·강제 새로고침에 같은 관측 옵션을 전달한다. `Popover.tsx`는 외부 세션을 표시하지 않으므로 `useSnapshot(false)`로 프로세스 관측을 생략하고 저장된 계정·사용량만 읽는다. 본 창은 기존 관측을 유지한다.
 Windows는 `tauri-plugin-single-instance`를 다른 플러그인보다 먼저 등록한다. 두 번째 실행은 기존 `main` 창을 다시 표시·포커스하고 종료하며, 자동 시작 인수로 들어온 중복 실행은 창을 열지 않는다. macOS의 기존 `Reopen` 처리는 유지한다.
+- 사용 현황의 계정 상세 `ResetCreditsPanel.tsx`는 저장된 초기화권 정보만 먼저 읽는다. 사용자가 조회할 때 공급자에서 수량·만료·범위를 확인하며, 별도 확인란 동의 뒤에만 `resetCredits.redeem`을 한 번 호출한다. 닫기·IPC 오류·재열기로 mutation을 재전송하지 않는다. `unknown/unsupported/known(0)`을 구분하고 결과 불명은 읽기 전용 조회로 복구한다. 유료 크레딧과 별개이며 초기화권으로 다른 한도·세션 슬롯을 해제한다고 약속하지 않는다.
 
 ## 글꼴·조판 (`styles.css`)
 - 본문 글꼴은 앱에 넣은 Pretendard Variable(`src/assets/fonts`, SIL OFL 1.1, 약 2 MB)이다. macOS·Windows에서 한글·영문·인도네시아어를 같은 글꼴과 같은 굵기 단계로 그린다. 코드는 `--mono`(SF Mono/Menlo, Windows Cascadia Mono/Consolas).
@@ -30,6 +31,7 @@ Windows는 `tauri-plugin-single-instance`를 다른 플러그인보다 먼저 �
 - `SetupGuide`는 서비스·shell PATH·계정 보유 도구의 shim 설치와 실제 명령 검증을 구분한다. 수동으로 다시 열거나 상태를 조회한 직후에는 ‘설정 적용됨 · 실제 명령은 아직 미확인’으로 표시한다. 실패한 단계 아래에는 `notices`의 이유와 다음 행동을 표시 언어로 보여 준다. 툴팁만 쓰지 않는다.
 - 도구별 `allocation` 줄은 명령 연결과 별개로 지금 배정 가능·조회 중·제외·계정 없음·조회 불가를 보여 준다. 조회가 끝나면 다시 읽고, 실제 배정 가능한 도구가 있을 때만 ‘준비됐어요’와 해당 도구의 터미널 열기를 보여 준다. 명령만 확인됐으면 ‘명령은 연결됐어요’로 구분한다. 시작하기 카드도 같은 서비스 판단을 사용한다.
 - 상태 조회는 `aam setup --status`로 셸을 실행하지 않는다. ‘다시 점검’은 Unix에서 새 로그인 셸의 시작 파일을 실행하고, Windows에서는 PowerShell을 띄우지 않고 저장된 시스템·사용자 PATH를 직접 해석한다. ‘시작하기’는 누락된 설치와 명령 검사를 진행한다. 명령별 최대 5초이며 기존 터미널·IDE의 적용 여부를 보장하지 않는다.
+- Windows 서비스 분리 실행 전에 `winutil::prevent_stdio_inheritance`로 기존 표준 핸들의 상속 플래그를 지운다. 자식의 stdio를 null로 지정하는 것만으로는 원래 캡처 파이프 핸들의 상속을 막지 못해 `run_management`의 `Command.output()`이 서비스 종료까지 기다릴 수 있다. 타임아웃으로 덮거나 준비 작업을 중복 실행하지 않으며 foreground 자식의 명시적 stdio 상속은 유지한다.
 - 계정 추가 대화상자 등 다른 대화상자가 열리면 준비 안내를 숨기고, 닫힌 뒤 상태를 다시 확인한다. 계정 표시는 가림 설정을 따른다.
 - ‘나중에’로 닫아도 사이드바의 ‘Ojak 시작하기’로 다시 열 수 있다. 감지된 omp는 체크박스(기본 꺼짐)로 사용자가 직접 동의했을 때만 broker·bridge·observer를 함께 연결한다. README의 "omp 브릿지 기본 꺼짐" 고지와 같아야 한다. 연결 오류를 표시하며, omp 재실행/확장 재로드·기존 역할 모델 선택이 필요할 수 있음을 알린다. 설정 완료와 실요청 경유 관측은 별개다.
 - Windows도 감지된 omp를 같은 동의·연결 흐름으로 지원한다(`ompSupported: true`). Windows·Unix 명령 확인의 범위는 각각의 언어로 안내한다.

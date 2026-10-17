@@ -1,11 +1,23 @@
 import { spawnSync } from 'node:child_process';
-import { existsSync, mkdirSync, copyFileSync, writeFileSync } from 'node:fs';
+import { existsSync, mkdirSync, copyFileSync, writeFileSync, readFileSync } from 'node:fs';
 import { homedir } from 'node:os';
 import { resolve, dirname, delimiter } from 'node:path';
 import { fileURLToPath } from 'node:url';
+import { createHash } from 'node:crypto';
 const root = resolve(dirname(fileURLToPath(import.meta.url)), '..');
 const windows = process.platform === 'win32';
 const exe = windows ? '.exe' : '';
+const verification = process.argv.slice(2);
+const verifyBuild = verification.length === 1 && verification[0] === '--verify-build';
+if (verification.length && !verifyBuild) throw new Error('Unsupported build option.');
+if (verifyBuild && process.env.GITHUB_ACTIONS === 'true'
+    && (!['push', 'pull_request'].includes(process.env.GITHUB_EVENT_NAME)
+      || !/^(refs\/heads\/|refs\/pull\/)/.test(process.env.GITHUB_REF ?? ''))) {
+  throw new Error('Unsigned verification is allowed only on branch/PR CI, never release tags.');
+}
+if (verifyBuild && (process.env.TAURI_SIGNING_PRIVATE_KEY || process.env.TAURI_SIGNING_PRIVATE_KEY_PATH)) {
+  throw new Error('Verification builds must not receive release signing keys.');
+}
 const cargo = existsSync(resolve(homedir(), `.cargo/bin/cargo${exe}`)) ? resolve(homedir(), `.cargo/bin/cargo${exe}`) : 'cargo';
 function run(cmd, args, cwd = root) {
   // Windows의 .cmd 실행에는 셸이 필요하다. 인수는 이 스크립트가 만든 고정값뿐이다.
@@ -25,12 +37,32 @@ mkdirSync(resolve(native, 'binaries'), { recursive: true });
 for (const name of ['aam', 'aam-service']) copyFileSync(resolve(root, 'target/release', `${name}${exe}`), resolve(native, 'binaries', `${name}-${triple}${exe}`));
 // NSIS needs the new helper before replacing an older installation, and verifies both installed sidecars against this payload.
 if (windows) for (const name of ['aam', 'aam-service']) copyFileSync(resolve(root, 'target/release', `${name}.exe`), resolve(native, 'binaries', `installer-${name}.exe`));
+// Keep the exact service image and matching PDB outside the installer payload.
+// WER dumps are private runtime data and are never included here.
+if (windows) {
+  const appVersion = JSON.parse(readFileSync(resolve(root, 'package.json'), 'utf8')).version;
+  const symbols = resolve(root, 'target/symbols', appVersion);
+  mkdirSync(symbols, { recursive: true });
+  const checksums = [];
+  for (const file of ['aam-service.exe', 'aam_service.pdb']) {
+    const source = resolve(root, 'target/release', file);
+    const bytes = readFileSync(source);
+    const hash = createHash('sha256').update(bytes).digest('hex');
+    const destination = resolve(symbols, file);
+    if (existsSync(destination) && createHash('sha256').update(readFileSync(destination)).digest('hex') !== hash) {
+      throw new Error(`Refusing to replace different ${appVersion} service symbols; bump the version first.`);
+    }
+    copyFileSync(source, destination);
+    checksums.push(`${hash}  ${file}`);
+  }
+  writeFileSync(resolve(symbols, 'SHA256SUMS'), `${checksums.join('\n')}\n`);
+}
 const tauriArgs = ['build'];
 // createUpdaterArtifacts needs a private key that matches plugins.updater.pubkey.
 // Local builds omit the key, so skip updater archives instead of failing the app bundle.
-// GitHub Actions must sign. An empty key there must not publish an unsigned updater bundle.
+// Release builds must sign. Explicit branch/PR verification never creates updater artifacts.
 if (!process.env.TAURI_SIGNING_PRIVATE_KEY && !process.env.TAURI_SIGNING_PRIVATE_KEY_PATH) {
-  if (process.env.GITHUB_ACTIONS === 'true') {
+  if (process.env.GITHUB_ACTIONS === 'true' && !verifyBuild) {
     throw new Error('GitHub Actions builds require TAURI_SIGNING_PRIVATE_KEY so updater artifacts are signed. Refusing to skip them.');
   }
   // 인라인 JSON은 Windows .cmd 셸 인수에서 따옴표가 사라지므로 파일로 넘긴다.

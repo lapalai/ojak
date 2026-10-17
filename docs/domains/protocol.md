@@ -21,6 +21,7 @@
 - `call` (`lib.rs:458`): 4바이트 길이 prefix + JSON `RpcRequest` → `RpcResponse`
 - `read_frame`/`write_frame` (`lib.rs:435`, `lib.rs:449`)
 - Windows `call_for_process`는 요청을 보낼 **동일 pipe 연결**에서 현재 사용자와 기대 서버 PID를 검사한다. 호출자는 PID 재사용을 막도록 검증한 프로세스 핸들을 호출 완료까지 유지해야 한다. installer의 안전 승인·취소는 이 경로를 쓰며, RPC wire version·메서드·프레임 형식은 바꾸지 않는다.
+- `resetCredits.read({accountId,refresh?})`는 저장된 결과 또는 명시적 공급자 조회, `resetCredits.redeem({accountId,quoteId,creditId,requestId,confirmed})`는 확인된 한 번의 사용이다. 두 메서드만 RPC 읽기 제한 90초를 사용하며 나머지는 60초다. 전송 실패를 mutation 재시도 근거로 쓰지 않는다.
 
 ## 주요 엔티티
 `Account`, `Session`, `Snapshot`, `Policy`(기본값 `lib.rs:200-214`), `ProcessIdentity`(`lib.rs:218`), `LaunchIntent`, `LeaseGrant`, `Decision`, `ProjectRoute`, `ApiError`. `process_identity` 함수는 `src/process.rs:70` (macOS 전용).
@@ -29,10 +30,11 @@
 
 `Snapshot.quotaSummaries`는 서비스가 계산한 현재 계정 그룹별 한도 요약이다(`#[serde(default)]`, 구서비스에는 누락될 수 있음). 각 `AccountQuotaSummary`는 `accountIds`, `kind`(available/reserve/partial/resting/excluded/login/unknown), `until`, `models`, `label`, `rate`를 담는다. 실제 실행 입장 허용은 `route.explain`/`lease.acquire`가 판단한다. 화면은 누락된 요약을 자체 계산해 성공으로 대체하지 않는다.
 새 필드(모두 `#[serde(default)]`, `types.ts` 미러): `Account.credits`(`CreditsState`), `Account.extra_usage`(`ExtraUsageState`), `Policy.use_credits_after_limit`·`use_extra_usage_after_limit`(기본 false), `LeaseGrant.credits_fallback`·`extra_usage_fallback`, `AccountQuotaSummary.credits`·`extra_usage`와 `kind`의 `credits`/`extra`. 크레딧은 ChatGPT 크레딧 단위(금액 아님), 추가 사용량은 USD다. 둘을 섞지 않는다.
+- 초기화권은 `src/reset.rs`의 `ResetCredit`·`ResetInventory`·`ResetOperation`, 화면 미러는 `apps/desktop/src/resets.ts`다. 유료 `CreditsState`와 별개다. inventory의 `known/unknown/unsupported`와 nullable 수량을 구분하고, operation의 `preparing/submitted/unknown/succeeded/declined/resolved`를 그대로 유지한다. `resolved`는 이전 제안이 끝났다는 뜻이지 이 요청의 성공 증거가 아니다.
 
 ## 호환성
 - 새 필드는 `#[serde(default)]`로 추가한다. `ProjectRoute`는 `deny_unknown_fields`라 필드를 더 보내면 실패한다.
-- 타입을 바꾸면 `apps/desktop/src/types.ts`도 함께 고친다.
+- 타입을 바꾸면 `apps/desktop/src/types.ts`(초기화권은 `resets.ts`)도 함께 고친다.
 
 ## Screen Flow / Lifecycle
 <!-- screen-flows-v3: 2026-09-27, type=library -->

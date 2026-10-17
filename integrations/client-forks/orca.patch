@@ -1,0 +1,2831 @@
+diff --git a/docs/site/content/docs/model/agents-sessions.mdx b/docs/site/content/docs/model/agents-sessions.mdx
+index afa049bc..4c58f384 100644
+--- a/docs/site/content/docs/model/agents-sessions.mdx
++++ b/docs/site/content/docs/model/agents-sessions.mdx
+@@ -64,6 +64,56 @@ Orca launches every supported agent with its full-autonomy permission flag pre-a
+ 
+ If you want different defaults for an agent, open **Settings → Agents**, expand the agent's row, and edit its **launch arguments** — Orca remembers the override and applies it on every subsequent launch. A **Reset** button next to the field puts the shipped flag back if you want to revert.
+ 
++## Ojak-managed omp launches
++
++When the local omp configuration contains a verified Ojak-owned accounts extension, Orca
++checks Ojak admission **before creating the terminal or structured agent process**. Both
++omp ACP chats and Pi RPC launches configured to use omp share the terminal launch queue.
++Other agents, unmanaged omp configurations, SSH execution, WSL, and reattaching an existing
++process do not use the client's Ojak gate.
++
++This source fork is version `1.5.0-ojak.1` and supports the coupled omp
++`18.12.0-ojak.1` ACP client explicitly. Other prerelease omp builds remain unsupported;
++the existing stable-release compatibility rule is unchanged.
++
++During resource pressure or a temporary Ojak service outage, the pane shows a waiting notice.
++Terminal launch selections and prompts remain in Orca's existing host journal; structured
++messages remain in their conversation journal and durable draft queue. Credentials, child
++environments, and executable command lines are not saved in the admission queue. **Cancel**
++stops an unsent launch. **Copy saved input** copies available launch text; **Dismiss** removes
++a cancelled or failed entry. **Other saved Ojak launches** exposes entries outside this pane.
++
++Capacity returning resumes waiting launches automatically, one local startup at a time, with
++at least two seconds between startups. Readiness is a sample, not a reservation: Ojak still
++owns actual model admission. A 503 admission-control response waits only when it explicitly
++proves rejection before submission. Authentication, other HTTP errors, invalid responses, and
++journal failures stop the launch visibly instead of being treated as resource pressure. The queue holds at most
++32 saved launches and 4 MiB of serialized intent. A full queue refuses additional launches;
++keep the original draft and cancel/dismiss an unsent entry before trying again.
++
++After shutdown or a crash, Orca automatically reconstructs saved **queued, unsent** launches
++whose original local workspace and pane still exist. It re-reads current commands, permissions,
++environment and credentials rather than executing saved shell text. Structured recovery resumes
++the existing durable message queue; it does not append a duplicate user message or a continuation
++prompt. A normal shutdown suspends waits without cancelling their accepted intent; an explicit
++Cancel remains cancelled after reopening.
++
++A first structured launch may have a saved workspace tab before its provider-visible index
++exists. Recovery checks that persisted tab and reuses the reserved session and tab identities
++when no provider conversation was created. It does not require another Create or Send.
++The waiting notice sits above the chat so the original input draft remains accessible.
++
++Closed or missing owners are never recreated automatically. Select a valid local workspace and
++use **Resume in this workspace** for an orphaned terminal launch. A saved structured chat resumes
++in its original workspace, preserving its conversation identity; a deleted workspace must be
++restored before that chat can resume. Older saved entries without recovery selections remain
++available for copying and cancellation, not command replay.
++
++A launch marked **submitted** is never automatically replayed, including a recovered terminal
++whose process started but whose initial prompt delivery is unconfirmed. Existing terminal
++ownership and structured-session recovery still decide whether a process is live, unverifiable,
++or exited; admission never overrides that decision.
++
+ ## Restart chip
+ 
+ When an agent exits (clean or crash), the tab shows a **Restart** chip. One click rehydrates the same agent with the same working directory. Codex's restart chip also preserves the current account (see [Hot-swap Codex accounts](/docs/agents/codex-hot-swap)).
+diff --git a/package.json b/package.json
+index ae91aafa..79048779 100644
+--- a/package.json
++++ b/package.json
+@@ -1,6 +1,6 @@
+ {
+   "name": "orca",
+-  "version": "1.4.227",
++  "version": "1.5.0-ojak.2",
+   "description": "Next-gen IDE for parallel agentic development",
+   "homepage": "https://github.com/stablyai/orca",
+   "author": "stablyai",
+diff --git a/src/main/acp/acp-launch-specs.ts b/src/main/acp/acp-launch-specs.ts
+index 3f814ada..0e1c9254 100644
+--- a/src/main/acp/acp-launch-specs.ts
++++ b/src/main/acp/acp-launch-specs.ts
+@@ -183,8 +183,9 @@ const OMP_LAUNCH_SPEC: AcpLaunchSpec = {
+   ),
+   // OMP's installers use directories the shared resolver already searches after PATH.
+   installDirectories: () => [],
+-  // Stable releases from 17.0.5, the release verified to serve `omp acp`.
+-  supportsVersion: (version) => isStableCliVersionFrom(version, '17.0.5'),
++  // Stable releases from 17.0.5, plus the coupled Ojak fork whose ACP contract is verified here.
++  supportsVersion: (version) =>
++    version === '18.12.0-ojak.1' || isStableCliVersionFrom(version, '17.0.5'),
+   // `omp models --json` lists every model without the `enabledModels` filter a chat applies, so it
+   // could offer models a chat refuses; its chats' own listings fill the catalog instead.
+   modelDiscovery: {
+diff --git a/src/main/acp/acp-structured-acquire.ts b/src/main/acp/acp-structured-acquire.ts
+index 926a8362..3b158a66 100644
+--- a/src/main/acp/acp-structured-acquire.ts
++++ b/src/main/acp/acp-structured-acquire.ts
+@@ -39,6 +39,7 @@ import type { AcpStructuredSessionAdapterDeps } from './acp-structured-session-a
+ import { AcpStructuredTurns, type AcpStructuredTurnsDeps } from './acp-structured-turns'
+ import { RequestPermissionResponseSchema } from './generated/acp-protocol.generated'
+ import { createStructuredAgentSessionLogger } from '../native-chat/agent-session-wire/structured-agent-session-logger'
++import type { OjakLaunchTicket } from '../agent-launch/ojak-launch-queue'
+ 
+ /** Frames an agent may send before its session exists; past this they are dropped. */
+ const MAX_EARLY_FRAMES = 2_048
+@@ -60,29 +61,39 @@ export async function acquireAcpStructuredSession(input: {
+   onSettled: AcpStructuredTurnsDeps['settle']
+   forceClose: (sessionId: string) => void
+ }): Promise<{ acquisition: AgentSessionAcquisition; session: AcpStructuredSession }> {
+-  const { acquire, deps, generation } = input
+-  const { spec } = deps
+-  const sessionId = acquire.identity.sessionId
+-  const now = deps.now ?? Date.now
+-  const events = acquire.events
+-  const sink = events ? providerTimelineSink(events) : null
+-  if (!sink) {
+-    throw new AgentSessionPreSpawnError(new Error(`${spec.agent} chats need a journal sink`))
+-  }
+-  const closedBeforeSpawn = () => {
+-    if (input.abandoned()) {
+-      throw new AgentSessionPreSpawnError(
+-        new Error(`${acpAgentName(spec.agent)} was closed before it started`)
+-      )
+-    }
+-  }
+-  closedBeforeSpawn()
++  if (input.abandoned()) throw new AgentSessionPreSpawnError(new Error('Closed before launch'))
++  const { acquire, deps } = input
+   const launch: AcpStructuredLaunch = await deps
+     .resolveLaunch({ identity: acquire.identity, spawnToken: acquire.spawnToken })
+     .catch((error: unknown) => {
+       throw new AgentSessionPreSpawnError(error)
+     })
+-  closedBeforeSpawn()
++  let admission: OjakLaunchTicket | null | undefined
++  try {
++    try {
++      admission = await deps.acquireLaunchAdmission?.(acquire, launch)
++    } catch (error) {
++      throw new AgentSessionPreSpawnError(error)
++    }
++    return await acquireAdmittedAcpStructuredSession(input, launch, admission)
++  } finally {
++    admission?.release()
++  }
++}
++
++async function acquireAdmittedAcpStructuredSession(
++  input: Parameters<typeof acquireAcpStructuredSession>[0],
++  launch: AcpStructuredLaunch,
++  admission: OjakLaunchTicket | null | undefined
++): Promise<{ acquisition: AgentSessionAcquisition; session: AcpStructuredSession }> {
++  const { acquire, deps, generation } = input
++  const { spec } = deps
++  const sessionId = acquire.identity.sessionId
++  const now = deps.now ?? Date.now
++  const sink = acquire.events ? providerTimelineSink(acquire.events) : null
++  if (!sink || input.abandoned() || admission?.signal.aborted) {
++    throw new AgentSessionPreSpawnError(new Error('Closed before launch or journal unavailable'))
++  }
+   let session: AcpStructuredSession | null = null
+   // A slot rather than a `let`: closures read it, and control-flow narrowing cannot see them write.
+   const slot: { lane: AcpStructuredLane | null; reattaching: boolean } = {
+@@ -108,6 +119,11 @@ export async function acquireAcpStructuredSession(input: {
+       early.push(deliver)
+     }
+   }
++  try {
++    admission?.submitted()
++  } catch (error) {
++    throw new AgentSessionPreSpawnError(error)
++  }
+   const connection = deps.connect(
+     {
+       command: launch.command,
+@@ -212,6 +228,7 @@ export async function acquireAcpStructuredSession(input: {
+     )
+   }
+   await identity.onSpawned(pid)
++  admission?.committed()
+   const agentName = acpAgentName(spec.agent)
+   try {
+     const initialized = await connection.initialize()
+@@ -292,7 +309,7 @@ export async function acquireAcpStructuredSession(input: {
+       exitObservedAt: null
+     }
+     const reading = liveLane
+-    const unbind = events?.bindReadingControl?.({
++    const unbind = acquire.events?.bindReadingControl?.({
+       pauseReading: () => connection.pauseReading(),
+       resumeReading: () => {
+         connection.resumeReading()
+diff --git a/src/main/acp/acp-structured-launch-resolution-omp.test.ts b/src/main/acp/acp-structured-launch-resolution-omp.test.ts
+index c432ef13..93fad174 100644
+--- a/src/main/acp/acp-structured-launch-resolution-omp.test.ts
++++ b/src/main/acp/acp-structured-launch-resolution-omp.test.ts
+@@ -96,14 +96,14 @@ describe('OMP ACP launch resolution', () => {
+     ).rejects.toThrow(/pin PI_CODING_AGENT_DIR/)
+   })
+ 
+-  it.each(['17.0.5', '17.2.12', '18.4.5'])('admits OMP %s', async (version) => {
++  it.each(['17.0.5', '18.12.0-ojak.1'])('admits OMP %s', async (version) => {
+     const launch = resolver(ompRecord(), {
+       probeVersion: async (_input, supports) => supports(version)
+     })
+     await expect(launch({ identity })).resolves.toMatchObject({ args: ['acp'] })
+   })
+ 
+-  it.each(['17.0.4', '16.9.0', '18.0.0-beta.1'])(
++  it.each(['17.0.4', '18.0.0-beta.1', '18.12.0-ojak.2'])(
+     'refuses OMP %s before spawning it, as a host that cannot run the chat',
+     async (version) => {
+       const launch = resolver(ompRecord(), {
+diff --git a/src/main/acp/acp-structured-session-adapter-deps.ts b/src/main/acp/acp-structured-session-adapter-deps.ts
+index 64f4d120..77afbbab 100644
+--- a/src/main/acp/acp-structured-session-adapter-deps.ts
++++ b/src/main/acp/acp-structured-session-adapter-deps.ts
+@@ -10,6 +10,7 @@ import type { AcpLaunchSpec } from './acp-launch-specs'
+ import type { ConnectAcpAgent } from './acp-structured-connection'
+ import type { AcpStructuredLaunch } from './acp-structured-launch-resolution'
+ import type { AgentChildWorkEvidence } from '../../shared/agent-status-child-work-evidence'
++import type { StructuredLaunchAdmission } from '../agent-launch/ojak-structured-launch'
+ 
+ /** How long a Stop, counted from its cancel, lets the agent end its turn before the child goes. */
+ export const ACP_STOP_GRACE_MS = 4_000
+@@ -25,6 +26,7 @@ export type AcpStructuredSessionAdapterDeps = {
+   }) => Promise<AcpStructuredLaunch>
+   /** The same launch for a read that starts no child (restart recovery): the agent's env, unsealed. */
+   readLaunch: (identity: AgentSessionJournalIdentity) => Promise<AcpStructuredLaunch>
++  acquireLaunchAdmission?: StructuredLaunchAdmission
+   /** The chat's journal as it stands, read without opening it; null when it has none. */
+   readJournal?: (sessionId: string) => JournalLoad | null
+   /** Starts the agent's process and owns its protocol: `createAcpAgentConnection` in production. */
+diff --git a/src/main/acp/acp-structured-session-adapter.test.ts b/src/main/acp/acp-structured-session-adapter.test.ts
+index 291dfe00..2d38f5a2 100644
+--- a/src/main/acp/acp-structured-session-adapter.test.ts
++++ b/src/main/acp/acp-structured-session-adapter.test.ts
+@@ -11,6 +11,7 @@ import {
+ } from '../native-chat/agent-session-wire/structured-agent-session-adapter'
+ import { GENERIC_ACP_DIALECT } from './acp-dialects/acp-dialect'
+ import { STRUCTURED_CHILD_ENV_TO_DELETE } from '../runtime/structured-session-child-env'
++import { acpLaunchSpecFor } from './acp-launch-specs'
+ import { AGENT_HOOK_RUNTIME_ENV_KEYS } from '../ipc/pty/host-env/spawn-env-keys'
+ import {
+   GROK,
+@@ -23,6 +24,7 @@ import {
+ import type { AgentJournalMessageItem } from '../../shared/agent-session-journal-types'
+ import { createAcpStructuredLaunchResolver } from '../runtime/structured-agent-launch-composition.test-support'
+ import { agentSessionRecordFixture } from '../native-chat/agent-session-record-test-fixture'
++import type { OjakLaunchTicket } from '../agent-launch/ojak-launch-queue'
+ 
+ afterEach(async () => {
+   await closeProviderTimelineRigs()
+@@ -47,6 +49,62 @@ function chunk(promptId: string, text: string) {
+ }
+ 
+ describe('ACP structured session adapter: acquire', () => {
++  it('keeps omp behind admission and records submission before connecting', async () => {
++    const gate = Promise.withResolvers<OjakLaunchTicket | null>()
++    const entered = Promise.withResolvers<void>()
++    const rig = await openAcpAdapterRig({
++      spec: acpLaunchSpecFor('omp')!,
++      deps: { acquireLaunchAdmission: () => { entered.resolve(); return gate.promise } }
++    })
++    const acquire = rig.acquire()
++    await entered.promise
++    expect(rig.spawned).toEqual([])
++    gate.resolve({
++      signal: new AbortController().signal,
++      submitted: () => { rig.spawned.push('submitted') },
++      committed: () => { rig.spawned.push('committed') },
++      release: () => { rig.spawned.push('released') }
++    })
++    await acquire
++    expect(rig.spawned).toEqual(['submitted', 'spawn', 'onSpawned', 'committed', 'initialize', 'released'])
++    await rig.adapter.closeAll()
++  })
++
++  it('does not connect omp when its acquisition is cancelled during admission', async () => {
++    const gate = Promise.withResolvers<OjakLaunchTicket | null>()
++    const entered = Promise.withResolvers<void>()
++    const rig = await openAcpAdapterRig({
++      spec: acpLaunchSpecFor('omp')!,
++      deps: { acquireLaunchAdmission: () => { entered.resolve(); return gate.promise } }
++    })
++    const stop = new AbortController()
++    const acquire = rig.acquire({ signal: stop.signal })
++    await entered.promise
++    const rejected = expect(acquire).rejects.toThrow(/closed|Closed/)
++    stop.abort()
++    gate.resolve(null)
++    await rejected
++    expect(rig.spawned).toEqual([])
++  })
++
++  it('does not create an omp child when the submission journal cannot commit', async () => {
++    let released = false
++    const rig = await openAcpAdapterRig({
++      spec: acpLaunchSpecFor('omp')!,
++      deps: {
++        acquireLaunchAdmission: async () => ({
++          signal: new AbortController().signal,
++          submitted: () => { throw new Error('journal write failed') },
++          committed: () => { throw new Error('unexpected process commit') },
++          release: () => { released = true }
++        })
++      }
++    })
++    await expect(rig.acquire()).rejects.toThrow('journal write failed')
++    expect(rig.spawned).toEqual([])
++    expect(released).toBe(true)
++  })
++
+   it('records the child before the handshake and starts a new session with client fs and terminals off', async () => {
+     const rig = await openAcpAdapterRig()
+     const acquired = await rig.acquire()
+diff --git a/src/main/acp/acp-structured-session-adapter.ts b/src/main/acp/acp-structured-session-adapter.ts
+index d1911c3c..23ef7fc8 100644
+--- a/src/main/acp/acp-structured-session-adapter.ts
++++ b/src/main/acp/acp-structured-session-adapter.ts
+@@ -85,7 +85,7 @@ export class AcpStructuredSessionAdapter implements StructuredAgentSessionAdapte
+     const generation = this.deps.mintGeneration?.() ?? randomUUID()
+     try {
+       const { acquisition, session } = await acquireAcpStructuredSession({
+-        acquire: input,
++        acquire: { ...input, signal: attempt.signal },
+         deps: this.deps,
+         generation,
+         abandoned: () => attempt.signal.aborted,
+diff --git a/src/main/agent-launch/agent-launch-executor.ts b/src/main/agent-launch/agent-launch-executor.ts
+index e153e34b..1362a467 100644
+--- a/src/main/agent-launch/agent-launch-executor.ts
++++ b/src/main/agent-launch/agent-launch-executor.ts
+@@ -67,12 +67,17 @@ import type {
+   AgentLaunchPublishedSurface,
+   AgentLaunchSurfaceExecution
+ } from './agent-launch-execution'
++import { ojakLaunchPrompt } from './ojak-launch-prompt'
+ 
+ export type { AgentLaunchExecution, AgentLaunchPublishedSurface } from './agent-launch-execution'
+ 
+ export async function executeAgentLaunch(
+   execution: AgentLaunchExecution
+ ): Promise<AgentLaunchResult> {
++  return ojakLaunchPrompt.run(execution.intent.prompt, () => executeWithSavedPrompt(execution))
++}
++
++async function executeWithSavedPrompt(execution: AgentLaunchExecution): Promise<AgentLaunchResult> {
+   const { intent, runtime } = execution
+   if (intent.reuseTerminal || intent.target.kind === 'create-worktree') {
+     assertOpenCodeModelLaunchPreferencesAbsent(intent.agent, intent.sessionOptions)
+diff --git a/src/main/agent-launch/ojak-launch-admission.ts b/src/main/agent-launch/ojak-launch-admission.ts
+new file mode 100644
+index 00000000..9f772f3a
+--- /dev/null
++++ b/src/main/agent-launch/ojak-launch-admission.ts
+@@ -0,0 +1,84 @@
++import { getProfileUserDataPath } from '../orca-profiles/profile-storage-paths'
++import { LOCAL_EXECUTION_HOST_ID } from '../../shared/execution-host'
++import type { OjakLaunchNotice, OjakLaunchOwner } from '../../shared/ojak-launch-admission'
++import { createStructuredAgentSessionLogger } from '../native-chat/agent-session-wire/structured-agent-session-logger'
++import type { JournalHostDatabase } from '../native-chat/agent-session-journal/journal-host-database'
++import { openAgentSessionRecordStoreOnce } from '../runtime/agent-session-record-store-slot'
++import { resolveOjakManagedLaunch } from './ojak-managed-launch'
++import { OjakLaunchJournal } from './ojak-launch-journal'
++import { OjakLaunchQueue, type OjakLaunchTicket } from './ojak-launch-queue'
++import { ojakLaunchPrompt, ojakRecoveryDispatch } from './ojak-launch-prompt'
++import type { OjakLaunchRecoveryIntent } from '../../shared/ojak-launch-recovery'
++
++let installed: { database: JournalHostDatabase; queue: OjakLaunchQueue } | undefined
++
++export async function ojakLaunchQueue(database?: JournalHostDatabase): Promise<OjakLaunchQueue> {
++  const journal = database ?? (await openAgentSessionRecordStoreOnce({
++    stateDirectory: getProfileUserDataPath(),
++    hostId: LOCAL_EXECUTION_HOST_ID,
++    logger: createStructuredAgentSessionLogger()
++  })).journalDatabase
++  if (installed?.database !== journal) {
++    installed?.queue.suspend()
++    installed = { database: journal, queue: new OjakLaunchQueue(new OjakLaunchJournal(journal)) }
++  }
++  return installed.queue
++}
++
++export function stopOjakLaunchWaiting(): void {
++  installed?.queue.suspend()
++}
++
++export async function acquireOjakLaunch(input: {
++  agent?: string
++  command?: string
++  env: NodeJS.ProcessEnv
++  local: boolean
++  key: string
++  owner: OjakLaunchOwner
++  savedCommand?: string
++  signal?: AbortSignal
++  savedPrompt?: string
++  recovery?: OjakLaunchRecoveryIntent
++  database?: JournalHostDatabase
++}): Promise<OjakLaunchTicket | null> {
++  const managed = await resolveOjakManagedLaunch(input)
++  if (!managed) {
++    if (installed?.queue.notices().some((row) => row.key === input.key)) {
++      throw new Error('This pane has a saved Ojak launch. Use its waiting or recovery controls before starting another process.')
++    }
++    return null
++  }
++  const queue = await ojakLaunchQueue(input.database)
++  const retainInput = ojakRecoveryDispatch.getStore()
++  const notice: OjakLaunchNotice = {
++    key: input.key,
++    owner: input.owner,
++    phase: 'queued',
++    message: 'Waiting for Ojak admission. Input is saved; no agent has started.',
++    ...(input.savedCommand ? { savedCommand: input.savedCommand } : {}),
++    ...(input.recovery ? { recovery: input.recovery } : {}),
++    ...(retainInput ? { deliveryPending: true } : {}),
++    ...(input.savedPrompt || ojakLaunchPrompt.getStore()?.text
++      ? { savedPrompt: input.savedPrompt || ojakLaunchPrompt.getStore()?.text } : {})
++  }
++  const ticket = await queue.acquire(notice, managed, input.signal)
++  return retainInput ? { ...ticket, committed: () => ticket.committed(true) } : ticket
++}
++
++export async function settleOjakTerminalLaunch(worktreeId: string | undefined, paneKey: string | undefined): Promise<void> {
++  if (!worktreeId || !paneKey || !installed) return
++  const key = `terminal:${worktreeId}:${paneKey}`
++  const journal = new OjakLaunchJournal(installed.database)
++  if (journal.list().some((row) => row.key === key && row.phase === 'submitted' && !row.deliveryPending)) journal.remove(key)
++}
++
++export function cancelOjakTerminalLaunches(worktreeId: string, tabId: string, paneKey?: string): void {
++  if (!installed) return
++  for (const notice of installed.queue.notices()) {
++    if (notice.owner.kind === 'terminal' && notice.owner.worktreeId === worktreeId &&
++      notice.owner.tabId === tabId && (!paneKey || notice.owner.paneKey === paneKey)) {
++      installed.queue.cancel(notice.key)
++    }
++  }
++}
+diff --git a/src/main/agent-launch/ojak-launch-journal.test.ts b/src/main/agent-launch/ojak-launch-journal.test.ts
+new file mode 100644
+index 00000000..f296565d
+--- /dev/null
++++ b/src/main/agent-launch/ojak-launch-journal.test.ts
+@@ -0,0 +1,63 @@
++import { mkdtempSync, rmSync } from 'node:fs'
++import { tmpdir } from 'node:os'
++import { join } from 'node:path'
++import { afterEach, describe, expect, it } from 'vitest'
++import { JournalHostDatabase } from '../native-chat/agent-session-journal/journal-host-database'
++import { OjakLaunchJournal, OJAK_LAUNCH_BYTES, OJAK_LAUNCH_LIMIT } from './ojak-launch-journal'
++import type { OjakLaunchNotice } from '../../shared/ojak-launch-admission'
++
++const databases: JournalHostDatabase[] = []
++const directories: string[] = []
++afterEach(() => {
++  for (const database of databases.splice(0)) database.close()
++  for (const directory of directories.splice(0)) rmSync(directory, { recursive: true, force: true })
++})
++function open(directory?: string) {
++  const path = directory ?? mkdtempSync(join(tmpdir(), 'orca-ojak-journal-'))
++  if (!directory) directories.push(path)
++  const database = JournalHostDatabase.open(path)
++  databases.push(database)
++  return { database, journal: new OjakLaunchJournal(database), path }
++}
++function notice(key: string): OjakLaunchNotice {
++  return { key, owner: { kind: 'terminal', worktreeId: 'folder-1' }, phase: 'queued',
++    message: 'Waiting', savedCommand: 'omp', savedPrompt: `draft-${key}` }
++}
++
++describe('Ojak intent in the host journal', () => {
++  it('retains queued and uncertain intent after reopening without changing other host metadata', () => {
++    const h = open()
++    h.database.db.prepare('INSERT INTO agent_session_store_meta (key, value) VALUES (?, ?)').run('other', 'kept')
++    h.journal.save(notice('queued'))
++    h.journal.save({ ...notice('uncertain'), phase: 'submitted' })
++    h.database.close()
++    const reopened = open(h.path)
++    expect(reopened.journal.list()).toEqual(expect.arrayContaining([
++      expect.objectContaining({ key: 'queued', phase: 'queued', savedPrompt: 'draft-queued' }),
++      expect.objectContaining({ key: 'uncertain', phase: 'submitted', savedPrompt: 'draft-uncertain' })
++    ]))
++    reopened.journal.remove('queued')
++    expect(reopened.journal.list().map((row) => row.key)).toEqual(['uncertain'])
++    expect(reopened.database.db.prepare('SELECT value FROM agent_session_store_meta WHERE key = ?').get('other'))
++      .toEqual({ value: 'kept' })
++  })
++
++  it('enforces the count cap transactionally while allowing cancellation at capacity', () => {
++    const { journal } = open()
++    for (let index = 0; index < OJAK_LAUNCH_LIMIT; index++) journal.save(notice(String(index)))
++    expect(() => journal.save(notice('overflow'))).toThrow(/full/)
++    journal.save({ ...notice('0'), phase: 'cancelled' })
++    expect(journal.list().find((row) => row.key === '0')).toMatchObject({ phase: 'cancelled', savedPrompt: 'draft-0' })
++    expect(journal.list().some((row) => row.key === 'overflow')).toBe(false)
++    journal.remove('0')
++    journal.save(notice('replacement'))
++    expect(journal.list().find((row) => row.key === 'replacement')?.savedPrompt).toBe('draft-replacement')
++  })
++
++  it('counts UTF-8 bytes and preserves prior input after an oversized replacement', () => {
++    const { journal } = open()
++    journal.save(notice('a'))
++    expect(() => journal.save({ ...notice('a'), savedPrompt: '界'.repeat(Math.ceil(OJAK_LAUNCH_BYTES / 3)) })).toThrow(/4 MiB/)
++    expect(journal.list()).toEqual([notice('a')])
++  })
++})
+diff --git a/src/main/agent-launch/ojak-launch-journal.ts b/src/main/agent-launch/ojak-launch-journal.ts
+new file mode 100644
+index 00000000..a36517e4
+--- /dev/null
++++ b/src/main/agent-launch/ojak-launch-journal.ts
+@@ -0,0 +1,63 @@
++import { z } from 'zod'
++import type { OjakLaunchNotice } from '../../shared/ojak-launch-admission'
++import type { JournalHostDatabase } from '../native-chat/agent-session-journal/journal-host-database'
++import { ojakLaunchRecoverySchema } from '../../shared/ojak-launch-recovery'
++
++const PREFIX = 'ojak-launch:'
++export const OJAK_LAUNCH_LIMIT = 32
++export const OJAK_LAUNCH_BYTES = 4 * 1024 * 1024
++const noticeSchema = z.object({
++  key: z.string(),
++  owner: z.object({
++    kind: z.enum(['terminal', 'structured']),
++    worktreeId: z.string(),
++    tabId: z.string().optional(),
++    paneKey: z.string().optional(),
++    sessionId: z.string().optional()
++  }),
++  phase: z.enum(['queued', 'submitted', 'cancelled', 'failed']),
++  message: z.string(),
++  savedCommand: z.string().optional(),
++  savedPrompt: z.string().optional(),
++  deliveryPending: z.boolean().optional(),
++  recovery: ojakLaunchRecoverySchema.optional()
++})
++
++/** Uses the existing host journal connection and transaction boundary, not a second file/store. */
++export class OjakLaunchJournal {
++  constructor(private readonly database: JournalHostDatabase) {}
++
++  list(): OjakLaunchNotice[] {
++    return this.database.db.prepare('SELECT value FROM agent_session_store_meta WHERE key LIKE ?')
++      .all(`${PREFIX}%`).map((row) => {
++        if (typeof row.value !== 'string') throw new Error('Ojak launch journal is unreadable')
++        return noticeSchema.parse(JSON.parse(row.value))
++      })
++  }
++
++  save(notice: OjakLaunchNotice, replacesKey?: string): void {
++    if (this.database.readOnly) throw new Error('The launch journal is read-only; no agent was launched.')
++    const value = JSON.stringify(noticeSchema.parse(notice))
++    this.database.transaction((db) => {
++      const rows = this.list()
++      if (replacesKey !== undefined && (rows.find((row) => row.key === replacesKey)?.phase !== 'queued' ||
++        rows.some((row) => row.key === notice.key))) throw new Error('Saved launch changed during recovery.')
++      const other = rows.filter((row) => row.key !== notice.key && row.key !== replacesKey)
++      // Refused/cancelled intents stay available for copying, but never run on recovery.
++      const bytes = other.reduce((sum, row) => sum + Buffer.byteLength(JSON.stringify(row)), 0)
++      if (other.length >= OJAK_LAUNCH_LIMIT || bytes + Buffer.byteLength(value) > OJAK_LAUNCH_BYTES) {
++        throw new Error('Ojak launch queue is full (32 saved launches / 4 MiB). Cancel and dismiss an unsent launch before trying again; keep your original draft.')
++      }
++      if (replacesKey !== undefined) db.prepare('DELETE FROM agent_session_store_meta WHERE key = ?').run(`${PREFIX}${replacesKey}`)
++      db.prepare('INSERT OR REPLACE INTO agent_session_store_meta (key, value) VALUES (?, ?)')
++        .run(`${PREFIX}${notice.key}`, value)
++    })
++  }
++
++  remove(key: string): void {
++    if (this.database.readOnly) throw new Error('The launch journal is read-only.')
++    this.database.transaction((db) => {
++      db.prepare('DELETE FROM agent_session_store_meta WHERE key = ?').run(`${PREFIX}${key}`)
++    })
++  }
++}
+diff --git a/src/main/agent-launch/ojak-launch-prompt.ts b/src/main/agent-launch/ojak-launch-prompt.ts
+new file mode 100644
+index 00000000..ff97bf50
+--- /dev/null
++++ b/src/main/agent-launch/ojak-launch-prompt.ts
+@@ -0,0 +1,8 @@
++import { AsyncLocalStorage } from 'node:async_hooks'
++import type { OjakLaunchPrompt } from '../../shared/ojak-launch-recovery'
++
++/** Launch text not yet handed to a surface remains available to the pre-spawn journal. */
++export const ojakLaunchPrompt = new AsyncLocalStorage<OjakLaunchPrompt | undefined>()
++
++/** Recovered terminal input stays behind the dispatch fence until its one delivery settles. */
++export const ojakRecoveryDispatch = new AsyncLocalStorage<boolean>()
+diff --git a/src/main/agent-launch/ojak-launch-queue.test.ts b/src/main/agent-launch/ojak-launch-queue.test.ts
+new file mode 100644
+index 00000000..10c35f5b
+--- /dev/null
++++ b/src/main/agent-launch/ojak-launch-queue.test.ts
+@@ -0,0 +1,164 @@
++import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
++import type { OjakLaunchNotice } from '../../shared/ojak-launch-admission'
++import { OjakLaunchQueue, type OjakLaunchTicket } from './ojak-launch-queue'
++import type { OjakAdmissionSample } from './ojak-managed-launch'
++import { OJAK_LAUNCH_LIMIT } from './ojak-launch-journal'
++
++const managed = { tokenPath: '/unused/bridge.token' }
++const ready = { ready: true, reason: 'ready', pollAfterMs: 500 }
++const pressure = { ready: false, reason: 'resource_pressure', pollAfterMs: 500 }
++function notice(key: string): OjakLaunchNotice {
++  return { key, owner: { kind: 'terminal', worktreeId: 'folder-1', tabId: key },
++    phase: 'queued', message: 'Waiting', savedCommand: 'omp', savedPrompt: `input-${key}` }
++}
++function journal() {
++  const rows = new Map<string, OjakLaunchNotice>()
++  return { rows, list: () => [...rows.values()],
++    save: (value: OjakLaunchNotice) => { rows.set(value.key, value) },
++    remove: (key: string) => { rows.delete(key) } }
++}
++const queues: OjakLaunchQueue[] = []
++const tickets: OjakLaunchTicket[] = []
++beforeEach(() => vi.useFakeTimers())
++afterEach(async () => {
++  for (const queue of queues.splice(0)) queue.cancelAll()
++  for (const ticket of tickets.splice(0)) ticket.release()
++  await vi.runAllTimersAsync()
++  vi.useRealTimers()
++})
++function queue(store = journal(), sample = vi.fn(async (): Promise<OjakAdmissionSample> => ready)) {
++  const result = new OjakLaunchQueue(store, sample)
++  queues.push(result)
++  return { queue: result, store, sample }
++}
++async function admitted(promise: Promise<OjakLaunchTicket>): Promise<OjakLaunchTicket> {
++  await vi.advanceTimersByTimeAsync(0)
++  const ticket = await promise
++  tickets.push(ticket)
++  return ticket
++}
++
++describe('Ojak pre-process admission', () => {
++  it('persists input before polling and starts only after pressure clears', async () => {
++    const h = queue()
++    h.sample.mockResolvedValue(pressure)
++    const granted = vi.fn()
++    const pending = h.queue.acquire(notice('a'), managed).then((ticket) => { granted(); return ticket })
++    expect(h.store.rows.get('a')).toMatchObject({ phase: 'queued', savedPrompt: 'input-a' })
++    await vi.advanceTimersByTimeAsync(2_000)
++    expect(granted).not.toHaveBeenCalled()
++    h.sample.mockResolvedValue(ready)
++    await vi.advanceTimersByTimeAsync(500)
++    const ticket = await admitted(pending)
++    ticket.submitted()
++    expect(h.store.rows.get('a')?.phase).toBe('submitted')
++    ticket.committed()
++    expect(h.store.rows.has('a')).toBe(false)
++    ticket.release()
++  })
++
++  it('serializes terminal and structured starts and samples again after the spacing window', async () => {
++    const h = queue()
++    const first = await admitted(h.queue.acquire(notice('a'), managed))
++    const next = h.queue.acquire({ ...notice('b'), owner: { kind: 'structured', worktreeId: 'folder-1', sessionId: 'b' } }, managed)
++    await vi.advanceTimersByTimeAsync(5_000)
++    expect(h.sample).toHaveBeenCalledTimes(1)
++    first.submitted()
++    first.committed()
++    first.release()
++    await vi.advanceTimersByTimeAsync(1_999)
++    expect(h.sample).toHaveBeenCalledTimes(1)
++    await vi.advanceTimersByTimeAsync(1)
++    const second = await admitted(next)
++    expect(h.sample).toHaveBeenCalledTimes(2)
++    second.submitted()
++    second.committed()
++    second.release()
++  })
++
++  it('cancels both the active poll and an unsampled tail without discarding their inputs', async () => {
++    const h = queue()
++    h.sample.mockResolvedValue(pressure)
++    const first = h.queue.acquire(notice('a'), managed).catch((error: unknown) => error)
++    const second = h.queue.acquire(notice('b'), managed).catch((error: unknown) => error)
++    await vi.advanceTimersByTimeAsync(0)
++    expect(h.queue.cancel('b')).toBe(true)
++    expect(h.queue.cancel('a')).toBe(true)
++    await vi.advanceTimersByTimeAsync(0)
++    expect(await first).toBeInstanceOf(Error)
++    expect(await second).toBeInstanceOf(Error)
++    expect(h.store.list()).toEqual(expect.arrayContaining([
++      expect.objectContaining({ key: 'a', phase: 'cancelled', savedPrompt: 'input-a' }),
++      expect.objectContaining({ key: 'b', phase: 'cancelled', savedPrompt: 'input-b' })
++    ]))
++    expect(h.sample).toHaveBeenCalledTimes(1)
++    expect(h.queue.dismiss('a')).toBe(true)
++  })
++
++  it('honors an acquisition abort without granting a late ready sample', async () => {
++    const response = Promise.withResolvers<OjakAdmissionSample>()
++    const h = queue(journal(), vi.fn(() => response.promise))
++    const stop = new AbortController()
++    const pending = h.queue.acquire(notice('a'), managed, stop.signal).catch((error: unknown) => error)
++    await vi.advanceTimersByTimeAsync(0)
++    stop.abort(new Error('lease closed'))
++    response.resolve(ready)
++    await vi.advanceTimersByTimeAsync(0)
++    expect(await pending).toMatchObject({ message: 'lease closed' })
++    expect(h.store.rows.get('a')?.phase).toBe('cancelled')
++  })
++
++  it('reacquires only identical unsent intent after recovery and never a submitted launch', async () => {
++    const store = journal()
++    store.save(notice('a'))
++    const h = queue(store)
++    expect(() => h.queue.acquire({ ...notice('a'), savedPrompt: 'replacement' }, managed)).toThrow(/reconciliation/)
++    const ticket = await admitted(h.queue.acquire(notice('a'), managed))
++    ticket.submitted()
++    ticket.release(new Error('reply lost'))
++    const restarted = queue(store)
++    expect(() => restarted.queue.acquire(notice('a'), managed)).toThrow(/reconciliation/)
++    expect(restarted.queue.cancel('a')).toBe(false)
++    expect(restarted.queue.dismiss('a')).toBe(false)
++    expect(store.rows.get('a')).toMatchObject({ phase: 'submitted', savedPrompt: 'input-a' })
++  })
++
++  it('keeps recovered prompt uncertainty after the process ownership commit', async () => {
++    const h = queue()
++    const ticket = await admitted(h.queue.acquire({ ...notice('a'), deliveryPending: true }, managed))
++    ticket.submitted()
++    ticket.committed(true)
++    ticket.release()
++    expect(h.store.rows.get('a')).toMatchObject({
++      phase: 'submitted', deliveryPending: true, savedPrompt: 'input-a'
++    })
++    expect(() => h.queue.acquire(notice('a'), managed)).toThrow(/reconciliation/)
++    expect(h.queue.cancel('a')).toBe(false)
++    expect(h.queue.dismiss('a')).toBe(false)
++  })
++
++  it('refuses a full queue before replacing any accepted input', async () => {
++    const h = queue()
++    h.sample.mockResolvedValue(pressure)
++    const waiting = Array.from({ length: OJAK_LAUNCH_LIMIT }, (_, index) =>
++      h.queue.acquire(notice(String(index)), managed).catch((error: unknown) => error))
++    expect(() => h.queue.acquire(notice('overflow'), managed)).toThrow(/full/)
++    expect(h.store.rows.has('overflow')).toBe(false)
++    h.queue.cancelAll()
++    await vi.advanceTimersByTimeAsync(0)
++    await Promise.all(waiting)
++  })
++
++  it('fails closed when persistence or authenticated admission fails', async () => {
++    const h = queue()
++    const save = vi.spyOn(h.store, 'save').mockImplementationOnce(() => { throw new Error('disk full') })
++    expect(() => h.queue.acquire(notice('a'), managed)).toThrow('disk full')
++    expect(h.sample).not.toHaveBeenCalled()
++    save.mockRestore()
++    h.sample.mockRejectedValue(new Error('Ojak admission refused (401)'))
++    const pending = h.queue.acquire(notice('b'), managed).catch((error: unknown) => error)
++    await vi.advanceTimersByTimeAsync(0)
++    expect(await pending).toMatchObject({ message: 'Ojak admission refused (401)' })
++    expect(h.store.rows.get('b')).toMatchObject({ phase: 'failed', savedPrompt: 'input-b' })
++  })
++})
+diff --git a/src/main/agent-launch/ojak-launch-queue.ts b/src/main/agent-launch/ojak-launch-queue.ts
+new file mode 100644
+index 00000000..d2e4ac83
+--- /dev/null
++++ b/src/main/agent-launch/ojak-launch-queue.ts
+@@ -0,0 +1,214 @@
++import type { OjakLaunchNotice } from '../../shared/ojak-launch-admission'
++import { OJAK_LAUNCH_LIMIT } from './ojak-launch-journal'
++import { readOjakAdmission, type OjakManagedLaunch } from './ojak-managed-launch'
++
++export type OjakLaunchTicket = {
++  /** Durable before physical dispatch. A crash from here is never automatically retried. */
++  submitted(): void
++  /** Only after the existing ownership record/binding has committed. */
++  committed(retainInput?: boolean): void
++  release(error?: unknown): void
++  signal: AbortSignal
++}
++
++type Entry = {
++  notice: OjakLaunchNotice
++  managed: OjakManagedLaunch
++  stop: AbortController
++  signal: AbortSignal
++  resolve: (ticket: OjakLaunchTicket) => void
++  reject: (error: unknown) => void
++  cleanup: () => void
++  cancelled: boolean
++}
++
++export function waitOjakPoll(ms: number, signal: AbortSignal): Promise<void> {
++  signal.throwIfAborted()
++  return new Promise((resolve, reject) => {
++    const abort = (): void => {
++      clearTimeout(timer)
++      signal.removeEventListener('abort', abort)
++      reject(signal.reason)
++    }
++    const timer = setTimeout(() => {
++      signal.removeEventListener('abort', abort)
++      resolve()
++    }, ms)
++    timer.unref?.()
++    signal.addEventListener('abort', abort, { once: true })
++  })
++}
++
++/** One local startup at a time, shared by TUI and structured lanes. Ready is not a reservation. */
++export class OjakLaunchQueue {
++  private readonly pending: Entry[] = []
++  private active: Entry | null = null
++  private readonly entries = new Map<string, Entry>()
++  private nextStartAt = 0
++  private stopped = false
++
++  constructor(private readonly journal: {
++    list(): OjakLaunchNotice[]
++    save(notice: OjakLaunchNotice, replacesKey?: string): void
++    remove(key: string): void
++  }, private readonly sample = readOjakAdmission) {}
++
++  notices(): OjakLaunchNotice[] {
++    return this.journal.list().map((notice) => ({
++      ...notice,
++      waiting: this.entries.has(notice.key)
++    }))
++  }
++
++  isWaiting(key: string): boolean { return this.entries.has(key) }
++
++  isSuspended(): boolean { return this.stopped }
++
++  save(notice: OjakLaunchNotice): void { this.journal.save(notice) }
++
++  remove(key: string): void { this.journal.remove(key) }
++
++  retarget(key: string, notice: OjakLaunchNotice): void {
++    if (this.entries.has(key)) throw new Error('This launch is already waiting.')
++    this.journal.save(notice, key)
++  }
++
++  /** Quit/reconnect releases the waiter, not the user's accepted work. */
++  suspend(): void {
++    this.stopped = true
++    for (const entry of this.entries.values()) {
++      if (entry.notice.phase === 'queued') {
++        entry.stop.abort(new Error('Orca paused this unsent launch; it will resume after restart.'))
++      }
++    }
++  }
++
++  cancel(key: string): boolean {
++    const entry = this.entries.get(key)
++    if (entry && entry.notice.phase === 'queued') {
++      this.journal.save({ ...entry.notice, phase: 'cancelled', message: 'Ojak launch cancelled; saved input was not sent.' })
++      entry.cancelled = true
++      entry.stop.abort(new Error('Ojak launch cancelled; saved input was not sent.'))
++      return true
++    }
++    const notice = this.journal.list().find((row) => row.key === key)
++    if (!entry && notice?.phase === 'queued') {
++      this.journal.save({ ...notice, phase: 'cancelled', message: 'Ojak launch cancelled; saved input was not sent.' })
++      return true
++    }
++    return false
++  }
++
++  dismiss(key: string): boolean {
++    const notice = this.journal.list().find((row) => row.key === key)
++    if (!this.entries.has(key) && (notice?.phase === 'cancelled' || notice?.phase === 'failed')) {
++      this.journal.remove(key)
++      return true
++    }
++    return false
++  }
++
++  cancelAll(): void {
++    for (const entry of this.entries.values()) {
++      if (entry.notice.phase === 'queued') this.cancel(entry.notice.key)
++    }
++  }
++
++  acquire(notice: OjakLaunchNotice, managed: OjakManagedLaunch, signal?: AbortSignal): Promise<OjakLaunchTicket> {
++    signal?.throwIfAborted()
++    if (this.stopped) throw new Error('Ojak launch recovery is stopping.')
++    if (this.entries.has(notice.key)) throw new Error('This Ojak launch is already waiting.')
++    const saved = this.journal.list().find((row) => row.key === notice.key)
++    if (saved && (saved.phase !== 'queued' ||
++      (!saved.recovery && saved.savedCommand !== notice.savedCommand) ||
++      (notice.savedPrompt !== undefined && saved.savedPrompt !== notice.savedPrompt))) {
++      throw new Error('This Ojak launch needs reconciliation. Its saved input will not be launched again automatically.')
++    }
++    if (saved) notice = { ...saved, ...notice, savedPrompt: saved.savedPrompt,
++      recovery: notice.recovery?.kind === 'structured' ? notice.recovery : saved.recovery ?? notice.recovery }
++    if (this.entries.size >= OJAK_LAUNCH_LIMIT) throw new Error('Ojak launch queue is full. Cancel a waiting launch and keep your draft.')
++    this.journal.save(notice)
++    const stop = new AbortController()
++    const combined = signal ? AbortSignal.any([signal, stop.signal]) : stop.signal
++    return new Promise((resolve, reject) => {
++      const entry: Entry = { notice, managed, stop, signal: combined, resolve, reject, cleanup: () => {}, cancelled: false }
++      const abort = (): void => {
++        if (this.active === entry) return
++        const index = this.pending.indexOf(entry)
++        if (index >= 0) this.pending.splice(index, 1)
++        this.finish(entry, combined.reason)
++      }
++      entry.cleanup = () => combined.removeEventListener('abort', abort)
++      combined.addEventListener('abort', abort, { once: true })
++      this.entries.set(notice.key, entry)
++      this.pending.push(entry)
++      if (combined.aborted) abort()
++      this.pump()
++    })
++  }
++
++  private pump(): void {
++    if (this.active || this.stopped) return
++    const entry = this.pending.shift()
++    if (!entry) return
++    this.active = entry
++    void this.wait(entry).catch((error: unknown) => this.finish(entry, error))
++  }
++
++  private async wait(entry: Entry): Promise<void> {
++    await waitOjakPoll(Math.max(0, this.nextStartAt - Date.now()), entry.signal)
++    for (;;) {
++      entry.signal.throwIfAborted()
++      const sample = await this.sample(entry.managed, entry.signal)
++      entry.signal.throwIfAborted()
++      if (sample.ready) break
++      const message = sample.reason === 'service_unavailable'
++        ? 'Waiting for Ojak service. Input is saved; no agent has started.'
++        : `Waiting for Ojak capacity (${sample.reason}). Input is saved; no agent has started.`
++      if (entry.notice.message !== message) {
++        entry.notice = { ...entry.notice, message }
++        this.journal.save(entry.notice)
++      }
++      await waitOjakPoll(sample.pollAfterMs, entry.signal)
++    }
++    let released = false
++    let committed = false
++    entry.resolve({
++      signal: entry.signal,
++      submitted: () => {
++        entry.signal.throwIfAborted()
++        entry.notice = { ...entry.notice, phase: 'submitted', message: 'Launch dispatched. If Orca stops now, reconcile the existing process before retrying.' }
++        this.journal.save(entry.notice)
++      },
++      committed: (retainInput) => {
++        if (!retainInput) this.journal.remove(entry.notice.key)
++        committed = true
++      },
++      release: (error) => {
++        if (released) return
++        released = true
++        this.finish(entry, error, committed)
++      }
++    })
++  }
++
++  private finish(entry: Entry, error?: unknown, committed = false): void {
++    entry.cleanup()
++    this.entries.delete(entry.notice.key)
++    if (!committed && entry.notice.phase === 'queued') {
++      try {
++        this.journal.save({ ...entry.notice,
++          phase: entry.cancelled ? 'cancelled' : this.stopped ? 'queued' : entry.signal.aborted ? 'cancelled' : 'failed',
++          message: error instanceof Error ? error.message : 'Ojak launch stopped before dispatch; input is saved.' })
++      } catch (saveError) {
++        error = saveError
++      }
++    }
++    entry.reject(error ?? new Error('Ojak launch stopped before dispatch.'))
++    if (this.active === entry) {
++      this.active = null
++      this.nextStartAt = Date.now() + 2_000
++    }
++    this.pump()
++  }
++}
+diff --git a/src/main/agent-launch/ojak-launch-recovery.test.ts b/src/main/agent-launch/ojak-launch-recovery.test.ts
+new file mode 100644
+index 00000000..67378471
+--- /dev/null
++++ b/src/main/agent-launch/ojak-launch-recovery.test.ts
+@@ -0,0 +1,140 @@
++import { mkdtempSync, rmSync } from 'node:fs'
++import { tmpdir } from 'node:os'
++import { join } from 'node:path'
++import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
++import type { OjakLaunchNotice } from '../../shared/ojak-launch-admission'
++import { JournalHostDatabase } from '../native-chat/agent-session-journal/journal-host-database'
++import { OjakLaunchJournal } from './ojak-launch-journal'
++import { OjakLaunchQueue } from './ojak-launch-queue'
++import { OjakLaunchRecovery } from './ojak-launch-recovery'
++
++const ready = { ready: true, reason: 'ready', pollAfterMs: 500 }
++const pressure = { ready: false, reason: 'resource_pressure', pollAfterMs: 500 }
++const managed = { tokenPath: '/fixture/bridge.token' }
++const databases: JournalHostDatabase[] = []
++const directories: string[] = []
++const queues: OjakLaunchQueue[] = []
++beforeEach(() => vi.useFakeTimers())
++afterEach(async () => {
++  for (const queue of queues.splice(0)) queue.suspend()
++  await vi.runAllTimersAsync()
++  for (const database of databases.splice(0)) database.close()
++  for (const directory of directories.splice(0)) rmSync(directory, { recursive: true, force: true })
++  vi.useRealTimers()
++})
++function open(path = mkdtempSync(join(tmpdir(), 'orca-ojak-recovery-'))) {
++  if (!directories.includes(path)) directories.push(path)
++  const database = JournalHostDatabase.open(path)
++  databases.push(database)
++  const journal = new OjakLaunchJournal(database)
++  const sample = vi.fn(async () => pressure)
++  const queue = new OjakLaunchQueue(journal, sample)
++  queues.push(queue)
++  return { path, database, journal, queue, sample }
++}
++function notice(kind: 'terminal' | 'structured'): OjakLaunchNotice {
++  return { key: kind, phase: 'queued', message: 'Waiting', savedPrompt: 'keep my original input',
++    owner: { kind, worktreeId: 'folder-1', tabId: 'tab-1', sessionId: 'omp_session' },
++    recovery: kind === 'terminal'
++      ? { kind, selection: { version: 1, prompt: { text: 'keep my original input', delivery: 'submit' } } }
++      : { kind, sessionId: 'omp_session' } }
++}
++
++describe.each(['terminal', 'structured'] as const)('%s unsent restart recovery', (kind) => {
++  it('suspends without cancellation and restores exactly once after reopening and capacity recovery', async () => {
++    const first = open()
++    const pending = first.queue.acquire(notice(kind), managed).catch((error: unknown) => error)
++    await vi.advanceTimersByTimeAsync(0)
++    first.queue.suspend()
++    await vi.advanceTimersByTimeAsync(0)
++    expect(await pending).toBeInstanceOf(Error)
++    expect(first.journal.list()[0]).toMatchObject({ phase: 'queued', savedPrompt: 'keep my original input' })
++    first.database.close()
++    const reopened = open(first.path)
++    const delivered: string[] = []
++    const recovery = new OjakLaunchRecovery(reopened.queue, {
++      ownerPresent: async () => true,
++      launch: async (row) => {
++        const ticket = await reopened.queue.acquire(row, managed)
++        ticket.submitted()
++        delivered.push(row.savedPrompt!)
++        ticket.committed()
++        ticket.release()
++      }
++    })
++    const restored = recovery.restore()
++    await vi.advanceTimersByTimeAsync(0)
++    await recovery.restore()
++    expect(delivered).toEqual([])
++    reopened.sample.mockResolvedValue(ready)
++    await vi.advanceTimersByTimeAsync(500)
++    await restored
++    expect(delivered).toEqual(['keep my original input'])
++    expect(reopened.journal.list()).toEqual([])
++  })
++
++  it('never resurrects an explicit cancellation or a submitted-but-unconfirmed launch', async () => {
++    const first = open()
++    const pending = first.queue.acquire(notice(kind), managed).catch((error: unknown) => error)
++    first.queue.cancel(kind)
++    await vi.advanceTimersByTimeAsync(0)
++    await pending
++    first.journal.save({ ...notice(kind), key: 'uncertain', phase: 'submitted' })
++    first.database.close()
++    const reopened = open(first.path)
++    reopened.sample.mockResolvedValue(ready)
++    const launch = vi.fn(async () => {})
++    const recovery = new OjakLaunchRecovery(reopened.queue, { ownerPresent: async () => true, launch })
++    await recovery.restore()
++    await expect(recovery.resume(kind, 'folder-1')).rejects.toThrow(/unsent/)
++    await expect(recovery.resume('uncertain', 'folder-1')).rejects.toThrow(/unsent/)
++    expect(launch).not.toHaveBeenCalled()
++    expect(reopened.journal.list().map((row) => row.phase).sort()).toEqual(['cancelled', 'submitted'])
++  })
++
++  it('keeps a closed owner unsent until an explicit target is selected', async () => {
++    const h = open()
++    h.journal.save(notice(kind))
++    const targets: (string | undefined)[] = []
++    const recovery = new OjakLaunchRecovery(h.queue, {
++      ownerPresent: async () => false,
++      launch: async (_row, target) => { targets.push(target) }
++    })
++    await recovery.restore()
++    expect(targets).toEqual([])
++    expect(h.journal.list()[0]?.phase).toBe('queued')
++    await recovery.resume(kind, 'folder-1')
++    expect(targets).toEqual(['folder-1'])
++  })
++
++  it('does not start after cancellation or shutdown lands during owner validation', async () => {
++    const h = open()
++    h.journal.save(notice(kind))
++    const owner = Promise.withResolvers<boolean>()
++    const launch = vi.fn(async () => {})
++    const recovery = new OjakLaunchRecovery(h.queue, { ownerPresent: () => owner.promise, launch })
++    const restoring = recovery.restore()
++    h.queue.cancel(kind)
++    owner.resolve(true)
++    await restoring
++    expect(launch).not.toHaveBeenCalled()
++    h.journal.save(notice(kind))
++    h.queue.suspend()
++    await recovery.restore()
++    expect(launch).not.toHaveBeenCalled()
++  })
++})
++
++it('moves an orphan atomically and refuses to move cancelled or occupied intent', () => {
++  const h = open()
++  h.journal.save(notice('terminal'))
++  const replacement = { ...notice('terminal'), key: 'terminal:new-pane', owner: {
++    kind: 'terminal' as const, worktreeId: 'folder-2', tabId: 'new-tab', paneKey: 'new-tab:new-leaf'
++  } }
++  h.queue.retarget('terminal', replacement)
++  expect(h.journal.list()).toEqual([replacement])
++  expect(() => h.queue.retarget('terminal', replacement)).toThrow(/changed/)
++  h.queue.cancel(replacement.key)
++  expect(() => h.queue.retarget(replacement.key, { ...replacement, key: 'other' })).toThrow(/changed/)
++  expect(h.journal.list()).toEqual([expect.objectContaining({ key: replacement.key, phase: 'cancelled' })])
++})
+diff --git a/src/main/agent-launch/ojak-launch-recovery.ts b/src/main/agent-launch/ojak-launch-recovery.ts
+new file mode 100644
+index 00000000..ae1b3019
+--- /dev/null
++++ b/src/main/agent-launch/ojak-launch-recovery.ts
+@@ -0,0 +1,41 @@
++import type { OjakLaunchNotice } from '../../shared/ojak-launch-admission'
++import type { OjakLaunchQueue } from './ojak-launch-queue'
++
++/** Reconstructs only proven-unsent work. Process ownership stays with each existing launch path. */
++export class OjakLaunchRecovery {
++  private readonly running = new Set<string>()
++
++  constructor(private readonly queue: OjakLaunchQueue, private readonly deps: {
++    ownerPresent(notice: OjakLaunchNotice): Promise<boolean>
++    launch(notice: OjakLaunchNotice, targetWorktreeId?: string): Promise<void>
++  }) {}
++
++  async restore(): Promise<void> {
++    await Promise.all(this.queue.notices().filter((row) => row.phase === 'queued').map(async (row) => {
++      try { await this.resume(row.key) } catch (error) {
++        const current = this.queue.notices().find((entry) => entry.key === row.key)
++        if (current?.phase === 'queued' && !this.queue.isWaiting(row.key)) {
++          this.queue.save({ ...current, message: error instanceof Error ? error.message : String(error) })
++        }
++      }
++    }))
++  }
++
++  async resume(key: string, targetWorktreeId?: string): Promise<void> {
++    if (this.running.has(key) || this.queue.isWaiting(key)) return
++    if (this.queue.isSuspended()) return
++    const notice = this.queue.notices().find((row) => row.key === key)
++    if (!notice || notice.phase !== 'queued') throw new Error('Only a saved unsent launch can resume.')
++    if (!notice.recovery) throw new Error('This older launch has no safe recovery selection. Copy its saved input into a new launch.')
++    this.running.add(key)
++    try {
++      if (!targetWorktreeId && !await this.deps.ownerPresent(notice)) {
++        throw new Error('The original pane is closed or unavailable. Select a local workspace and Resume, or cancel this saved launch.')
++      }
++      if (this.queue.isSuspended() || this.queue.notices().find((row) => row.key === key)?.phase !== 'queued') return
++      await this.deps.launch(notice, targetWorktreeId)
++    } finally {
++      this.running.delete(key)
++    }
++  }
++}
+diff --git a/src/main/agent-launch/ojak-managed-launch.test.ts b/src/main/agent-launch/ojak-managed-launch.test.ts
+new file mode 100644
+index 00000000..a51dd4d4
+--- /dev/null
++++ b/src/main/agent-launch/ojak-managed-launch.test.ts
+@@ -0,0 +1,123 @@
++import { createHash } from 'node:crypto'
++import { mkdtemp, mkdir, rm, writeFile } from 'node:fs/promises'
++import { tmpdir } from 'node:os'
++import { join } from 'node:path'
++import { afterEach, describe, expect, it, vi } from 'vitest'
++import { readOjakAdmission, resolveOjakManagedLaunch } from './ojak-managed-launch'
++
++const directories: string[] = []
++afterEach(async () => {
++  await Promise.all(directories.splice(0).map((path) => rm(path, { recursive: true, force: true })))
++})
++async function fixture() {
++  const home = await mkdtemp(join(tmpdir(), 'orca-ojak-owned-'))
++  directories.push(home)
++  const agentDir = join(home, '.omp', 'agent')
++  const extensionDir = join(agentDir, 'extensions', 'aam-accounts')
++  await mkdir(extensionDir, { recursive: true })
++  const source = `const INSTALLED_AAM_HOME = ${JSON.stringify(home)};\n`
++  await writeFile(join(extensionDir, 'index.js'), source)
++  await writeFile(join(extensionDir, '.aam-owner.json'), JSON.stringify({
++    owner: 'ai-account-manager.omp-accounts.v1', version: 1,
++    sha256: createHash('sha256').update(source).digest('hex')
++  }))
++  const tokenPath = join(home, 'bridge.token')
++  await writeFile(tokenPath, 'fixture-token\n')
++  return { home, agentDir, extensionDir, tokenPath,
++    input: { agent: 'omp', command: 'omp', local: true, env: { HOME: home, USERPROFILE: home } } }
++}
++
++describe('Ojak-owned local omp detection', () => {
++  it('uses the verified extension home ahead of ambient AAM_HOME', async () => {
++    const h = await fixture()
++    expect(await resolveOjakManagedLaunch({ ...h.input, env: { ...h.input.env, AAM_HOME: '/other' } }))
++      .toEqual({ tokenPath: h.tokenPath })
++    expect(await resolveOjakManagedLaunch({ ...h.input, agent: 'pi', command: 'omp --mode rpc' }))
++      .toEqual({ tokenPath: h.tokenPath })
++  })
++
++  it('does not gate unrelated agents, remote hosts, or AAM_HOME alone', async () => {
++    const h = await fixture()
++    expect(await resolveOjakManagedLaunch({ ...h.input, agent: 'pi', command: 'pi' })).toBeNull()
++    expect(await resolveOjakManagedLaunch({ ...h.input, local: false })).toBeNull()
++    expect(await resolveOjakManagedLaunch({ ...h.input, env: {
++      ...h.input.env, PI_CODING_AGENT_DIR: join(h.home, 'unmanaged'), AAM_HOME: h.home
++    } })).toBeNull()
++  })
++
++  it('finds the actual Orca source root and fails closed after owned source changes', async () => {
++    const h = await fixture()
++    expect(await resolveOjakManagedLaunch({ ...h.input, env: {
++      ORCA_OMP_SOURCE_AGENT_DIR: h.agentDir, PI_CODING_AGENT_DIR: '/stale-overlay'
++    } })).toEqual({ tokenPath: h.tokenPath })
++    await writeFile(join(h.extensionDir, 'index.js'), 'changed')
++    await expect(resolveOjakManagedLaunch(h.input)).rejects.toThrow(/ownership changed/)
++  })
++})
++
++describe('authenticated admission samples', () => {
++  it('uses GET with authentication, a deadline, and bounded polling hints', async () => {
++    const h = await fixture()
++    const request = vi.fn<typeof fetch>().mockResolvedValue(new Response(JSON.stringify({
++      version: 1, ready: false, reason: 'resource_pressure', poll_after_ms: 1
++    })))
++    expect(await readOjakAdmission(h, new AbortController().signal, request)).toEqual({
++      ready: false, reason: 'resource_pressure', pollAfterMs: 500
++    })
++    expect(request).toHaveBeenCalledWith('http://127.0.0.1:4020/v1/admission', expect.objectContaining({
++      headers: { Authorization: 'Bearer fixture-token' }, redirect: 'error', signal: expect.any(AbortSignal)
++    }))
++  })
++
++  it('waits on transport loss but exposes authentication and protocol failures', async () => {
++    const h = await fixture()
++    const request = vi.fn<typeof fetch>().mockRejectedValue(new TypeError('connection refused'))
++    const signal = new AbortController().signal
++    expect(await readOjakAdmission(h, signal, request)).toMatchObject({ ready: false, reason: 'service_unavailable' })
++    request.mockResolvedValueOnce(new Response('', { status: 401 }))
++    await expect(readOjakAdmission(h, signal, request)).rejects.toThrow(/401/)
++    request.mockResolvedValueOnce(new Response(JSON.stringify({ version: 1, ready: true,
++      reason: 'resource_pressure', poll_after_ms: 2000 })))
++    await expect(readOjakAdmission(h, signal, request)).rejects.toThrow(/inconsistent/)
++  })
++
++  it('waits when the response body disconnects but rejects malformed JSON', async () => {
++    const h = await fixture()
++    const brokenBody = new ReadableStream({
++      start: (controller) => controller.error(new TypeError('socket closed'))
++    })
++    const request = vi.fn<typeof fetch>().mockResolvedValueOnce(new Response(brokenBody))
++    const signal = new AbortController().signal
++    expect(await readOjakAdmission(h, signal, request)).toMatchObject({ ready: false, reason: 'service_unavailable' })
++    request.mockResolvedValueOnce(new Response('not JSON'))
++    await expect(readOjakAdmission(h, signal, request)).rejects.toThrow(/invalid JSON/)
++  })
++
++  it('waits on a proven admission-control 503 but refuses an unproven 503', async () => {
++    const h = await fixture()
++    const signal = new AbortController().signal
++    const request = vi.fn<typeof fetch>().mockResolvedValueOnce(new Response(JSON.stringify({
++      error: { type: 'admission_wait', code: 'BRIDGE_BUSY', submitted: false }
++    }), { status: 503 }))
++    expect(await readOjakAdmission(h, signal, request)).toMatchObject({
++      ready: false, reason: 'admission_control_saturated', pollAfterMs: 2000
++    })
++    for (const error of [
++      { type: 'admission_wait', code: 'BRIDGE_BUSY', submitted: true },
++      { type: 'admission_wait', code: 'BRIDGE_UNAVAILABLE', submitted: false },
++      { type: 'server_error', code: 'BRIDGE_UNAVAILABLE', submitted: false },
++      { type: 'admission_wait', code: 'BRIDGE_UNAVAILABLE' }
++    ]) {
++      request.mockResolvedValueOnce(new Response(JSON.stringify({ error }), { status: 503 }))
++      await expect(readOjakAdmission(h, signal, request)).rejects.toThrow(/503/)
++    }
++  })
++
++  it('never reads a token or polls for an already cancelled acquire', async () => {
++    const stop = new AbortController()
++    stop.abort(new Error('cancelled'))
++    const request = vi.fn<typeof fetch>()
++    await expect(readOjakAdmission({ tokenPath: '/absent' }, stop.signal, request)).rejects.toThrow('cancelled')
++    expect(request).not.toHaveBeenCalled()
++  })
++})
+diff --git a/src/main/agent-launch/ojak-managed-launch.ts b/src/main/agent-launch/ojak-managed-launch.ts
+new file mode 100644
+index 00000000..ca26aa4b
+--- /dev/null
++++ b/src/main/agent-launch/ojak-managed-launch.ts
+@@ -0,0 +1,105 @@
++import { createHash } from 'node:crypto'
++import { readFile } from 'node:fs/promises'
++import { homedir } from 'node:os'
++import { join } from 'node:path'
++import { z } from 'zod'
++import { detectExplicitPiAgentKindFromCommand } from '../../shared/pi-agent-kind'
++
++const ownerSchema = z.object({
++  owner: z.literal('ai-account-manager.omp-accounts.v1'),
++  version: z.literal(1),
++  sha256: z.string().regex(/^[a-f0-9]{64}$/)
++})
++
++export type OjakManagedLaunch = { tokenPath: string }
++
++async function optionalFile(path: string): Promise<string | null> {
++  try {
++    return await readFile(path, 'utf8')
++  } catch (error) {
++    if (error instanceof Error && 'code' in error && error.code === 'ENOENT') return null
++    throw error
++  }
++}
++
++/** Presence of a verified, Ojak-owned accounts extension is the integration opt-in, not AAM_HOME. */
++export async function resolveOjakManagedLaunch(input: {
++  agent?: string
++  command?: string
++  env: NodeJS.ProcessEnv
++  local: boolean
++}): Promise<OjakManagedLaunch | null> {
++  if (!input.local) return null
++  const kind = detectExplicitPiAgentKindFromCommand(input.command)
++  if (input.agent !== 'omp' && kind !== 'omp') return null
++  const home = input.env.HOME || input.env.USERPROFILE || homedir()
++  const agentDir = input.env.ORCA_OMP_SOURCE_AGENT_DIR || input.env.PI_CODING_AGENT_DIR ||
++    join(home, input.env.PI_CONFIG_DIR || '.omp', 'agent')
++  const extensionDir = join(agentDir, 'extensions', 'aam-accounts')
++  const marker = await optionalFile(join(extensionDir, '.aam-owner.json'))
++  if (marker === null) return null
++  const owner = ownerSchema.safeParse(JSON.parse(marker))
++  if (!owner.success) return null
++  const source = await optionalFile(join(extensionDir, 'index.js'))
++  if (source === null || createHash('sha256').update(source).digest('hex') !== owner.data.sha256) {
++    throw new Error('Ojak accounts extension ownership changed. Repair the omp integration in Ojak before launching.')
++  }
++  // The installed extension pins its home ahead of AAM_HOME; never evaluate extension code here.
++  const installed = /^const INSTALLED_AAM_HOME = ("(?:[^"\\]|\\.)*"|null);$/m.exec(source)
++  if (!installed) throw new Error('Ojak accounts extension has no readable installation home. Update its integration.')
++  const pinned: unknown = JSON.parse(installed[1]!)
++  const aamHome = typeof pinned === 'string' ? pinned : input.env.AAM_HOME ||
++    join(home, 'Library', 'Application Support', 'AI Account Manager')
++  return { tokenPath: join(aamHome, 'bridge.token') }
++}
++
++const sampleSchema = z.object({
++  version: z.literal(1),
++  ready: z.boolean(),
++  reason: z.enum(['ready', 'resource_pressure', 'resource_unknown', 'model_capacity']),
++  poll_after_ms: z.number().int().positive()
++})
++
++const controlSaturationSchema = z.object({ error: z.object({
++  type: z.literal('admission_wait'),
++  code: z.enum(['BRIDGE_BUSY', 'BRIDGE_QUEUE_TIMEOUT', 'BRIDGE_RESOURCE_PRESSURE']),
++  submitted: z.literal(false)
++}) })
++
++export type OjakAdmissionSample = { ready: boolean; reason: string; pollAfterMs: number }
++
++export async function readOjakAdmission(
++  managed: OjakManagedLaunch,
++  signal: AbortSignal,
++  request: typeof fetch = fetch
++): Promise<OjakAdmissionSample> {
++  signal.throwIfAborted()
++  const token = (await readFile(managed.tokenPath, 'utf8')).trim()
++  if (!token) throw new Error('Ojak bridge token is empty. Repair the omp integration in Ojak.')
++  let response: Response
++  let body: unknown
++  try {
++    response = await request('http://127.0.0.1:4020/v1/admission', {
++      headers: { Authorization: `Bearer ${token}` },
++      signal: AbortSignal.any([signal, AbortSignal.timeout(3_000)]),
++      redirect: 'error'
++    })
++    if (response.ok || response.status === 503) body = await response.json()
++  } catch (error) {
++    signal.throwIfAborted()
++    if (error instanceof SyntaxError) {
++      throw new Error('Ojak admission returned invalid JSON. Check the Ojak service configuration.')
++    }
++    return { ready: false, reason: 'service_unavailable', pollAfterMs: 2_000 }
++  }
++  if (response.status === 503 && controlSaturationSchema.safeParse(body).success) {
++    return { ready: false, reason: 'admission_control_saturated', pollAfterMs: 2_000 }
++  }
++  if (!response.ok) {
++    if (!response.bodyUsed) await response.body?.cancel()
++    throw new Error(`Ojak admission refused (${response.status}). Check Ojak authentication and integration; no agent was launched.`)
++  }
++  const sample = sampleSchema.parse(body)
++  if (sample.ready !== (sample.reason === 'ready')) throw new Error('Ojak admission returned an inconsistent readiness sample.')
++  return { ready: sample.ready, reason: sample.reason, pollAfterMs: Math.max(500, Math.min(10_000, sample.poll_after_ms)) }
++}
+diff --git a/src/main/agent-launch/ojak-pty-launch.ts b/src/main/agent-launch/ojak-pty-launch.ts
+new file mode 100644
+index 00000000..ae167c27
+--- /dev/null
++++ b/src/main/agent-launch/ojak-pty-launch.ts
+@@ -0,0 +1,52 @@
++import type { PtySpawnOptions } from '../providers/types'
++import { resolveSetupAgentSequenceLaunchCommand } from '../../shared/setup-agent-sequencing'
++import { acquireOjakLaunch, settleOjakTerminalLaunch } from './ojak-launch-admission'
++import type { OjakLaunchTicket } from './ojak-launch-queue'
++import { OJAK_TERMINAL_SELECTION_ENV } from '../../shared/ojak-terminal-selection'
++import { ojakTerminalSelectionSchema } from '../../shared/ojak-launch-recovery'
++import { ojakLaunchPrompt } from './ojak-launch-prompt'
++
++const tickets = new WeakMap<PtySpawnOptions, OjakLaunchTicket>()
++
++/** Called only after stable-pane/claim reconciliation has authorized a fresh local spawn. */
++export async function admitOjakPtySpawn(options: PtySpawnOptions, local: boolean): Promise<void> {
++  const command = resolveSetupAgentSequenceLaunchCommand(options.env ?? {}, options.command)
++  const paneKey = options.paneKey
++  const worktreeId = options.worktreeId
++  const selectionText = options.env?.[OJAK_TERMINAL_SELECTION_ENV]
++  const selection = selectionText ? ojakTerminalSelectionSchema.parse(JSON.parse(selectionText)) : undefined
++  if (selection && ojakLaunchPrompt.getStore()) selection.prompt = ojakLaunchPrompt.getStore()!
++  if (options.env) delete options.env[OJAK_TERMINAL_SELECTION_ENV]
++  const admission = await acquireOjakLaunch({
++    agent: options.launchAgent,
++    command,
++    env: { ...process.env, ...options.env },
++    local: local && !options.attachOnly,
++    key: `terminal:${worktreeId ?? ''}:${paneKey ?? options.sessionId ?? ''}`,
++    owner: { kind: 'terminal', worktreeId: worktreeId ?? '',
++      ...(options.tabId ? { tabId: options.tabId } : {}), ...(paneKey ? { paneKey } : {}) },
++    savedCommand: 'omp',
++    ...(selection ? { recovery: { kind: 'terminal' as const, selection,
++      ...(options.cwd ? { cwd: options.cwd } : {}),
++      ...(options.shellOverride ? { shellOverride: options.shellOverride } : {}) } } : {}),
++    signal: options.signal,
++    savedPrompt: selection?.prompt.text ?? options.env?.ORCA_OMP_PREFILL
++  })
++  if (!admission) return
++  tickets.set(options, admission)
++  options.signal = admission.signal
++  // Persist the uncertainty fence before handing control to the process owner.
++  admission.submitted()
++}
++
++export async function commitOjakPtySpawn(options: PtySpawnOptions): Promise<void> {
++  const ticket = tickets.get(options)
++  if (ticket) ticket.committed()
++  else await settleOjakTerminalLaunch(options.worktreeId, options.paneKey)
++}
++
++export function releaseOjakPtySpawn(options: PtySpawnOptions): void {
++  const ticket = tickets.get(options)
++  tickets.delete(options)
++  ticket?.release()
++}
+diff --git a/src/main/agent-launch/ojak-runtime-recovery.ts b/src/main/agent-launch/ojak-runtime-recovery.ts
+new file mode 100644
+index 00000000..aa4231fb
+--- /dev/null
++++ b/src/main/agent-launch/ojak-runtime-recovery.ts
+@@ -0,0 +1,181 @@
++import { randomUUID } from 'node:crypto'
++import type { OjakLaunchNotice } from '../../shared/ojak-launch-admission'
++import { paneBelongsToTerminalLayout } from '../../shared/workspace-session-pane-ownership'
++import { toAgentLaunchPreferences } from '../../shared/agent-launch-preferences'
++import { createStructuredAgentSessionOperationId, structuredAgentSessionPayloadFingerprint } from '../../shared/structured-agent-session-mutation'
++import type { OrcaRuntimeService } from '../runtime/orca-runtime'
++import type { RuntimeStore } from '../runtime/runtime-store-contract'
++import { allocateTerminalPaneIdentity, paneIdentity } from '../runtime/runtime-terminal-pane-identity'
++import { getStructuredAgentSessionHost } from '../native-chat/agent-session-wire/structured-agent-session-registry'
++import { attachParamsForRecord } from '../native-chat/agent-session-wire/structured-agent-session-conversation-open'
++import { createStructuredAgentSessionLogger } from '../native-chat/agent-session-wire/structured-agent-session-logger'
++import { deliverTerminalAgentLaunchPrompt } from '../runtime/rpc/methods/agent-launch-terminal-prompt'
++import { ojakLaunchQueue } from './ojak-launch-admission'
++import { ojakLaunchPrompt, ojakRecoveryDispatch } from './ojak-launch-prompt'
++import { OjakLaunchRecovery } from './ojak-launch-recovery'
++import type { OjakLaunchQueue } from './ojak-launch-queue'
++
++const recoveries = new WeakMap<OrcaRuntimeService, { queue: OjakLaunchQueue; recovery: OjakLaunchRecovery }>()
++
++async function localWorkspace(runtime: OrcaRuntimeService, id: string): Promise<void> {
++  if (!await runtime.resolveStructuredAgentSessionLocalWorkspacePath(`id:${id}`)) {
++    throw new Error('Select a native local workspace for this saved Ojak launch.')
++  }
++}
++
++function terminalOwnerPresent(store: RuntimeStore, notice: OjakLaunchNotice): boolean {
++  const { paneKey, tabId, worktreeId } = notice.owner
++  if (!paneKey || !tabId) return false
++  return (store.getWorkspaceSessionHostIds?.() ?? ['local']).some((hostId) => {
++    const session = store.getWorkspaceSession?.(hostId)
++    return !!session && paneBelongsToTerminalLayout({ paneKey, tabId }, session,
++      new Set((session.tabsByWorktree[worktreeId] ?? []).map((tab) => tab.id)))
++  })
++}
++
++/** Cold starts persist their workspace tab before the provider's visible-session index exists. */
++function structuredOwnerTab(store: RuntimeStore, notice: OjakLaunchNotice) {
++  for (const hostId of store.getWorkspaceSessionHostIds?.() ?? ['local']) {
++    const tab = store.getWorkspaceSession?.(hostId)?.unifiedTabs?.[notice.owner.worktreeId]?.find((entry) =>
++      entry.contentType === 'agent-session' && entry.entityId === notice.owner.sessionId &&
++      (!entry.executionHostId || entry.executionHostId === 'local'))
++    if (tab) return tab
++  }
++  return undefined
++}
++
++async function launchTerminal(runtime: OrcaRuntimeService, queue: OjakLaunchQueue,
++  notice: OjakLaunchNotice, target?: string): Promise<void> {
++  if (notice.recovery?.kind !== 'terminal') throw new Error('Missing terminal selection.')
++  const { selection, cwd, shellOverride } = notice.recovery
++  if (target) {
++    const pane = allocateTerminalPaneIdentity({})
++    const next = { ...notice, key: `terminal:${target}:${pane.paneKey}`,
++      recovery: { kind: 'terminal' as const, selection },
++      owner: { kind: 'terminal' as const, worktreeId: target, tabId: pane.tabId, paneKey: pane.paneKey } }
++    queue.retarget(notice.key, next)
++    notice = next
++  }
++  let carried = false
++  const prompt = selection.prompt
++  await ojakLaunchPrompt.run(prompt, () => ojakRecoveryDispatch.run(true, async () => {
++    const terminal = await runtime.createTerminal(`id:${notice.owner.worktreeId}`, {
++      startupAgent: 'omp', ...paneIdentity(notice.owner.paneKey), requireFreshPane: true,
++      surfaceOwner: false, presentation: 'background',
++      ...(target ? {} : { cwd, shellOverride }),
++      launchPreferences: toAgentLaunchPreferences(selection.sessionOptions),
++      onStartupPromptCarry: (value: boolean) => { carried = value },
++      ...(prompt.delivery === 'draft' ? { startupDraft: prompt.text } : {
++        startupPrompt: prompt.text
++      })
++    })
++    if (prompt.text.trim() && !carried &&
++      !await deliverTerminalAgentLaunchPrompt({ runtime, handle: terminal.handle, agent: 'omp',
++        freshLaunch: true, text: prompt.text, delivery: prompt.delivery })) {
++      throw new Error('The agent started but prompt delivery is unconfirmed. Inspect its pane; the saved input will not be replayed.')
++    }
++    queue.remove(notice.key)
++  })).catch((error: unknown) => {
++    const row = queue.notices().find((entry) => entry.key === notice.key)
++    if (row) queue.save({ ...row, message: error instanceof Error ? error.message : String(error) })
++    throw error
++  })
++}
++
++async function launchStructured(runtime: OrcaRuntimeService, store: RuntimeStore, queue: OjakLaunchQueue,
++  notice: OjakLaunchNotice, target?: string): Promise<void> {
++  const recovery = notice.recovery
++  if (recovery?.kind !== 'structured') throw new Error('Missing structured selection.')
++  if (target && target !== notice.owner.worktreeId) {
++    throw new Error('Select the saved chat’s original workspace to resume its journal; moving a conversation requires a new launch.')
++  }
++  await runtime.ensureStructuredAgentSessionHost()
++  const host = getStructuredAgentSessionHost()
++  if (!host) throw new Error('Structured session host is unavailable.')
++  let record = host.deps.store.getRecord(recovery.sessionId)
++  if (!record || (record.provider !== 'omp' && record.provider !== 'pi') ||
++    record.location.executionHostId !== 'local' || record.location.wslDistro) {
++    throw new Error('Saved structured session is no longer a native local omp session.')
++  }
++  if (!(await runtime.getStructuredAgentSessionCreateSupport(`id:${notice.owner.worktreeId}`, record.provider)).supported) {
++    throw new Error('This structured agent is no longer enabled for the saved workspace.')
++  }
++  const tab = structuredOwnerTab(store, notice)
++  if (!target && !tab) {
++    throw new Error('The saved chat was closed; it will not be reopened automatically.')
++  }
++  const coldStart = record.providerHandleChain.length === 0
++  if (coldStart) {
++    // No provider conversation was created. Reuse its reserved record and tab, not a new create.
++    const attached = await host.attach({ callerKey: 'ojak-unsent-recovery' }, {
++      ...attachParamsForRecord(record, {
++        clientOperationId: createStructuredAgentSessionOperationId(randomUUID),
++        expectedRuntimeFence: record.lease.runtimeFence
++      }),
++      ...(tab ? { surfaceTabId: tab.id } : {})
++    })
++    if (!attached.ok) throw new Error(attached.refusal.message)
++    record = host.deps.store.getRecord(recovery.sessionId)
++    if (!record) throw new Error('Saved structured session disappeared during recovery.')
++  }
++  if (target || coldStart) await runtime.publishStructuredAgentSessionTab({ workspaceId: record.location.workspaceId,
++    sessionId: record.sessionId, agent: record.provider, activate: false })
++  // Opening folds never-handed submissions into the existing durable queue; Resume adds no message.
++  await host.journalSnapshot(recovery.sessionId)
++  if (queue.isSuspended() || (!coldStart && queue.notices().find((row) => row.key === notice.key)?.phase !== 'queued')) return
++  const result = await host.queuedMessagesResume({ callerKey: 'ojak-unsent-recovery' }, {
++    envelope: { sessionId: record.sessionId,
++      clientOperationId: createStructuredAgentSessionOperationId(randomUUID),
++      expectedRuntimeFence: record.lease.runtimeFence,
++      payloadFingerprint: structuredAgentSessionPayloadFingerprint({ method: 'agentSession.queuedMessagesResume',
++        sessionId: record.sessionId, fields: {} }) }
++  })
++  if (!result.ok) throw new Error(result.refusal.message)
++}
++
++async function recoveryFor(runtime: OrcaRuntimeService, store: RuntimeStore): Promise<OjakLaunchRecovery> {
++  const queue = await ojakLaunchQueue()
++  const existing = recoveries.get(runtime)
++  if (existing?.queue === queue) return existing.recovery
++  const recovery = new OjakLaunchRecovery(queue, {
++      ownerPresent: async (notice) => {
++        await localWorkspace(runtime, notice.owner.worktreeId)
++        if (notice.owner.kind === 'terminal') return terminalOwnerPresent(store, notice)
++        return structuredOwnerTab(store, notice) !== undefined
++      },
++      launch: async (notice, target) => {
++        await localWorkspace(runtime, target ?? notice.owner.worktreeId)
++        if (queue.isSuspended() || queue.notices().find((row) => row.key === notice.key)?.phase !== 'queued') return
++        if (notice.recovery?.kind === 'terminal') {
++          const originalPresent = terminalOwnerPresent(store, notice)
++          if (!target && !originalPresent) throw new Error('The saved pane was closed; it will not be recreated automatically.')
++          if (target && originalPresent && target !== notice.owner.worktreeId) {
++            throw new Error('The original pane still exists. Select its workspace to resume there.')
++          }
++          await launchTerminal(runtime, queue, notice, originalPresent ? undefined : target)
++        } else await launchStructured(runtime, store, queue, notice, target)
++      }
++  })
++  recoveries.set(runtime, { queue, recovery })
++  return recovery
++}
++
++export function restoreOjakLaunches(runtime: OrcaRuntimeService, store: RuntimeStore): void {
++  void recoveryFor(runtime, store).then((recovery) => recovery.restore()).catch(reportRecoveryError)
++}
++
++export async function resumeOjakLaunch(runtime: OrcaRuntimeService, store: RuntimeStore,
++  key: string, target: string): Promise<void> {
++  await localWorkspace(runtime, target)
++  const recovery = await recoveryFor(runtime, store)
++  void recovery.resume(key, target).catch(async (error: unknown) => {
++    const queue = await ojakLaunchQueue()
++    const row = queue.notices().find((notice) => notice.key === key)
++    if (row) queue.save({ ...row, message: error instanceof Error ? error.message : String(error) })
++    reportRecoveryError(error)
++  }).catch(reportRecoveryError)
++}
++
++function reportRecoveryError(error: unknown): void {
++  createStructuredAgentSessionLogger().warn('Ojak saved launch recovery failed', { scope: 'ojak-launch-recovery', error })
++}
+diff --git a/src/main/agent-launch/ojak-structured-launch.ts b/src/main/agent-launch/ojak-structured-launch.ts
+new file mode 100644
+index 00000000..c65ce68e
+--- /dev/null
++++ b/src/main/agent-launch/ojak-structured-launch.ts
+@@ -0,0 +1,23 @@
++import type { StructuredAgentSessionAcquireInput } from '../native-chat/agent-session-wire/structured-agent-session-adapter'
++import type { JournalHostDatabase } from '../native-chat/agent-session-journal/journal-host-database'
++import { acquireOjakLaunch } from './ojak-launch-admission'
++import type { OjakLaunchTicket } from './ojak-launch-queue'
++
++export type StructuredLaunchAdmission = (
++  input: StructuredAgentSessionAcquireInput,
++  launch: { command: string; env?: NodeJS.ProcessEnv }
++) => Promise<OjakLaunchTicket | null>
++
++export function structuredOjakLaunchAdmission(database: JournalHostDatabase): StructuredLaunchAdmission {
++  return (input, launch) => acquireOjakLaunch({
++    agent: input.identity.agent,
++    command: launch.command,
++    env: launch.env ?? {},
++    local: input.launch?.location.executionHostId === 'local' && input.launch.location.wslDistro === null,
++    key: `structured:${input.identity.sessionId}`,
++    owner: { kind: 'structured', worktreeId: input.identity.workspaceId, sessionId: input.identity.sessionId },
++    recovery: { kind: 'structured', sessionId: input.identity.sessionId },
++    signal: input.signal,
++    database
++  })
++}
+diff --git a/src/main/ipc/pty/ipc/spawn-execute.ts b/src/main/ipc/pty/ipc/spawn-execute.ts
+index 54507a72..b9adc9e5 100644
+--- a/src/main/ipc/pty/ipc/spawn-execute.ts
++++ b/src/main/ipc/pty/ipc/spawn-execute.ts
+@@ -16,6 +16,7 @@ import { deletePtyOwnership } from '../provider/ownership-state'
+ import { ptySizes } from '../delivery/visibility-state'
+ import { clearProviderPtyState } from '../provider/state-cleanup'
+ import type { PtyIpcSpawnState } from './spawn-state'
++import { admitOjakPtySpawn } from '../../../agent-launch/ojak-pty-launch'
+ 
+ export async function executePtyIpcSpawn(ctx: PtyIpcSpawnState): Promise<void> {
+   const args = ctx.args
+@@ -63,6 +64,7 @@ export async function executePtyIpcSpawn(ctx: PtyIpcSpawnState): Promise<void> {
+           owner: stablePaneOwnerCandidate,
+           worktreeId: args.worktreeId,
+           connectionId: args.connectionId,
++          beforeFreshSpawn: () => admitOjakPtySpawn(ctx.spawnOptions, !args.connectionId && !ctx.expectedWslDistro),
+           resolveOwner
+         })
+     ctx.result = stablePaneSpawn.result
+diff --git a/src/main/ipc/pty/ipc/spawn-run.ts b/src/main/ipc/pty/ipc/spawn-run.ts
+index 83e8a778..4d7c43a2 100644
+--- a/src/main/ipc/pty/ipc/spawn-run.ts
++++ b/src/main/ipc/pty/ipc/spawn-run.ts
+@@ -15,6 +15,7 @@ import { commitPtyIpcSpawn } from './spawn-commit'
+ import { createPtyIpcSpawnState, type PtyIpcSpawnState } from './spawn-state'
+ import { triggerPtySpawnPushTargetMaterialization } from './spawn-push-target-materialization'
+ import type { PtySpawnIpcArgs, PtySpawnIpcDeps } from './spawn-types'
++import { commitOjakPtySpawn, releaseOjakPtySpawn } from '../../../agent-launch/ojak-pty-launch'
+ 
+ function releaseAbandonedAgentTeamsLeader(ctx: PtyIpcSpawnState): void {
+   if (!ctx.agentTeamsLeaderHandle) {
+@@ -76,7 +77,9 @@ export async function runPtyIpcSpawn(deps: PtySpawnIpcDeps, args: PtySpawnIpcArg
+       return earlyReserved
+     }
+     await executePtyIpcSpawn(ctx)
+-    return await commitPtyIpcSpawn(ctx)
++    const committed = await commitPtyIpcSpawn(ctx)
++    await commitOjakPtySpawn(ctx.spawnOptions)
++    return committed
+   } catch (err) {
+     releaseAbandonedAgentTeamsLeader(ctx)
+     if (ctx.preSpawnHiddenMarkId !== null) {
+@@ -101,6 +104,7 @@ export async function runPtyIpcSpawn(deps: PtySpawnIpcDeps, args: PtySpawnIpcArg
+     rejectPaneSpawnReservation(ctx.paneSpawnReservationKey, ctx.paneSpawnReservation, err)
+     throw err
+   } finally {
++    releaseOjakPtySpawn(ctx.spawnOptions)
+     ctx.releaseWorktreeSpawn?.()
+     ctx.finishTerminalInstall()
+   }
+diff --git a/src/main/ipc/pty/ipc/spawn.ts b/src/main/ipc/pty/ipc/spawn.ts
+index 6fd5183a..1130772a 100644
+--- a/src/main/ipc/pty/ipc/spawn.ts
++++ b/src/main/ipc/pty/ipc/spawn.ts
+@@ -1,10 +1,27 @@
+ import { getPtyIpc } from '../../pty-host-bindings'
+ import { runPtyIpcSpawn } from './spawn-run'
+ import type { PtySpawnIpcArgs, PtySpawnIpcDeps } from './spawn-types'
++import { ojakLaunchQueue } from '../../../agent-launch/ojak-launch-admission'
++import { resumeOjakLaunch } from '../../../agent-launch/ojak-runtime-recovery'
+ 
+ export function installPtySpawnIpcHandler(deps: PtySpawnIpcDeps): void {
+   const ipcMain = getPtyIpc()
+   const { getLocalPtyStartupPromise } = deps
++  ipcMain.handle('pty:ojakLaunchNotices', async () => (await ojakLaunchQueue()).notices())
++  ipcMain.handle('pty:ojakCancelLaunch', async (_event, key: unknown) => {
++    if (typeof key !== 'string' || key.length > 2048) throw new Error('invalid_launch_key')
++    return (await ojakLaunchQueue()).cancel(key)
++  })
++  ipcMain.handle('pty:ojakDismissLaunch', async (_event, key: unknown) => {
++    if (typeof key !== 'string' || key.length > 2048) throw new Error('invalid_launch_key')
++    return (await ojakLaunchQueue()).dismiss(key)
++  })
++  ipcMain.handle('pty:ojakResumeLaunch', async (_event, key: unknown, worktreeId: unknown) => {
++    if (typeof key !== 'string' || key.length > 2048 ||
++      typeof worktreeId !== 'string' || !worktreeId || worktreeId.length > 2048) throw new Error('invalid_launch_target')
++    if (!deps.runtime || !deps.store) throw new Error('runtime_unavailable')
++    await resumeOjakLaunch(deps.runtime, deps.store, key, worktreeId)
++  })
+ 
+   ipcMain.handle('pty:spawn', async (_event, args: PtySpawnIpcArgs) => {
+     const startupPromise = getLocalPtyStartupPromise(args.connectionId)
+diff --git a/src/main/ipc/pty/pane/stable-owner.ts b/src/main/ipc/pty/pane/stable-owner.ts
+index 83ebdd50..b2f6bc1b 100644
+--- a/src/main/ipc/pty/pane/stable-owner.ts
++++ b/src/main/ipc/pty/pane/stable-owner.ts
+@@ -178,6 +178,7 @@ export type StablePaneSpawnContext = {
+   connectionId?: string | null
+   resolveOwner?: () => StablePaneOwner | null
+   onFreshSpawn?: (result: PtySpawnResult) => void
++  beforeFreshSpawn?: () => Promise<void>
+ }
+ 
+ export function stablePanePersistenceFence(
+@@ -310,6 +311,11 @@ export async function spawnForStablePane(
+       return attached
+     }
+   }
++  await args.beforeFreshSpawn?.()
++  args.spawnOptions.signal?.throwIfAborted()
++  if (args.beforeFreshSpawn && args.resolveOwner?.()) {
++    throw new Error('terminal_pane_owner_changed')
++  }
+   const result = await args.provider.spawn(args.spawnOptions)
+   args.onFreshSpawn?.(result)
+   return { result, owner: null }
+diff --git a/src/main/ipc/pty/pane/stable-pane-relay-absence-respawn.test.ts b/src/main/ipc/pty/pane/stable-pane-relay-absence-respawn.test.ts
+index ce3c578c..1cffd760 100644
+--- a/src/main/ipc/pty/pane/stable-pane-relay-absence-respawn.test.ts
++++ b/src/main/ipc/pty/pane/stable-pane-relay-absence-respawn.test.ts
+@@ -83,6 +83,50 @@ function sessionStore(leaves: string[]): { store: Store; read: () => WorkspaceSe
+ }
+ 
+ describe('stable pane adoption after the relay reports the PTY absent', () => {
++  it('does not create a local PTY while admission waits, or after cancellation', async () => {
++    const gate = Promise.withResolvers<void>()
++    const entered = Promise.withResolvers<void>()
++    const stop = new AbortController()
++    const spawn = vi.fn().mockResolvedValue({ id: 'fresh', isReattach: false })
++    const pending = spawnForStablePane({
++      runtime: undefined,
++      // oxlint-disable-next-line typescript/consistent-type-assertions -- SAFETY: A fresh pane uses only the provider spawn method.
++      provider: { spawn } as unknown as IPtyProvider,
++      spawnOptions: { cols: 80, rows: 24, command: 'omp', signal: stop.signal },
++      owner: null,
++      beforeFreshSpawn: () => { entered.resolve(); return gate.promise }
++    })
++    await entered.promise
++    expect(spawn).not.toHaveBeenCalled()
++    const rejected = expect(pending).rejects.toThrow('launch cancelled')
++    stop.abort(new Error('launch cancelled'))
++    gate.resolve()
++    await rejected
++    expect(spawn).not.toHaveBeenCalled()
++  })
++
++  it('rechecks ownership after a long wait instead of duplicating a newly attached pane', async () => {
++    const gate = Promise.withResolvers<void>()
++    const entered = Promise.withResolvers<void>()
++    let owner: StablePaneOwner | null = null
++    const spawn = vi.fn().mockResolvedValue({ id: 'fresh', isReattach: false })
++    const pending = spawnForStablePane({
++      runtime: undefined,
++      // oxlint-disable-next-line typescript/consistent-type-assertions -- SAFETY: The refusal occurs before any provider method except spawn could be used.
++      provider: { spawn } as unknown as IPtyProvider,
++      spawnOptions: { cols: 80, rows: 24, command: 'omp' },
++      owner,
++      resolveOwner: () => owner,
++      beforeFreshSpawn: () => { entered.resolve(); return gate.promise }
++    })
++    await entered.promise
++    owner = OWNER
++    const rejected = expect(pending).rejects.toThrow('terminal_pane_owner_changed')
++    gate.resolve()
++    await rejected
++    expect(spawn).not.toHaveBeenCalled()
++  })
++
+   it.each([false, true])(
+     'reattaches a live pane without launching a provider process (settled worker: %s)',
+     async (settledWorker) => {
+diff --git a/src/main/ipc/pty/register-handlers.ts b/src/main/ipc/pty/register-handlers.ts
+index 5e823ac5..6ee9b375 100644
+--- a/src/main/ipc/pty/register-handlers.ts
++++ b/src/main/ipc/pty/register-handlers.ts
+@@ -114,6 +114,10 @@ export function registerPtyHandlers(
+ 
+   // Remove prior handlers so re-registration (e.g. macOS re-activate creating a new window) doesn't double-register.
+   ipcMain.removeHandler('pty:spawn')
++  ipcMain.removeHandler('pty:ojakLaunchNotices')
++  ipcMain.removeHandler('pty:ojakCancelLaunch')
++  ipcMain.removeHandler('pty:ojakDismissLaunch')
++  ipcMain.removeHandler('pty:ojakResumeLaunch')
+   ipcMain.removeHandler('pty:moveLeafToNewTab')
+   ipcMain.removeHandler('pty:kill')
+   ipcMain.removeHandler('pty:listSessions')
+diff --git a/src/main/ipc/pty/runtime/spawn-execute.ts b/src/main/ipc/pty/runtime/spawn-execute.ts
+index 8228175a..98e54544 100644
+--- a/src/main/ipc/pty/runtime/spawn-execute.ts
++++ b/src/main/ipc/pty/runtime/spawn-execute.ts
+@@ -18,6 +18,7 @@ import {
+ } from '../../../providers/ssh-pty-errors'
+ import type { RuntimePtySpawnState } from './spawn-state'
+ import { markRuntimeSpawnHiddenBeforeSpawn } from './spawn-hidden-delivery'
++import { admitOjakPtySpawn } from '../../../agent-launch/ojak-pty-launch'
+ 
+ export async function executeRuntimePtySpawn(ctx: RuntimePtySpawnState): Promise<void> {
+   const args = ctx.args
+@@ -85,6 +86,8 @@ export async function executeRuntimePtySpawn(ctx: RuntimePtySpawnState): Promise
+         claim: args.agentSessionEnsure.claim,
+         surface: args.agentSessionEnsure.surface,
+         spawn: async () => {
++          assertClientStillConnected()
++          await admitOjakPtySpawn(ctx.spawnOptions, !args.connectionId && !ctx.expectedWslDistro)
+           assertClientStillConnected()
+           providerResult = await ctx.provider.spawn(ctx.spawnOptions)
+           ctx.rejectedRegistrationCandidate = providerResult
+@@ -141,6 +144,7 @@ export async function executeRuntimePtySpawn(ctx: RuntimePtySpawnState): Promise
+             owner: stablePaneOwnerCandidate,
+             worktreeId: args.worktreeId,
+             connectionId: args.connectionId,
++            beforeFreshSpawn: () => admitOjakPtySpawn(ctx.spawnOptions, !args.connectionId && !ctx.expectedWslDistro),
+             resolveOwner: () =>
+               resolveStablePaneOwner(
+                 ctx.deps.runtime,
+diff --git a/src/main/ipc/pty/runtime/spawn.ts b/src/main/ipc/pty/runtime/spawn.ts
+index 5897cb1d..129c0059 100644
+--- a/src/main/ipc/pty/runtime/spawn.ts
++++ b/src/main/ipc/pty/runtime/spawn.ts
+@@ -20,6 +20,7 @@ import {
+   commitRuntimeSpawnHiddenDelivery,
+   releaseRuntimeSpawnPreSpawnHiddenMark
+ } from './spawn-hidden-delivery'
++import { commitOjakPtySpawn, releaseOjakPtySpawn } from '../../../agent-launch/ojak-pty-launch'
+ 
+ function toRuntimeSpawnReply(result: {
+   id: string
+@@ -101,6 +102,7 @@ export async function spawnPtyFromRuntimeController(
+     await executeRuntimePtySpawn(ctx)
+     const committed = await commitRuntimePtySpawn(ctx)
+     commitRuntimeSpawnHiddenDelivery(ctx)
++    await commitOjakPtySpawn(ctx.spawnOptions)
+     return toRuntimeSpawnReply(committed)
+   } catch (err) {
+     releaseRuntimeSpawnPreSpawnHiddenMark(ctx)
+@@ -120,6 +122,7 @@ export async function spawnPtyFromRuntimeController(
+     rejectPaneSpawnReservation(ctx.paneSpawnReservationKey, ctx.paneSpawnReservation, err)
+     throw err
+   } finally {
++    releaseOjakPtySpawn(ctx.spawnOptions)
+     ctx.releaseWorktreeSpawn?.()
+     ctx.finishTerminalInstall()
+   }
+diff --git a/src/main/native-chat/agent-session-timeline/provider-timeline-assembler-test-support.ts b/src/main/native-chat/agent-session-timeline/provider-timeline-assembler-test-support.ts
+index 79c1aea2..94aeb52e 100644
+--- a/src/main/native-chat/agent-session-timeline/provider-timeline-assembler-test-support.ts
++++ b/src/main/native-chat/agent-session-timeline/provider-timeline-assembler-test-support.ts
+@@ -244,6 +244,7 @@ export async function openProviderTimelineRig(
+   deferred.bind({ journal, fence: 1, publish: () => {} })
+   cleanups.push(async () => {
+     deferred.close()
++    closeTestJournalHostDatabase(root)
+     await rm(root, { recursive: true, force: true })
+   })
+   const sink = providerTimelineSink(deferred.sink)
+diff --git a/src/main/native-chat/agent-session-wire/structured-agent-session-queued-message-rig.test-fixture.ts b/src/main/native-chat/agent-session-wire/structured-agent-session-queued-message-rig.test-fixture.ts
+index ef7e3695..52890615 100644
+--- a/src/main/native-chat/agent-session-wire/structured-agent-session-queued-message-rig.test-fixture.ts
++++ b/src/main/native-chat/agent-session-wire/structured-agent-session-queued-message-rig.test-fixture.ts
+@@ -26,7 +26,7 @@ import {
+   hostTestOperationId,
+   resetHostTestOperationIds
+ } from './structured-agent-session-host-test-data'
+-import { openTestJournalHostDatabase } from '../agent-session-journal/journal-host-database-test-support'
++import { closeTestJournalHostDatabase, openTestJournalHostDatabase } from '../agent-session-journal/journal-host-database-test-support'
+ import { createStructuredAgentSessionLogger } from './structured-agent-session-logger'
+ import {
+   createQueuedRigProvider,
+@@ -271,6 +271,7 @@ export async function createQueuedMessageTestRig(
+ 
+   async function dispose(): Promise<void> {
+     await host.flushAllStreamedEvents()
++    closeTestJournalHostDatabase(root)
+     await rm(root, { recursive: true, force: true })
+   }
+ 
+diff --git a/src/main/pi/rpc-runtime-registration.ts b/src/main/pi/rpc-runtime-registration.ts
+index a8952bcb..ed5caba5 100644
+--- a/src/main/pi/rpc-runtime-registration.ts
++++ b/src/main/pi/rpc-runtime-registration.ts
+@@ -21,10 +21,12 @@ import {
+ import { PiRpcSessionAdapter } from './rpc-session-adapter'
+ import { createPiModelCatalogProbe } from './rpc-model-catalog-probe'
+ import { PI_SESSION_HISTORY } from './pi-session-history'
++import { structuredOjakLaunchAdmission } from '../agent-launch/ojak-structured-launch'
+ 
+ function createPiRpcAdapter(context: StructuredAgentAdapterContext): StructuredAgentRuntimeAdapter {
+   const { deps } = context
+   return new PiRpcSessionAdapter({
++    acquireLaunchAdmission: structuredOjakLaunchAdmission(context.journalDatabase),
+     resolveLaunch: composeStructuredLaunch(
+       PI_RPC_AGENT,
+       structuredAgentLaunchSources(context),
+diff --git a/src/main/pi/rpc-session-adapter.test.ts b/src/main/pi/rpc-session-adapter.test.ts
+index 8c74e65e..abdcff4f 100644
+--- a/src/main/pi/rpc-session-adapter.test.ts
++++ b/src/main/pi/rpc-session-adapter.test.ts
+@@ -18,6 +18,8 @@ import type { ProviderProcessLaunch } from '../provider-process/provider-process
+ import type { StructuredAgentSessionEventSink } from '../native-chat/agent-session-wire/structured-agent-session-event-sink'
+ import { agentSessionLaunchFolderMissing } from '../runtime/agent-session-launch-directory'
+ import { PiRpcSessionAdapter } from './rpc-session-adapter'
++import type { StructuredLaunchAdmission } from '../agent-launch/ojak-structured-launch'
++import type { OjakLaunchTicket } from '../agent-launch/ojak-launch-queue'
+ 
+ const sessionId = 'session-timeline'
+ const file = '/host/account/sessions/session.jsonl'
+@@ -146,8 +148,10 @@ async function setup(
+       return connection
+     }
+   )
++  const acquireLaunchAdmission = vi.fn<StructuredLaunchAdmission>().mockResolvedValue(null)
+   const adapter = new PiRpcSessionAdapter({
+     resolveLaunch,
++    acquireLaunchAdmission,
+     readProcessStartTime: async () => 12345,
+     openConnection,
+     onLifecycle: lifecycle,
+@@ -177,6 +181,7 @@ async function setup(
+     input,
+     resolveLaunch,
+     openConnection,
++    acquireLaunchAdmission,
+     connections
+   }
+ }
+@@ -193,6 +198,41 @@ describe('Pi RPC session ownership and delivery', () => {
+     expect(h.connections).toHaveLength(1)
+   })
+ 
++  it('creates no RPC connection before admission and refuses a cancelled grant', async () => {
++    const h = await setup()
++    await h.adapter.closeSession(sessionId)
++    const gate = Promise.withResolvers<OjakLaunchTicket | null>()
++    const entered = Promise.withResolvers<void>()
++    h.acquireLaunchAdmission.mockImplementationOnce(() => {
++      entered.resolve()
++      return gate.promise
++    })
++    const stop = new AbortController()
++    const started = h.adapter.acquire({ ...h.input, fence: 8, signal: stop.signal })
++    await entered.promise
++    expect(h.connections).toHaveLength(1)
++    stop.abort(new Error('launch cancelled'))
++    const rejected = expect(started).rejects.toThrow('launch cancelled')
++    gate.resolve(null)
++    await rejected
++    expect(h.connections).toHaveLength(1)
++  })
++
++  it('keeps the RPC child behind the durable submission write', async () => {
++    const h = await setup()
++    await h.adapter.closeSession(sessionId)
++    const release = vi.fn()
++    h.acquireLaunchAdmission.mockResolvedValueOnce({
++      signal: new AbortController().signal,
++      submitted: () => { throw new Error('journal write failed') },
++      committed: vi.fn(),
++      release
++    })
++    await expect(h.adapter.acquire({ ...h.input, fence: 8 })).rejects.toThrow('journal write failed')
++    expect(h.connections).toHaveLength(1)
++    expect(release).toHaveBeenCalledTimes(1)
++  })
++
+   it('does not spawn a start cancelled while resolving its workspace', async () => {
+     const h = await setup()
+     await h.adapter.closeSession(sessionId)
+diff --git a/src/main/pi/rpc-session-adapter.ts b/src/main/pi/rpc-session-adapter.ts
+index 139268fe..b99ebbae 100644
+--- a/src/main/pi/rpc-session-adapter.ts
++++ b/src/main/pi/rpc-session-adapter.ts
+@@ -22,6 +22,8 @@ import { PiRpcPromptError, preparePiRpcPrompt } from './rpc-prompt'
+ import { applyPiRpcSessionOption } from './rpc-options'
+ import { supportsSupervisedProviderChildLocation } from '../provider-process/supervised-provider-child-location'
+ import { ClaudeDispatchContentError } from '../claude/claude-structured-dispatch-content'
++import type { StructuredLaunchAdmission } from '../agent-launch/ojak-structured-launch'
++import type { OjakLaunchTicket } from '../agent-launch/ojak-launch-queue'
+ 
+ export type PiRpcSessionAdapterDeps = PiRpcSessionDeps & {
+   resolveLaunch: (input: {
+@@ -29,6 +31,7 @@ export type PiRpcSessionAdapterDeps = PiRpcSessionDeps & {
+     spawnToken: string
+   }) => Promise<PiRpcResolvedLaunch>
+   readProcessStartTime?: (pid: number) => Promise<number | null>
++  acquireLaunchAdmission?: StructuredLaunchAdmission
+ }
+ 
+ export class PiRpcSessionAdapter implements StructuredAgentSessionAdapter {
+@@ -52,6 +55,7 @@ export class PiRpcSessionAdapter implements StructuredAgentSessionAdapter {
+     this.acquiring.add(id)
+     const attempt = this.starts.begin(input.signal)
+     let session: PiRpcSession | undefined
++    let admission: OjakLaunchTicket | null | undefined
+     try {
+       if (attempt.signal.aborted) {
+         throw new AgentSessionPreSpawnError(new Error('Pi closed while starting'))
+@@ -79,8 +83,11 @@ export class PiRpcSessionAdapter implements StructuredAgentSessionAdapter {
+       if (attempt.signal.aborted) {
+         throw new AgentSessionPreSpawnError(new Error('Pi closed while starting'))
+       }
++      admission = await this.deps.acquireLaunchAdmission?.({ ...input, signal: attempt.signal }, launch)
++      attempt.signal.throwIfAborted()
+       const spec = buildPiRpcLaunch(launch)
+       const fresh = !launch.sessionFile && !launch.forkFile
++      admission?.submitted()
+       session = new PiRpcSession(input, randomUUID(), spec, this.deps, fresh)
+       this.sessions.set(id, session)
+       this.starts.track(attempt, session.connection)
+@@ -93,6 +100,7 @@ export class PiRpcSessionAdapter implements StructuredAgentSessionAdapter {
+         await spawned.onSpawned(session.connection.pid)
+       }
+       const process = await spawned.read(session.connection.pid)
++      admission?.committed()
+       const file = await waitForPromiseWithSignal(session.start(), attempt.signal)
+       if (session.connection.closed || attempt.signal.aborted) {
+         throw new Error('Pi exited while starting')
+@@ -120,6 +128,7 @@ export class PiRpcSessionAdapter implements StructuredAgentSessionAdapter {
+       this.starts.retainFailed(id, session.connection)
+       throw new AgentSessionAcquisitionExitUnprovenError(error)
+     } finally {
++      admission?.release()
+       this.starts.end(attempt)
+       this.acquiring.delete(id)
+     }
+diff --git a/src/main/runtime/orca-runtime-build-headless-mobile-session-browser-tabs.ts b/src/main/runtime/orca-runtime-build-headless-mobile-session-browser-tabs.ts
+index 9a247177..5765acc0 100644
+--- a/src/main/runtime/orca-runtime-build-headless-mobile-session-browser-tabs.ts
++++ b/src/main/runtime/orca-runtime-build-headless-mobile-session-browser-tabs.ts
+@@ -26,6 +26,8 @@ import { FLOATING_TERMINAL_WORKTREE_ID } from '../../shared/constants'
+ import { captureAcknowledgedTerminalTabRetirement } from './workspace-session-terminal-tab-retirement-identity'
+ import { closeLeafOrTab } from '../persistence/terminal-topology/terminal-topology-commit'
+ import { markAgentLaunchesClosedByUser } from '../agent-launch/agent-launch-pane-attachment'
++import { cancelOjakTerminalLaunches } from '../agent-launch/ojak-launch-admission'
++import { makePaneKey } from '../../shared/stable-pane-id'
+ 
+ export class OrcaRuntimeWithBuildHeadlessMobileSessionBrowserTabs extends OrcaRuntimeWithPersistTerminalSurfaceRetirements {
+   // Why: headless serve backs browser panes with offscreen WebContents that live
+@@ -119,6 +121,9 @@ export class OrcaRuntimeWithBuildHeadlessMobileSessionBrowserTabs extends OrcaRu
+     target: TerminalSurfaceCloseTarget,
+     options: TerminalSurfaceCloseOptions = {}
+   ): Promise<string[]> {
++    cancelOjakTerminalLaunches(
++      worktreeId, target.tabId, target.kind === 'pane' ? makePaneKey(target.tabId, target.leafId) : undefined
++    )
+     const store = this.store
+     if (!store?.getWorkspaceSession || !store.setWorkspaceSession || !store.runDurableMutation) {
+       throw new Error('workspace_session_unavailable')
+diff --git a/src/main/runtime/orca-runtime-get-structured-agent-session-create-support.ts b/src/main/runtime/orca-runtime-get-structured-agent-session-create-support.ts
+index 335727da..74ce9923 100644
+--- a/src/main/runtime/orca-runtime-get-structured-agent-session-create-support.ts
++++ b/src/main/runtime/orca-runtime-get-structured-agent-session-create-support.ts
+@@ -28,6 +28,7 @@ import {
+ } from '../../shared/agent-session-account-home'
+ import type { StructuredAgentId } from '../../shared/agent-session-provider-handle'
+ import { agentSessionWireProviderHandle } from '../../shared/agent-session-provider-handle-encoding'
++import { restoreOjakLaunches } from '../agent-launch/ojak-runtime-recovery'
+ 
+ export class OrcaRuntimeWithGetStructuredAgentSessionCreateSupport extends OrcaRuntimeWithGetWorktreePs {
+   async getStructuredAgentSessionCreateSupport(
+@@ -290,6 +291,7 @@ export class OrcaRuntimeWithGetStructuredAgentSessionCreateSupport extends OrcaR
+           if (this.structuredAgentSessionInventoryUnverifiable) {
+             this.structuredAgentSessionTabRestorePromise = null
+           }
++          if (this.store) restoreOjakLaunches(this, this.store)
+         },
+         (error) => {
+           this.structuredAgentSessionTabRestorePromise = null
+diff --git a/src/main/runtime/rpc/methods/agent-launch-terminal-prompt.test.ts b/src/main/runtime/rpc/methods/agent-launch-terminal-prompt.test.ts
+index 4da9fd8d..4dadcca9 100644
+--- a/src/main/runtime/rpc/methods/agent-launch-terminal-prompt.test.ts
++++ b/src/main/runtime/rpc/methods/agent-launch-terminal-prompt.test.ts
+@@ -104,6 +104,23 @@ describe('writing a launch prompt into a terminal agent', () => {
+     expect(options.composerReady).toBe(true)
+   })
+ 
++  it('restores a draft as one sanitized paste without submitting a model request', async () => {
++    const stub = runtimeStub({})
++    const writes: { text?: string; enter?: boolean }[] = []
++    const delivered = await deliverTerminalAgentLaunchPrompt({
++      runtime: { ...stub.runtime, sendTerminal: async (_handle, action, options) => {
++        await options.beforeWrite?.('pty-1')
++        writes.push(action)
++        return { handle: 'term_1', accepted: true, bytesWritten: action.text?.length ?? 0 }
++      } },
++      handle: 'term_1', agent: 'omp', freshLaunch: true, delivery: 'draft',
++      text: 'first\nsecond\u001b[201~'
++    })
++    expect(delivered).toBe(true)
++    expect(writes).toEqual([{ text: '\u001b[200~first\rsecond␛[201~\u001b[201~', enter: false }])
++    expect(stub.sendTerminalAgentPrompt).not.toHaveBeenCalled()
++  })
++
+   it('does not write when the composer never opened', async () => {
+     const stub = runtimeStub({ wait: { satisfied: false, status: 'blocked' } })
+     const delivered = await deliverTerminalAgentLaunchPrompt({
+diff --git a/src/main/runtime/rpc/methods/agent-launch-terminal-prompt.ts b/src/main/runtime/rpc/methods/agent-launch-terminal-prompt.ts
+index 8cffda5c..0d65aa51 100644
+--- a/src/main/runtime/rpc/methods/agent-launch-terminal-prompt.ts
++++ b/src/main/runtime/rpc/methods/agent-launch-terminal-prompt.ts
+@@ -34,6 +34,7 @@ import {
+   createLaunchedAgentWriteGuard,
+   type LaunchedAgentWriteGuardRuntime
+ } from '../../launched-agent-write-guard'
++import { wrapTerminalBracketedPasteText } from '../../../../shared/terminal-bracketed-paste-text'
+ 
+ /** The same budget orchestration gives a worker to reach its composer before dispatching to it. */
+ const AGENT_READY_TIMEOUT_MS = 60_000
+@@ -96,14 +97,16 @@ async function waitThroughBlockingPrompts(
+  * resend into a live TUI costs a duplicate turn.
+  */
+ export async function deliverTerminalAgentLaunchPrompt(args: {
+-  runtime: TerminalPromptRuntime
+   handle: string
+   agent: TuiAgent
+   /** False for a reused terminal, whose agent was already running before this launch. */
+   freshLaunch: boolean
+   text: string
+   clock?: ReadinessClock
+-}): Promise<boolean> {
++} & (
++  | { delivery?: 'submit'; runtime: TerminalPromptRuntime }
++  | { delivery: 'draft'; runtime: TerminalPromptRuntime & Pick<OrcaRuntimeService, 'sendTerminal'> }
++)): Promise<boolean> {
+   if (args.text.trim().length === 0) {
+     return false
+   }
+@@ -126,6 +129,12 @@ export async function deliverTerminalAgentLaunchPrompt(args: {
+       )
+       return false
+     }
++    if (args.delivery === 'draft') {
++      const sent = await args.runtime.sendTerminal(args.handle, {
++        text: wrapTerminalBracketedPasteText(args.text), enter: false
++      }, { inputKind: 'launch', beforeWrite: guard.beforeWrite })
++      return sent.accepted
++    }
+     const sent = await args.runtime.sendTerminalAgentPrompt(args.handle, args.text, {
+       inputKind: 'launch',
+       // A fresh launch's composer was just seen ready; a reused pane's state is only inferred.
+diff --git a/src/main/runtime/runtime-agent-terminal-startup.ts b/src/main/runtime/runtime-agent-terminal-startup.ts
+index 68932fc0..4dd03ca9 100644
+--- a/src/main/runtime/runtime-agent-terminal-startup.ts
++++ b/src/main/runtime/runtime-agent-terminal-startup.ts
+@@ -13,6 +13,8 @@ import {
+ import { resolveTerminalStartupCwd } from '../../shared/terminal-startup-cwd'
+ import { resolveAgentStartupPlanInputs } from '../../shared/agent-startup-plan-inputs'
+ import { agentStartedTelemetry } from '../agent-launch/agent-started-telemetry'
++import { buildAgentDraftLaunchPlan } from '../../shared/tui-agent-startup'
++import { ojakTerminalSelectionEnv } from '../../shared/ojak-terminal-selection'
+ 
+ export async function buildRuntimeAgentTerminalStartupOptions(
+   workspace: TerminalWorkspaceLaunchScope,
+@@ -40,6 +42,22 @@ export async function buildRuntimeAgentTerminalStartupOptions(
+     return opts
+   }
+ 
++  if (opts.startupDraft !== undefined) {
++    const plan = buildAgentDraftLaunchPlan({
++      ...resolveAgentStartupPlanInputs({
++        agent, settings, platform, isRemote, agentArgs: opts.agentArgs,
++        windowsShellOverride: opts.shellOverride, sessionOptions
++      }),
++      draft: opts.startupDraft
++    })
++    if (plan) {
++      opts.onStartupPromptCarry?.(true)
++      return { ...opts, command: plan.launchCommand, env: plan.env,
++        launchConfig: plan.launchConfig, launchAgent: agent,
++        startupCommandDelivery: plan.startupCommandDelivery }
++    }
++    opts.onStartupPromptCarry?.(false)
++  }
+   // A prompt this launch command cannot carry has nowhere to go from here — the create returns
+   // options, not a live PTY — so refuse rather than spawn the agent and drop the text.
+   if (opts.startupPrompt && !agentPromptRidesLaunchCommand(agent)) {
+@@ -85,7 +103,11 @@ export async function buildRuntimeAgentTerminalStartupOptions(
+   return {
+     ...opts,
+     command: startupPlan.launchCommand,
+-    ...(startupPlan.env ? { env: startupPlan.env } : {}),
++    ...(startupPlan.env ? { env: {
++      ...startupPlan.env,
++      ...(opts.startupDraft !== undefined
++        ? ojakTerminalSelectionEnv(agent, opts.startupDraft, 'draft', sessionOptions) : {})
++    } } : {}),
+     launchConfig: startupPlan.launchConfig,
+     launchAgent: agent,
+     startupCommandDelivery: startupPlan.startupCommandDelivery,
+diff --git a/src/main/runtime/runtime-terminal-contracts.ts b/src/main/runtime/runtime-terminal-contracts.ts
+index 43b487db..298a6c15 100644
+--- a/src/main/runtime/runtime-terminal-contracts.ts
++++ b/src/main/runtime/runtime-terminal-contracts.ts
+@@ -53,6 +53,8 @@ export type TerminalCreateOptions = {
+    * and post-start delivery belongs to whoever owns the live PTY.
+    */
+   startupPrompt?: string
++  /** A recovered unsent draft stays in the agent editor rather than becoming a model request. */
++  startupDraft?: string
+   /** Main-internal: whether `startupPrompt` rode the launch command. Called once the plan is built. */
+   onStartupPromptCarry?: (carried: boolean) => void
+   /**
+diff --git a/src/main/runtime/structured-agent-runtime-registrations.ts b/src/main/runtime/structured-agent-runtime-registrations.ts
+index 746f55af..033085e5 100644
+--- a/src/main/runtime/structured-agent-runtime-registrations.ts
++++ b/src/main/runtime/structured-agent-runtime-registrations.ts
+@@ -63,6 +63,7 @@ import {
+   composeStructuredLaunchRead,
+   structuredAgentLaunchSources
+ } from './structured-agent-launch-composition'
++import { structuredOjakLaunchAdmission } from '../agent-launch/ojak-structured-launch'
+ 
+ /** What an agent's adapter is built from: the open store and the runtime around it. */
+ export type StructuredAgentAdapterContext = {
+@@ -237,6 +238,7 @@ function acpRegistration(spec: AcpLaunchSpec): StructuredAgentRuntimeRegistratio
+       return new AcpStructuredSessionAdapter({
+         spec,
+         readJournal,
++        acquireLaunchAdmission: structuredOjakLaunchAdmission(context.journalDatabase),
+         resolveLaunch: composeStructuredLaunch(definition, sources, part),
+         readLaunch: composeStructuredLaunchRead(definition, sources, part),
+         connect: (launch, options) => createAcpAgentConnection(launch, options),
+diff --git a/src/main/runtime/structured-agent-session-runtime.ts b/src/main/runtime/structured-agent-session-runtime.ts
+index 34a68277..8e73e960 100644
+--- a/src/main/runtime/structured-agent-session-runtime.ts
++++ b/src/main/runtime/structured-agent-session-runtime.ts
+@@ -71,6 +71,7 @@ import {
+   scheduleNativeChatVisualsSweep,
+   type NativeChatVisualsSweepDeps
+ } from '../native-chat/native-chat-visuals-sweep'
++import { stopOjakLaunchWaiting } from '../agent-launch/ojak-launch-admission'
+ 
+ /** Whether this profile holds a structured chat: a record or tab in the journal database. */
+ export function hasPersistedStructuredAgentSessionStore(
+@@ -206,6 +207,7 @@ export async function stopStructuredAgentSessionRuntime(options?: {
+   trigger?: AgentSessionResumeTrigger
+ }): Promise<void> {
+   const trigger = options?.trigger ?? structuredAgentSessionTeardownTrigger()
++  stopOjakLaunchWaiting()
+   const pending = installing
+   installing = null
+   setStructuredAgentSessionHost(null)
+diff --git a/src/preload/api/pty-api.ts b/src/preload/api/pty-api.ts
+index 1dc52c94..0cc837a7 100644
+--- a/src/preload/api/pty-api.ts
++++ b/src/preload/api/pty-api.ts
+@@ -24,8 +24,13 @@ import type { TerminalPanePlacement } from '../../shared/terminal-pane-placement
+ import type { PtyManagementApi } from './pty-management-api'
+ import type { TerminalProcessInspection } from '../../shared/terminal-process-inspection'
+ import type { CodexSharedServerStatus } from '../../shared/codex-shared-server-command'
++import type { OjakLaunchNotice } from '../../shared/ojak-launch-admission'
+ 
+ export type PtyApi = {
++  ojakLaunchNotices?: () => Promise<OjakLaunchNotice[]>
++  ojakCancelLaunch?: (key: string) => Promise<boolean>
++  ojakDismissLaunch?: (key: string) => Promise<boolean>
++  ojakResumeLaunch?: (key: string, worktreeId: string) => Promise<void>
+   spawn: (opts: {
+     cols: number
+     rows: number
+diff --git a/src/preload/api/pty-bridge.ts b/src/preload/api/pty-bridge.ts
+index 18f867e6..8b926d8c 100644
+--- a/src/preload/api/pty-bridge.ts
++++ b/src/preload/api/pty-bridge.ts
+@@ -1,8 +1,14 @@
+ import type { PreloadApi } from '../api-types'
+ import { ptySessionControlApi } from './pty-bridge-session-control'
+ import { ptyStreamAndSerializationApi } from './pty-bridge-stream-and-serialization'
++import { ipcRenderer } from 'electron'
++import type { OjakLaunchNotice } from '../../shared/ojak-launch-admission'
+ 
+ export const ptyApi = {
++  ojakLaunchNotices: (): Promise<OjakLaunchNotice[]> => ipcRenderer.invoke('pty:ojakLaunchNotices'),
++  ojakCancelLaunch: (key: string): Promise<boolean> => ipcRenderer.invoke('pty:ojakCancelLaunch', key),
++  ojakDismissLaunch: (key: string): Promise<boolean> => ipcRenderer.invoke('pty:ojakDismissLaunch', key),
++  ojakResumeLaunch: (key: string, worktreeId: string): Promise<void> => ipcRenderer.invoke('pty:ojakResumeLaunch', key, worktreeId),
+   ...ptySessionControlApi,
+   ...ptyStreamAndSerializationApi
+ } satisfies PreloadApi['pty']
+diff --git a/src/renderer/src/components/native-chat/StructuredAgentSessionPaneOverlayLayer.tsx b/src/renderer/src/components/native-chat/StructuredAgentSessionPaneOverlayLayer.tsx
+index 942a6a5a..ae91c96a 100644
+--- a/src/renderer/src/components/native-chat/StructuredAgentSessionPaneOverlayLayer.tsx
++++ b/src/renderer/src/components/native-chat/StructuredAgentSessionPaneOverlayLayer.tsx
+@@ -9,6 +9,7 @@ import {
+ import { RetainedPaneHost } from '../tab-group/RetainedPaneHost'
+ import NativeChatView from './NativeChatView'
+ import { isStructuredTab } from './structured-agent-session-tabs'
++import { OjakLaunchNoticePanel } from '../terminal-pane/OjakLaunchNoticePanel'
+ 
+ type StructuredAgentSessionTab = Tab & {
+   contentType: 'agent-session'
+@@ -20,12 +21,14 @@ const EMPTY_GROUPS: readonly TabGroup[] = []
+ 
+ const StructuredAgentSessionOverlaySlot = memo(function StructuredAgentSessionOverlaySlot({
+   tab,
++  worktreeId,
+   groupId,
+   isActive,
+   isFocusedGroup,
+   onFocusOwningGroup
+ }: {
+   tab: StructuredAgentSessionTab
++  worktreeId: string
+   groupId: string | undefined
+   isActive: boolean
+   isFocusedGroup: boolean
+@@ -55,6 +58,7 @@ const StructuredAgentSessionOverlaySlot = memo(function StructuredAgentSessionOv
+         isFocusedGroup={isFocusedGroup}
+         target={target}
+       />
++      {target.kind === 'local' && isActive ? <OjakLaunchNoticePanel worktreeId={worktreeId} sessionId={tab.entityId} /> : null}
+     </RetainedPaneHost>
+   )
+ })
+@@ -94,6 +98,7 @@ const StructuredAgentSessionPaneOverlayLayer = memo(
+           <StructuredAgentSessionOverlaySlot
+             key={tab.id}
+             tab={tab}
++            worktreeId={worktreeId}
+             groupId={tab.groupId}
+             isActive={Boolean(isWorktreeActive && groupActiveTabById.get(tab.groupId) === tab.id)}
+             isFocusedGroup={Boolean(
+diff --git a/src/renderer/src/components/terminal-pane/OjakLaunchNoticePanel.tsx b/src/renderer/src/components/terminal-pane/OjakLaunchNoticePanel.tsx
+new file mode 100644
+index 00000000..3a4cdafe
+--- /dev/null
++++ b/src/renderer/src/components/terminal-pane/OjakLaunchNoticePanel.tsx
+@@ -0,0 +1,97 @@
++import { useEffect, useState } from 'react'
++import type { OjakLaunchNotice } from '../../../../shared/ojak-launch-admission'
++import { Button } from '@/components/ui/button'
++import { translate } from '@/i18n/i18n'
++
++/** The local execution host owns this state; remote panes never mount this notice. */
++export function OjakLaunchNoticePanel({ worktreeId, tabId, sessionId }: {
++  worktreeId?: string
++  tabId?: string
++  sessionId?: string
++}): React.JSX.Element | null {
++  const [notices, setNotices] = useState<OjakLaunchNotice[]>([])
++  const [error, setError] = useState<string | null>(null)
++  const [pendingKey, setPendingKey] = useState<string | null>(null)
++  useEffect(() => {
++    const read = window.api?.pty?.ojakLaunchNotices
++    if (!read) return
++    let disposed = false
++    let timer: ReturnType<typeof setTimeout> | undefined
++    const refresh = async (): Promise<void> => {
++      try {
++        const rows = await read()
++        if (!disposed) setNotices(rows)
++      } catch (failure) {
++        if (!disposed) setError(failure instanceof Error ? failure.message : String(failure))
++      } finally {
++        if (!disposed) timer = setTimeout(() => void refresh(), 1_000)
++      }
++    }
++    void refresh()
++    return () => { disposed = true; clearTimeout(timer) }
++  }, [worktreeId, tabId, sessionId])
++  if (notices.length === 0) return null
++  const ownsNotice = (row: OjakLaunchNotice): boolean => sessionId
++    ? row.owner.kind === 'structured' && row.owner.sessionId === sessionId
++    : row.owner.kind === 'terminal' && row.owner.worktreeId === worktreeId && row.owner.tabId === tabId
++  const current = notices.filter(ownsNotice)
++  const others = notices.filter((row) => !ownsNotice(row))
++  const act = async (notice: OjakLaunchNotice, action: 'copy' | 'resume' | 'cancel' = 'cancel'): Promise<void> => {
++    setPendingKey(notice.key)
++    try {
++      if (action === 'copy') await window.api.ui.writeClipboardText(notice.savedPrompt || notice.savedCommand || '')
++      else if (action === 'resume' && worktreeId) await window.api.pty.ojakResumeLaunch?.(notice.key, worktreeId)
++      else if (notice.phase === 'queued') await window.api.pty.ojakCancelLaunch?.(notice.key)
++      else await window.api.pty.ojakDismissLaunch?.(notice.key)
++      setNotices(await window.api.pty.ojakLaunchNotices?.() ?? [])
++      setError(null)
++    } catch (failure) {
++      setError(failure instanceof Error ? failure.message : String(failure))
++    } finally {
++      setPendingKey(null)
++    }
++  }
++  const renderNotice = (notice: OjakLaunchNotice): React.JSX.Element => (
++    <div key={notice.key} className="flex flex-wrap items-start gap-2">
++      <span className="min-w-0 flex-1 break-words">{notice.message}</span>
++      {notice.savedPrompt || notice.savedCommand ? (
++        <Button variant="outline" size="xs" disabled={pendingKey === notice.key} onClick={() => void act(notice, 'copy')}>
++          {translate('ojak.launch.copyInput', 'Copy saved input')}
++        </Button>
++      ) : null}
++      {notice.phase === 'queued' && !notice.waiting && notice.recovery && worktreeId ? (
++        <Button variant="outline" size="xs"
++          disabled={pendingKey === notice.key || (notice.recovery.kind === 'structured' && notice.owner.worktreeId !== worktreeId)}
++          onClick={() => void act(notice, 'resume')}>
++          {translate('ojak.launch.resumeHere', 'Resume in this workspace')}
++        </Button>
++      ) : null}
++      {notice.phase !== 'submitted' ? (
++        <Button variant="ghost" size="xs" disabled={pendingKey === notice.key} onClick={() => void act(notice)}>
++          {notice.phase === 'queued' ? translate('ojak.launch.cancel', 'Cancel') : translate('ojak.launch.dismiss', 'Dismiss')}
++        </Button>
++      ) : null}
++    </div>
++  )
++  return (
++    <div className={`pointer-events-auto absolute inset-x-3 ${sessionId ? 'top-3' : 'bottom-3'} z-50 flex max-h-60 flex-col gap-2 overflow-y-auto rounded-md border border-border bg-popover px-3.5 py-2.5 text-xs text-popover-foreground shadow-floating`} role="status">
++      {current.map(renderNotice)}
++      {others.length > 0 ? (
++        <details>
++          <summary className="cursor-pointer rounded-md px-2 py-1 hover:bg-accent focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring">
++            {translate('ojak.launch.otherSaved', 'Other saved Ojak launches')}
++          </summary>
++          <div className="flex flex-col gap-3 py-2">
++            {others.map((notice) => (
++              <div key={notice.key} className="flex flex-col gap-1">
++                <span className="break-all text-muted-foreground">{notice.owner.sessionId || notice.owner.paneKey || notice.owner.worktreeId}</span>
++                {renderNotice(notice)}
++              </div>
++            ))}
++          </div>
++        </details>
++      ) : null}
++      {error ? <span>{error}</span> : null}
++    </div>
++  )
++}
+diff --git a/src/renderer/src/components/terminal-pane/TerminalPaneSurface.tsx b/src/renderer/src/components/terminal-pane/TerminalPaneSurface.tsx
+index b125de9a..becf2938 100644
+--- a/src/renderer/src/components/terminal-pane/TerminalPaneSurface.tsx
++++ b/src/renderer/src/components/terminal-pane/TerminalPaneSurface.tsx
+@@ -28,6 +28,7 @@ import {
+ import type { TerminalPaneController } from './use-terminal-pane-controller'
+ import { useAppStore } from '@/store'
+ import { isTerminalPaneOnClient } from './terminal-pane-client-host'
++import { OjakLaunchNoticePanel } from './OjakLaunchNoticePanel'
+ 
+ export function TerminalPaneSurface({
+   controller
+@@ -177,6 +178,7 @@ export function TerminalPaneSurface({
+           paneTransportsRef={paneTransportsRef}
+         />
+       ))}
++      {paneOnClient && isActive ? <OjakLaunchNoticePanel worktreeId={worktreeId} tabId={tabId} /> : null}
+       <TerminalPaneCodexRestartPortals controller={controller} />
+       <AgentLaunchPaneNoticePortal
+         refusal={visibleLaunchRefusal}
+diff --git a/src/renderer/src/i18n/locales/en.json b/src/renderer/src/i18n/locales/en.json
+index 6d291a14..183edddf 100644
+--- a/src/renderer/src/i18n/locales/en.json
++++ b/src/renderer/src/i18n/locales/en.json
+@@ -19336,6 +19336,15 @@
+     "processLimitDetail": "The system refused to create a new process because your user account reached its process limit. This is often caused by runaway terminals, dev servers, or agents. Close some of them, then click Try Again.",
+     "launchFailedGenericDetail": "The system refused to start it. Free up memory or close other apps, then click Try Again. If this keeps happening, reinstall Orca."
+   },
++  "ojak": {
++    "launch": {
++      "copyInput": "Copy saved input",
++      "cancel": "Cancel",
++      "resumeHere": "Resume in this workspace",
++      "dismiss": "Dismiss",
++      "otherSaved": "Other saved Ojak launches"
++    }
++  },
+   "notifications": {
+     "agentStatus": {
+       "needsInput": "needs input",
+diff --git a/src/renderer/src/i18n/locales/es.json b/src/renderer/src/i18n/locales/es.json
+index 40f08806..d4e67cc6 100644
+--- a/src/renderer/src/i18n/locales/es.json
++++ b/src/renderer/src/i18n/locales/es.json
+@@ -19113,6 +19113,15 @@
+       "hiddenToast": "La pestaña Agentes está oculta. Vuelve a activarla en Configuración → Experimental."
+     }
+   },
++  "ojak": {
++    "launch": {
++      "copyInput": "Copiar entrada guardada",
++      "cancel": "Cancelar",
++      "resumeHere": "Reanudar en este espacio de trabajo",
++      "dismiss": "Descartar",
++      "otherSaved": "Otros inicios de Ojak guardados"
++    }
++  },
+   "notifications": {
+     "agentStatus": {
+       "needsInput": "necesita información",
+diff --git a/src/renderer/src/i18n/locales/fr.json b/src/renderer/src/i18n/locales/fr.json
+index c5103ea6..fbbcaaf4 100644
+--- a/src/renderer/src/i18n/locales/fr.json
++++ b/src/renderer/src/i18n/locales/fr.json
+@@ -19172,6 +19172,15 @@
+     "moreMatchesAvailable": "D'autres correspondances sont peut-être disponibles. Affinez votre recherche pour réduire les résultats.",
+     "recentValidationFailed": "Impossible de vérifier les fichiers récents : {{error}}"
+   },
++  "ojak": {
++    "launch": {
++      "copyInput": "Copier le texte enregistré",
++      "cancel": "Annuler",
++      "resumeHere": "Reprendre dans cet espace de travail",
++      "dismiss": "Fermer",
++      "otherSaved": "Autres lancements Ojak enregistrés"
++    }
++  },
+   "notifications": {
+     "agentStatus": {
+       "needsInput": "attend une réponse",
+diff --git a/src/renderer/src/i18n/locales/ja.json b/src/renderer/src/i18n/locales/ja.json
+index 90c53e14..3d1d3641 100644
+--- a/src/renderer/src/i18n/locales/ja.json
++++ b/src/renderer/src/i18n/locales/ja.json
+@@ -19113,6 +19113,15 @@
+       "hiddenToast": "Agent タブを非表示にしました。設定 → 実験的機能で再度有効にできます。"
+     }
+   },
++  "ojak": {
++    "launch": {
++      "copyInput": "保存済みの入力をコピー",
++      "cancel": "キャンセル",
++      "resumeHere": "このワークスペースで再開",
++      "dismiss": "閉じる",
++      "otherSaved": "保存済みの他のOjak起動"
++    }
++  },
+   "notifications": {
+     "agentStatus": {
+       "needsInput": "入力待ち",
+diff --git a/src/renderer/src/i18n/locales/ko.json b/src/renderer/src/i18n/locales/ko.json
+index 2203c5ef..0ed8188f 100644
+--- a/src/renderer/src/i18n/locales/ko.json
++++ b/src/renderer/src/i18n/locales/ko.json
+@@ -19113,6 +19113,15 @@
+       "hiddenToast": "에이전트 탭이 숨겨졌습니다. 설정 → 실험 기능에서 다시 활성화하세요."
+     }
+   },
++  "ojak": {
++    "launch": {
++      "copyInput": "저장된 입력 복사",
++      "cancel": "취소",
++      "resumeHere": "이 작업 공간에서 재개",
++      "dismiss": "닫기",
++      "otherSaved": "저장된 다른 Ojak 실행"
++    }
++  },
+   "notifications": {
+     "agentStatus": {
+       "needsInput": "입력 필요",
+diff --git a/src/renderer/src/i18n/locales/zh.json b/src/renderer/src/i18n/locales/zh.json
+index 9501aa69..1c9569f2 100644
+--- a/src/renderer/src/i18n/locales/zh.json
++++ b/src/renderer/src/i18n/locales/zh.json
+@@ -19113,6 +19113,15 @@
+       "hiddenToast": "智能体标签页已隐藏。可在设置 → 实验性功能中重新启用。"
+     }
+   },
++  "ojak": {
++    "launch": {
++      "copyInput": "复制已保存的输入",
++      "cancel": "取消",
++      "resumeHere": "在此工作区继续",
++      "dismiss": "关闭",
++      "otherSaved": "其他已保存的 Ojak 启动"
++    }
++  },
+   "notifications": {
+     "agentStatus": {
+       "needsInput": "需要输入",
+diff --git a/src/renderer/src/lib/launch-agent-startup-prompt-plan.ts b/src/renderer/src/lib/launch-agent-startup-prompt-plan.ts
+index 0723d3ed..a76b3c18 100644
+--- a/src/renderer/src/lib/launch-agent-startup-prompt-plan.ts
++++ b/src/renderer/src/lib/launch-agent-startup-prompt-plan.ts
+@@ -3,6 +3,7 @@ import {
+   buildAgentStartupPlan,
+   type AgentStartupPlan
+ } from '@/lib/tui-agent-startup'
++import { ojakTerminalSelectionEnv } from '../../../shared/ojak-terminal-selection'
+ 
+ type StartupPlanBase = Omit<
+   Parameters<typeof buildAgentStartupPlan>[0],
+@@ -32,11 +33,14 @@ export function planLaunchAgentStartupPrompt(args: {
+   const hasPrompt = prompt.length > 0
+   const launchEmpty = (): AgentStartupPlan | null =>
+     buildAgentStartupPlan({ ...base, prompt: '', allowEmptyPromptLaunch: true })
+-  const pasteAfterReady = (submit: boolean): LaunchAgentStartupPromptPlan => ({
+-    startupPlan: launchEmpty(),
+-    pasteDraftAfterLaunch: prompt,
+-    submitPastedPrompt: submit
+-  })
++  const pasteAfterReady = (submit: boolean): LaunchAgentStartupPromptPlan => {
++    const startupPlan = launchEmpty()
++    if (startupPlan && base.agent === 'omp') {
++      startupPlan.env = { ...startupPlan.env, ...ojakTerminalSelectionEnv(base.agent, prompt,
++        submit ? 'submit' : 'draft', base.sessionOptions) }
++    }
++    return { startupPlan, pasteDraftAfterLaunch: prompt, submitPastedPrompt: submit }
++  }
+ 
+   if (hasPrompt && promptDelivery === 'submit-after-ready') {
+     // Why: multi-line generated prompts are too large for a shell argv, so launch clean then paste+submit in the TUI.
+diff --git a/src/shared/ojak-launch-admission.ts b/src/shared/ojak-launch-admission.ts
+new file mode 100644
+index 00000000..396bada2
+--- /dev/null
++++ b/src/shared/ojak-launch-admission.ts
+@@ -0,0 +1,24 @@
++import type { OjakLaunchRecoveryIntent } from './ojak-launch-recovery'
++
++export type OjakLaunchOwner = {
++  kind: 'terminal' | 'structured'
++  worktreeId: string
++  tabId?: string
++  paneKey?: string
++  sessionId?: string
++}
++
++export type OjakLaunchNotice = {
++  key: string
++  owner: OjakLaunchOwner
++  phase: 'queued' | 'submitted' | 'cancelled' | 'failed'
++  message: string
++  /** Unsent launch command only; never the environment or bridge token. */
++  savedCommand?: string
++  savedPrompt?: string
++  recovery?: OjakLaunchRecoveryIntent
++  /** Ownership commit alone cannot settle a recovered terminal's pending prompt delivery. */
++  deliveryPending?: boolean
++  /** Transient host state, not persisted. */
++  waiting?: boolean
++}
+diff --git a/src/shared/ojak-launch-recovery.ts b/src/shared/ojak-launch-recovery.ts
+new file mode 100644
+index 00000000..2baa6e69
+--- /dev/null
++++ b/src/shared/ojak-launch-recovery.ts
+@@ -0,0 +1,29 @@
++import { z } from 'zod'
++
++export const ojakLaunchPromptSchema = z.object({
++  text: z.string(),
++  delivery: z.enum(['submit', 'draft']),
++})
++
++/** Selection, not executable text: recovery reads commands, permissions and credentials anew. */
++export const ojakTerminalSelectionSchema = z.object({
++  version: z.literal(1),
++  prompt: ojakLaunchPromptSchema,
++  sessionOptions: z.record(z.string(), z.union([z.string(), z.boolean()])).optional()
++})
++export type OjakTerminalSelection = z.infer<typeof ojakTerminalSelectionSchema>
++
++export const ojakLaunchRecoverySchema = z.discriminatedUnion('kind', [
++  z.object({
++    kind: z.literal('terminal'),
++    selection: ojakTerminalSelectionSchema,
++    cwd: z.string().optional(),
++    shellOverride: z.string().optional()
++  }),
++  z.object({
++    kind: z.literal('structured'),
++    sessionId: z.string()
++  })
++])
++export type OjakLaunchRecoveryIntent = z.infer<typeof ojakLaunchRecoverySchema>
++export type OjakLaunchPrompt = z.infer<typeof ojakLaunchPromptSchema>
+diff --git a/src/shared/ojak-terminal-selection.ts b/src/shared/ojak-terminal-selection.ts
+new file mode 100644
+index 00000000..68818e26
+--- /dev/null
++++ b/src/shared/ojak-terminal-selection.ts
+@@ -0,0 +1,18 @@
++import type { SessionOptionValue } from './native-chat-session-options'
++import type { OjakTerminalSelection } from './ojak-launch-recovery'
++
++export const OJAK_TERMINAL_SELECTION_ENV = 'ORCA_OJAK_TERMINAL_SELECTION'
++
++/** Transient startup metadata; main removes it before handing the environment to a child. */
++export function ojakTerminalSelectionEnv(
++  agent: string,
++  text: string,
++  delivery: 'submit' | 'draft',
++  sessionOptions?: Record<string, SessionOptionValue>
++): Record<string, string> {
++  if (agent !== 'omp') return {}
++  const selection: OjakTerminalSelection = {
++    version: 1, prompt: { text, delivery }, ...(sessionOptions ? { sessionOptions } : {})
++  }
++  return { [OJAK_TERMINAL_SELECTION_ENV]: JSON.stringify(selection) }
++}
+diff --git a/src/shared/startup-line-prompt-carry.ts b/src/shared/startup-line-prompt-carry.ts
+index e808cb9c..2ed7dcda 100644
+--- a/src/shared/startup-line-prompt-carry.ts
++++ b/src/shared/startup-line-prompt-carry.ts
+@@ -19,6 +19,7 @@
+ import { TUI_AGENT_CONFIG } from './tui-agent-config'
+ import { buildAgentStartupPlan, type AgentStartupPlan } from './tui-agent-startup'
+ import type { TuiAgent } from './tui-agent'
++import { ojakTerminalSelectionEnv } from './ojak-terminal-selection'
+ 
+ /** Half of macOS MAX_CANON: a single typed line this long survived every canonical-mode write
+  *  measured, and 1 KiB did not. Also the cap on each line of a multi-line one. */
+@@ -116,8 +117,9 @@ export function planStartupWithPromptCandidate(
+       return { plan: withPrompt, promptCarried: true }
+     }
+   }
+-  return {
+-    plan: buildAgentStartupPlan({ ...inputs, prompt: '', allowEmptyPromptLaunch: true }),
+-    promptCarried: false
++  const plan = buildAgentStartupPlan({ ...inputs, prompt: '', allowEmptyPromptLaunch: true })
++  if (plan && inputs.agent === 'omp') {
++    plan.env = { ...plan.env, ...ojakTerminalSelectionEnv(inputs.agent, prompt, 'submit', inputs.sessionOptions) }
+   }
++  return { plan, promptCarried: false }
+ }
+diff --git a/src/shared/tui-agent-startup.ts b/src/shared/tui-agent-startup.ts
+index 8c56c1d9..65630559 100644
+--- a/src/shared/tui-agent-startup.ts
++++ b/src/shared/tui-agent-startup.ts
+@@ -18,6 +18,7 @@ import type { TuiAgent } from './tui-agent'
+ import type { SessionOptionValue } from './native-chat-session-options'
+ import { resolveAgentLaunchCommand } from './tui-agent-launch-command'
+ import { appliedSessionOptionProps, buildFlagPromptStartupPlan } from './flag-prompt-startup'
++import { ojakTerminalSelectionEnv } from './ojak-terminal-selection'
+ 
+ export { buildAgentResumeStartupPlan } from './tui-agent-resume-startup'
+ 
+@@ -89,7 +90,9 @@ export function buildAgentStartupPlan(args: {
+       followupPrompt: null,
+       launchConfig,
+       ...appliedSessionOptionProps(baseCommand.appliedSessionOptions),
+-      ...(args.agentEnv ? { env: { ...args.agentEnv } } : {})
++      ...(args.agentEnv || agent === 'omp' ? {
++        env: { ...args.agentEnv, ...ojakTerminalSelectionEnv(agent, prompt, 'submit', args.sessionOptions) }
++      } : {})
+     }
+   }
+ 
+@@ -108,7 +111,9 @@ export function buildAgentStartupPlan(args: {
+       launchConfig,
+       ...appliedSessionOptionProps(baseCommand.appliedSessionOptions),
+       ...(agent === 'codex' ? { startupCommandDelivery: 'shell-ready' as const } : {}),
+-      ...(args.agentEnv ? { env: { ...args.agentEnv } } : {})
++      ...(args.agentEnv || agent === 'omp' ? {
++        env: { ...args.agentEnv, ...ojakTerminalSelectionEnv(agent, prompt, 'submit', args.sessionOptions) }
++      } : {})
+     }
+   }
+ 
+@@ -276,7 +281,8 @@ export function buildAgentDraftLaunchPlan(args: {
+       expectedProcess: config.expectedProcess,
+       launchConfig,
+       ...appliedSessionOptionProps(baseCommand.appliedSessionOptions),
+-      env: { ...args.agentEnv, [config.draftPromptEnvVar]: trimmed }
++      env: { ...args.agentEnv, [config.draftPromptEnvVar]: trimmed,
++        ...ojakTerminalSelectionEnv(agent, draft, 'draft', args.sessionOptions) }
+     }
+   }
+   if (

@@ -107,6 +107,25 @@ pub(crate) fn omp() -> Result<PathBuf, ApiError> {
     Ok(std::env::var_os("OMP_NATIVE_BIN").map(PathBuf::from).unwrap_or(fallback))
 }
 
+/// The coupled client fork owns persistence and the no-replay fence. Check it
+/// before replacing a working extension or enabling the new bridge protocol.
+fn require_admission_client() -> Result<(), ApiError> {
+    let manifest: Value = serde_json::from_str(include_str!("../../../integrations/client-forks/manifest.json"))
+        .map_err(|_| error("CLIENT_BUILD_METADATA_INVALID", "클라이언트 수정본 빌드 정보를 읽지 못했어요."))?;
+    let required = manifest.get("clients").and_then(Value::as_array)
+        .and_then(|clients| clients.iter().find(|client| client.get("directory").and_then(Value::as_str) == Some("oh-my-pi")))
+        .and_then(|client| client.get("version")).and_then(Value::as_str)
+        .ok_or_else(|| error("CLIENT_BUILD_METADATA_INVALID", "필요한 omp 수정본 버전 정보가 없어요."))?;
+    let output = std::process::Command::new(omp()?).arg("--version").output()
+        .map_err(|_| error("OMP_ADMISSION_CLIENT_REQUIRED", "작업 보존 기능이 있는 omp 수정본을 먼저 설치해 주세요."))?;
+    let installed = std::str::from_utf8(&output.stdout).ok().map(str::trim).and_then(|text| text.strip_prefix("omp/"));
+    if !output.status.success() || installed != Some(required) {
+        return Err(ApiError::new("OMP_ADMISSION_CLIENT_REQUIRED",
+            format!("작업 보존·자동 재개에는 omp {required} 수정본이 필요해요. 기존 확장과 연결 설정은 변경하지 않았어요.")));
+    }
+    Ok(())
+}
+
 /// omp 자신의 설정 명령으로 값을 읽는다. 값이 없으면 `Null`.
 fn config_get(key: &str) -> Result<Value, ApiError> {
     let output = std::process::Command::new(omp()?)
@@ -281,6 +300,9 @@ fn extension_state() -> Result<(PathBuf, bool), ApiError> {
 
 pub fn refresh_installed() -> Result<bool, ApiError> {
     let directory = omp_extension::extension_directory(&ACCOUNTS).map_err(extension_error)?;
+    if omp_extension::inspect(&ACCOUNTS, &directory).map_err(extension_error)?.is_some() {
+        require_admission_client()?;
+    }
     omp_extension::refresh_installed(&ACCOUNTS, &directory).map_err(extension_error)
 }
 
@@ -297,6 +319,7 @@ pub fn status(paths: &Paths) -> Result<Status, ApiError> {
 }
 
 pub fn connect(paths: &Paths) -> Result<Status, ApiError> {
+    require_admission_client()?;
     let snapshot = call(paths, "status.read", json!({}))?;
     if !omp_broker::status(paths)?.connected {
         return Err(error("BROKER_REQUIRED", "omp에 Ojak 모델을 등록하려면 로그인 연결 서비스가 필요해요. 먼저 `aam omp-broker connect`를 실행해 주세요. 계정에 다시 로그인할 필요는 없어요."));

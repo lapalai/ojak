@@ -3,6 +3,7 @@ import type { CSSProperties } from "react";
 import { Bell, BellRing, ChevronRight, RefreshCw } from "lucide-react";
 import { ActionFeedback, Badge, Busy, Sparkline } from "./components";
 import { ProviderLoginDialog } from "./LoginDialog";
+import { ResetCreditsPanel } from "./ResetCreditsPanel";
 import { reloginRequest } from "./login";
 import { fullTime, privacyText, projectName, providerColor, relativeTime, shortTime, toolNames, useAction } from "./state";
 import { limitLabel, t } from "./i18n";
@@ -120,6 +121,8 @@ export function AccountRow(props: AccountRowProps) {
   const verdict = row.verdict;
   const overview = verdict ? overviewOf(verdict, row.quotas, now) : null;
   const group = row.group;
+  const sharedProfiles = group?.members.filter(member => member.identityKey && member.profilePath && group.members.some(other =>
+    other.id !== member.id && other.tool === member.tool && other.identityKey === member.identityKey && other.profilePath !== member.profilePath)).length ?? 0;
   const name = row.unknown ? t("account.unknown") : row.alias ? privacyText(row.alias, masked) : row.account ? accountText(row.account, masked) : group ? privacyText(group.primary.label, masked) : t("account.unknown");
   const toolTags = group ? group.members.map(member => member.tool).filter((tool, index, list) => tool !== "omp" && list.indexOf(tool) === index) : [];
   const reason = verdict ? verdictReason(verdict, reserve) : null;
@@ -155,6 +158,7 @@ export function AccountRow(props: AccountRowProps) {
         <span className="acc-id">
           <strong title={masked ? undefined : name}>{name}</strong>
           {toolTags.length > 0 && <small>{toolTags.map(tool => toolNames[tool] || tool).join(", ")}</small>}
+          {sharedProfiles > 1 && <small title={t("account.sharedQuota", { count: sharedProfiles })}>{t("account.sharedProfiles")}</small>}
         </span>
       </button>
       <div className={`acc-state ${status.tone}`} title={reason ?? undefined}><span className="dot" aria-hidden="true" /><span className="acc-state-text">{status.label}</span></div>
@@ -192,6 +196,7 @@ export function AccountRow(props: AccountRowProps) {
             {row.alias && <><dt>{t("usage.detail.name")}</dt><dd>{privacyText(row.alias, masked)}</dd></>}
             <dt>{t("usage.detail.email")}</dt><dd>{accountText(row.account, masked)}</dd>
             {group && <><dt>{t("usage.detail.tools")}</dt><dd>{group.members.map(member => `${toolNames[member.tool] || member.tool}${member.plan ? ` (${member.plan})` : ""}`).join(", ")}</dd></>}
+            {sharedProfiles > 1 && <><dt>{t("account.sharedProfiles")}</dt><dd>{t("account.sharedQuota", { count: sharedProfiles })}</dd></>}
           </dl>
           {reason && !ompLogin && <p className="reason">{reason}</p>}
           {verdict && paidLine(verdict) && <p className="paid-hint" title={paidTitle(verdict) ?? undefined}>{paidLine(verdict)}</p>}
@@ -201,6 +206,7 @@ export function AccountRow(props: AccountRowProps) {
           </p>}
           {row.notes.filter(note => !(verdict?.kind === "excluded" && note === t("allocation.excluded"))).map(note => <p className="note" key={note}>{note}</p>)}
           {group && canPin && !manual && <button type="button" className="text-button pin-button" disabled={!online || pinPending} onClick={props.onPin}>{t("usage.pin.fix")}</button>}
+          {group && <ResetCreditsPanel key={group.primary.id} accountId={group.primary.id} name={name} online={online} onReload={props.onReload} />}
         </section>
         {row.quotas.length > 0 && <section aria-label={t("usage.detail.limits")}>
           <h4>{t("usage.detail.limits")}</h4>

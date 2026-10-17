@@ -763,3 +763,7 @@ code.command-chip { padding: 3px 9px; border-radius: 6px; background: var(--surf
 .getting-started.collapsed { display: flex; align-items: center; gap: 9px; padding: 6px 8px 6px 14px; color: var(--secondary); font-size: var(--fs-meta); }
 .getting-started.collapsed .icon-button { margin-left: auto; width: 24px; min-width: 24px; height: 24px; }
 .launch-notice > .icon-button { width: 22px; min-width: 22px; height: 22px; min-height: 22px; margin: -2px -4px 0 0; }
+
+.reset-credits { margin-top: 14px; padding-top: 12px; border-top: 1px solid var(--line); }
+.reset-credits > p, .reset-credit > p { margin: 6px 0; }
+.reset-credit { margin-top: 10px; padding: 10px; border: 1px solid var(--line); border-radius: 8px; }
