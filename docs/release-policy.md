@@ -83,6 +83,8 @@ npx tauri signer generate -w "$HOME/.tauri/ojak.key"
 
 비밀키가 없는 로컬 빌드에서 `scripts/build.mjs`는 업데이터 산출물만 끄고 앱·설치 파일을 만든다. 키가 있으면 Mac의 `Ojak.app.tar.gz`와 `.sig` 등 업데이터 산출물도 만든다. 빌드 완료와 두 OS 배포 검증 완료는 구분한다.
 
+브랜치·PR CI는 `node scripts/build.mjs --verify-build`로 Windows NSIS·Mac DMG 전체 빌드를 검증하고 `verification-only-*` Actions artifact에 7일 보관한다. 서명 키를 받지 않으며 업데이터 산출물·태그·Release를 만들지 않는다. 태그나 다른 이벤트에서 이 옵션을 사용하면 거절한다. 이 빌드 성공은 설치·서명·공개 승인 검증을 대신하지 않는다.
+
 ## 0.13.2 통합 배포 준비 기록 (2026-10-17)
 
 - Ojak Windows 후보: `target/release/bundle/nsis/Ojak_0.13.2_x64-setup.exe`, 11,061,609 bytes, SHA-256 `b0dd6ef9cb800a22ca278c2077dcc82614d69de4dd9f0ddf7d7e1ce6fb821eab`. 로컬 업데이터 서명은 없다.
