@@ -151,6 +151,66 @@ fn config_set(key: &str, value: &Value) -> Result<(), ApiError> {
     }
     Ok(())
 }
+#[derive(Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ModelCheck {
+    pub model_fallback: bool,
+    pub unknown_sources: Vec<String>,
+}
+
+/// 역할 키는 모델 참조가 아니다. 공급자·id 접두 wildcard는 같은 공급자의
+/// 카탈로그와 대조한다. 조회 실패는 빈 목록으로 취급하거나 설정을 자동 변경하지 않는다.
+fn check_fallback_sources(retry: &Value, catalog: &Value) -> Result<ModelCheck, ApiError> {
+    let rows = catalog.get("models").and_then(Value::as_array)
+        .filter(|rows| !rows.is_empty())
+        .ok_or_else(|| error("OMP_MODELS_UNAVAILABLE", "omp 모델 목록을 확인하지 못했어요. 설정은 변경하지 않았어요."))?;
+    let mut known = std::collections::HashSet::with_capacity(rows.len());
+    for row in rows {
+        let (Some(provider), Some(id)) = (row["provider"].as_str(), row["id"].as_str()) else {
+            return Err(error("OMP_MODELS_UNAVAILABLE", "omp 모델 목록 형식을 확인하지 못했어요. 설정은 변경하지 않았어요."));
+        };
+        known.insert((provider, id));
+    }
+    let mut unknown_sources = Vec::new();
+    if let Some(chains) = retry.get("fallbackChains").and_then(Value::as_object) {
+        for source in chains.keys() {
+            let Some((provider, id)) = source.split_once('/') else { continue };
+            let present = if id == "*" || id.ends_with("/*") {
+                let prefix = &id[..id.len() - 1];
+                known.iter().any(|(candidate, model)| *candidate == provider && model.starts_with(prefix))
+            } else {
+                known.contains(&(provider, id))
+            };
+            if !present {
+                unknown_sources.push(source.clone());
+            }
+        }
+    }
+    Ok(ModelCheck {
+        model_fallback: retry.get("modelFallback").and_then(Value::as_bool)
+            .ok_or_else(|| error("OMP_CONFIG_FAILED", "omp 자동 fallback 설정을 확인하지 못했어요. 설정은 변경하지 않았어요."))?,
+        unknown_sources,
+    })
+}
+
+/// 연결 상태의 5초 폴링과 분리된 명시적 읽기 전용 점검.
+pub fn check_models() -> Result<ModelCheck, ApiError> {
+    let retry = json!({
+        "modelFallback": config_get("retry.modelFallback")?,
+        "fallbackChains": config_get("retry.fallbackChains")?,
+    });
+    let output = std::process::Command::new(omp()?)
+        .args(["models", "--kind", "all", "--json"])
+        .output()
+        .map_err(|_| error("OMP_MODELS_UNAVAILABLE", "omp 모델 목록을 읽지 못했어요. 설정은 변경하지 않았어요."))?;
+    if !output.status.success() {
+        return Err(error("OMP_MODELS_UNAVAILABLE", "omp 모델 조회에 실패했어요. 설정은 변경하지 않았어요."));
+    }
+    let catalog = serde_json::from_slice::<Value>(&output.stdout)
+        .map_err(|_| error("OMP_MODELS_UNAVAILABLE", "omp 모델 응답을 확인하지 못했어요. 설정은 변경하지 않았어요."))?;
+    check_fallback_sources(&retry, &catalog)
+}
+
 
 /// `aam-claude/<모델>`처럼 이전 공급자 ID로 적힌 모델 참조를 새 ID로 바꾼다. 해당 없으면 `None`.
 pub(crate) fn renamed_model(reference: &str) -> Option<String> {
@@ -405,6 +465,43 @@ pub fn disconnect(paths: &Paths) -> Result<Status, ApiError> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn fallback_check_distinguishes_default_and_provider_scoped_sources_even_when_disabled() {
+        let retry = json!({"modelFallback": false, "fallbackChains": {
+            "default": ["anthropic/anything"],
+            "smol": [],
+            "custom-role": [],
+            "google-antigravity/*": [],
+            "openrouter/google/*": [],
+            "google-antigravity/gemini-3.6-flash": ["anthropic/claude-haiku-4-5"],
+            "ojak-antigravity/gemini-3.8-flash": [],
+            "other/gemini-3.8-flash": []
+        }});
+        let catalog = json!({"models": [
+            {"provider": "google-antigravity", "id": "gemini-3.8-flash"},
+            {"provider": "ojak-antigravity", "id": "gemini-3.8-flash"},
+            {"provider": "openrouter", "id": "google/gemini-3.8-flash"}
+        ]});
+        let check = check_fallback_sources(&retry, &catalog).unwrap();
+        assert!(!check.model_fallback);
+        assert_eq!(check.unknown_sources, vec![
+            "google-antigravity/gemini-3.6-flash", "other/gemini-3.8-flash"
+        ]);
+    }
+
+    #[test]
+    fn fallback_check_accepts_current_sources_but_never_treats_missing_catalog_as_valid() {
+        let retry = json!({"modelFallback": true, "fallbackChains": {"google-antigravity/gemini-3.8-flash": []}});
+        let check = check_fallback_sources(&retry, &json!({"models": [
+            {"provider": "google-antigravity", "id": "gemini-3.8-flash"}
+        ]})).unwrap();
+        assert!(check.model_fallback);
+        assert!(check.unknown_sources.is_empty());
+        for catalog in [json!({}), json!({"models": []}), json!({"models": [{}]})] {
+            assert_eq!(check_fallback_sources(&retry, &catalog).unwrap_err().code, "OMP_MODELS_UNAVAILABLE");
+        }
+    }
+
 
     #[test]
     fn no_upstream_account_fails_fast_even_if_ojak_login_exists() {

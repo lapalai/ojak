@@ -1,4 +1,5 @@
 import { createContext, useContext, useEffect, useId, useRef } from "react";
+import { createPortal } from "react-dom";
 import type { CSSProperties, ReactNode } from "react";
 import { AlertCircle, CheckCircle2, LoaderCircle, X } from "lucide-react";
 import type { ApiError } from "./types";
@@ -64,9 +65,10 @@ export function Modal({ title, subtitle, children, onClose, busy = false, wide =
     if (element && !element.open) element.showModal();
     return () => { element?.close(); previous?.focus(); };
   }, []);
-  return <dialog ref={dialog} className={`modal ${wide ? "modal-wide" : ""}`} aria-labelledby={titleId} aria-describedby={subtitle ? descriptionId : undefined}
+  // 상세 화면 전환으로 목록이 숨겨져도 대화상자는 앱 WebView 루트에서 보인다.
+  return createPortal(<dialog ref={dialog} className={`modal ${wide ? "modal-wide" : ""}`} aria-labelledby={titleId} aria-describedby={subtitle ? descriptionId : undefined}
     onCancel={event => { event.preventDefault(); if (!busy) onClose(); }}>
     <div className="modal-heading"><div><h2 id={titleId}>{title}</h2>{subtitle && <p id={descriptionId}>{subtitle}</p>}</div><button type="button" className="icon-button" aria-label={t("modal.close")} onClick={onClose} disabled={busy}><X size={18} /></button></div>
     {children}
-  </dialog>;
+  </dialog>, document.body);
 }

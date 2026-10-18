@@ -11,6 +11,7 @@
 
 ## 명령 (`main.rs:24-78`)
 `status`, `doctor`, `refresh`, `explain --tool`, `run <claude|codex> [-- native args]`, `account {add, login, settings-preview}`, `service {install, uninstall, stop, restart, status}`, `integration {install, uninstall}`, `omp-broker|omp-bridge {status, connect, disconnect}`, `omp-observer {status, install, uninstall}`, `takeover {list, adopt, release}`, `shell {install, uninstall}`.
+`omp-bridge check-models`는 별도의 읽기 전용 JSON 명령이다. 현재 omp 카탈로그와 fallback 시작 키를 대조하고 `{modelFallback,unknownSources}`를 반환한다. 연결이나 서비스 재시작 없이 실행하며, 카탈로그 조회 실패는 오류로 알린다. 검사 범위는 [omp-bridge](omp-bridge.md#연결-흐름)를 따른다.
 
 ## 관리 실행 흐름 (`lib.rs`)
 shim → `route.resolve` → `lease.acquire`(PREPARED) → 실행 계획·identity 재확인(`IDENTITY_MISMATCH`) → `lease.starting` → supervisor로 spawn → `lease.started` → 10초 heartbeat → release/abort.
@@ -116,7 +117,7 @@ aam                                    # clap derive (main.rs:13-78) · --help/-
 ├── service {install | uninstall | stop | restart | status} # LaunchAgent ai.aam.service (text). restart = 버전이 다른 서비스를 lease 검사 후 안전 재시작
 ├── integration {install | uninstall}  # Unix symlink / Windows .cmd shim: aam·claude·codex (text)
 ├── omp-broker {status [--json] | connect | disconnect}   # connect/disconnect → JSON
-├── omp-bridge {status [--json] | connect | disconnect}   # connect는 omp-broker 연결 선행 필요
+├── omp-bridge {status [--json] | check-models | connect | disconnect}   # check-models → JSON, connect는 broker 연결 필요
 ├── omp-observer {status | install | uninstall}           # 읽기 전용 관측 확장 (text)
 ├── takeover
 │   ├── list                           # 인계 목록 + 후보 (JSON)

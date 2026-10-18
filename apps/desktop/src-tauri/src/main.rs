@@ -1108,6 +1108,7 @@ async fn omp_bridge_action(action: String) -> Result<Value, ApiError> {
         "status" => vec!["omp-bridge", "status", "--json"],
         "connect" => vec!["omp-bridge", "connect"],
         "disconnect" => vec!["omp-bridge", "disconnect"],
+        "check-models" => vec!["omp-bridge", "check-models"],
         _ => return Err(ApiError::new("INVALID_ACTION", "지원하지 않는 OMP 브릿지 작업입니다.")),
     };
     let result = run_management(args).await?;

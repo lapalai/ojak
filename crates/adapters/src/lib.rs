@@ -120,7 +120,7 @@ pub fn check_subscription_auth_env(tool: &str) -> Result<(), ApiError> {
     safety::check_env(tool)
 }
 
-fn failed_inspection(mut account: Account, error: ApiError) -> Account {
+fn failed_inspection(mut account: Account, error: ApiError, elapsed_ms: u64) -> Account {
     // 조회 프로세스의 일시 장애는 기존 로그인 폐기의 근거가 아니다. 새 로그인으로 승격하지 않고,
     // 이미 확인한 binding만 보존한다. 실제 실행·토큰 제공 때의 identity 검사는 그대로 수행한다.
     let preserve_binding = account.can_launch
@@ -133,7 +133,7 @@ fn failed_inspection(mut account: Account, error: ApiError) -> Account {
         account.auth_status = if error.code == "AUTH_REQUIRED" { "auth-required" } else { "error" }.into();
         account.verification = "configured".into();
     }
-    account.reason = Some(format!("{} ({})", error.message, error.code));
+    account.reason = Some(format!("{} ({}, 경과: {elapsed_ms}ms)", error.message, error.code));
     account.last_checked_at = now_ms();
     for bucket in &mut account.buckets {
         if bucket.used_percent.is_some() {
@@ -160,9 +160,10 @@ fn refresh_bound(old: &Account, binary: Option<&Path>) -> (Account, bool) {
     if let Some(binary) = binary {
         bound.binary_path = Some(binary.to_string_lossy().into_owned());
     }
+    let started = std::time::Instant::now();
     let refreshed = (|| {
         let (profile, executable) = native::bound_paths(&bound)?;
-        let mut fresh = native::inspect_identity(&old.tool, &profile, &executable, &old.label)?;
+        let mut fresh = native::inspect_identity_for_scan(&old.tool, &profile, &executable, &old.label)?;
         if fresh.auth_status == "auth-required" {
             return Err(ApiError::new("AUTH_REQUIRED", fresh.reason.unwrap_or_else(|| "공식 CLI에서 로그인한 뒤 다시 확인해 주세요.".into())));
         }
@@ -179,6 +180,10 @@ fn refresh_bound(old: &Account, binary: Option<&Path>) -> (Account, bool) {
         // 추가 사용량은 omp 조회에서만 오므로 이 점검이 지우지 않는다. 관측 시각이 오래되면 쓰지 않는다.
         fresh.extra_usage = old.extra_usage.clone();
         fresh.credits = old.credits.clone();
+        // 사용량 조회 실패 안내는 이번 신원 확인이 성공해도 이후 조회나 omp 관측이 해소할 때까지 이어 둔다.
+        if fresh.reason.is_none() && old.reason.as_deref().is_some_and(is_usage_failure) {
+            fresh.reason = old.reason.clone();
+        }
         if fresh.buckets.is_empty() {
             fresh.buckets = old.buckets.clone();
             for bucket in &mut fresh.buckets {
@@ -200,7 +205,7 @@ fn refresh_bound(old: &Account, binary: Option<&Path>) -> (Account, bool) {
     })();
     match refreshed {
         Ok(account) => (account, true),
-        Err(error) => (failed_inspection(bound, error), false),
+        Err(error) => (failed_inspection(bound, error, started.elapsed().as_millis() as u64), false),
     }
 }
 
@@ -226,10 +231,61 @@ fn native_due(account: &Account) -> bool {
     let now = now_ms();
     let mut official = account.buckets.iter().filter(|bucket| bucket.source == quota::CLAUDE_USAGE_SOURCE);
     let Some(first) = official.next() else { return true };
+    // 조회 실패·낡은 관측으로 stale/unknown이 된 한도는 10분을 기다리지 않고 다음 정기 스캔에서 다시 묻는다.
     let due = |bucket: &QuotaBucket| bucket.observed_at <= 0
         || now.saturating_sub(bucket.observed_at) >= NATIVE_USAGE_EVERY_MS
-        || bucket.resets_at.is_some_and(|reset| reset <= now);
+        || bucket.resets_at.is_some_and(|reset| reset <= now)
+        || matches!(bucket.status.as_str(), "stale" | "unknown");
     due(first) || official.any(due)
+}
+
+/// 공식 사용량 조회 실패의 안전한 요약. 단계·신뢰하는 오류 코드·경과 시간만 담고 원문 메시지는 버린다.
+#[derive(Debug)]
+struct UsageFailure {
+    stage: &'static str,
+    error: ApiError,
+    elapsed_ms: u64,
+}
+
+const USAGE_FAILURE_PREFIX: &str = "공식 Claude 사용량 조회에 실패했어요";
+
+fn is_usage_failure(reason: &str) -> bool {
+    reason.starts_with(USAGE_FAILURE_PREFIX)
+}
+
+fn usage_failure_reason(failure: &UsageFailure) -> String {
+    let code = failure.error.code.as_str();
+    let code = if code.len() <= 48 && code.bytes().all(|b| b.is_ascii_uppercase() || b.is_ascii_digit() || b == b'_') {
+        code
+    } else {
+        "UNKNOWN"
+    };
+    format!(
+        "{USAGE_FAILURE_PREFIX} (단계: {}, 코드: {code}, 경과: {}ms). 이전 관측은 오래된 값으로만 남겨요.",
+        failure.stage, failure.elapsed_ms
+    )
+}
+
+/// 조회 실패를 계정에 남긴다. 관측 시각은 그대로 두고 한도만 오래된 값으로 표시한다.
+fn record_usage_failure(account: &mut Account, failure: &UsageFailure) {
+    for bucket in &mut account.buckets {
+        bucket.status = if bucket.used_percent.is_some() { "stale" } else { "unknown" }.into();
+    }
+    account.reason = Some(usage_failure_reason(failure));
+}
+
+fn record_usage_success(account: &mut Account, buckets: Vec<QuotaBucket>) {
+    account.buckets = buckets;
+    if account.reason.as_deref().is_some_and(is_usage_failure) {
+        account.reason = None;
+    }
+}
+
+/// omp 관측이 한도를 다시 신선하게 채웠다면 해소된 사용량 조회 실패 안내를 지운다.
+fn clear_resolved_usage_failure(account: &mut Account) {
+    if account.tool == "claude" && account.reason.as_deref().is_some_and(is_usage_failure) && omp_fresh(account) {
+        account.reason = None;
+    }
 }
 
 /// Ojak에 연결된 공식 Claude 로그인으로 직접 한도를 조회한다. omp 로그인이 없어도 동작한다.
@@ -237,13 +293,19 @@ fn native_due(account: &Account) -> bool {
 /// 토큰은 읽지도 복사하지도 않는다. 조회 전에 이미 identity가 확인된 계정만 대상이고, 조회 뒤 같은 identity인지
 /// 다시 확인한다. 응답이 구조화된 한도를 주지 않으면 오류이며 기존 관측은 그대로 오래된 값으로 남는다.
 /// 버킷 ID는 omp 관측과 같은 한도라면 그 ID를 이어 써서 같은 한도가 중복·충돌하지 않게 한다.
-fn native_usage(account: &Account, existing: &[Account]) -> Result<Vec<QuotaBucket>, ApiError> {
+fn native_usage(account: &Account, existing: &[Account]) -> Result<Vec<QuotaBucket>, UsageFailure> {
+    let started = std::time::Instant::now();
+    let fail = |stage: &'static str, error: ApiError| UsageFailure {
+        stage,
+        error,
+        elapsed_ms: started.elapsed().as_millis() as u64,
+    };
     let identity = account
         .identity_key
         .as_deref()
         .filter(|_| account.tool == "claude" && account.auth_status == "authenticated" && account.can_launch)
-        .ok_or_else(|| ApiError::new("AUTH_REQUIRED", "사용할 수 있는 공식 Claude 로그인이 없어요."))?;
-    let (profile, executable) = native::bound_paths(account)?;
+        .ok_or_else(|| fail("preflight", ApiError::new("AUTH_REQUIRED", "사용할 수 있는 공식 Claude 로그인이 없어요.")))?;
+    let (profile, executable) = native::bound_paths(account).map_err(|error| fail("preflight", error))?;
     let events = process::run_ndjson(
         &executable,
         &[
@@ -260,7 +322,8 @@ fn native_usage(account: &Account, existing: &[Account]) -> Result<Vec<QuotaBuck
         ],
         &profile_env("claude", &profile),
         &profile,
-    )?;
+    )
+    .map_err(|error| fail("usage", error))?;
     let observed_at = now_ms();
     // omp 관측과 같은 한도는 omp와 같은 버킷 ID를 쓴다(요약이 ID 기준으로 최신 관측만 남긴다). 같은 이메일·워크스페이스의
     // omp identity가 정확히 하나일 때만 그 identity를 쓰고, 없으면 공식 identity로 같은 규칙의 ID를 만든다.
@@ -282,16 +345,23 @@ fn native_usage(account: &Account, existing: &[Account]) -> Result<Vec<QuotaBuck
         stable_id(&["omp", "anthropic", bucket_identity, upstream])
     });
     if buckets.is_empty() {
-        return Err(ApiError::new(
-            "NATIVE_USAGE_UNAVAILABLE",
-            "공식 Claude가 구조화된 사용량을 주지 않았어요. 이전 조회는 오래된 값으로만 남겨요.",
+        return Err(fail(
+            "parse",
+            ApiError::new(
+                "NATIVE_USAGE_UNAVAILABLE",
+                "공식 Claude가 구조화된 사용량을 주지 않았어요. 이전 조회는 오래된 값으로만 남겨요.",
+            ),
         ));
     }
-    let after = native::inspect_identity(&account.tool, &profile, &executable, &account.label)?;
+    let after = native::inspect_identity_for_scan(&account.tool, &profile, &executable, &account.label)
+        .map_err(|error| fail("identity-recheck", error))?;
     if after.auth_status != "authenticated" || after.identity_key.as_deref() != Some(identity) {
-        return Err(ApiError::new(
-            "IDENTITY_DRIFT",
-            "사용량을 조회하는 사이 공식 Claude 계정이 바뀌었어요. 조회 결과를 쓰지 않았어요.",
+        return Err(fail(
+            "identity-recheck",
+            ApiError::new(
+                "IDENTITY_DRIFT",
+                "사용량을 조회하는 사이 공식 Claude 계정이 바뀌었어요. 조회 결과를 쓰지 않았어요.",
+            ),
         ));
     }
     Ok(buckets)
@@ -741,19 +811,21 @@ pub fn scan(
                     if managed && (!account.can_launch || already_bound) { return Ok((None, false)); }
                     let cached = cache.lock().as_ref().map(Arc::clone);
                     let omp_ready = cached.as_ref().is_some_and(|value| refresh_native_from_omp(&mut account, value, force, started).0);
+                    clear_resolved_usage_failure(&mut account);
                     publisher_ref.lock()(&account)?;
                     let mut failed = false;
                     // binding을 보존한 일시적 신원 조회 실패 뒤에는 별도 사용량 조회를 중복 실행하지 않는다.
                     if confirmed && account.auth_status == "authenticated" && account.can_launch {
                         if account.tool == "claude" && !omp_ready && (force || (!omp_fresh(&account) && native_due(&account))) {
-                            let mut updated = false;
                             match native_usage(&account, existing) {
-                                Ok(buckets) => { account.buckets = buckets; updated = true; }
-                                Err(_) => failed = true,
+                                Ok(buckets) => record_usage_success(&mut account, buckets),
+                                Err(failure) => record_usage_failure(&mut account, &failure),
                             }
                             let cached = cache.lock().as_ref().map(Arc::clone);
-                            if let Some(value) = cached { updated |= refresh_native_from_omp(&mut account, &value, false, started).1; }
-                            if updated { publisher_ref.lock()(&account)?; }
+                            if let Some(value) = cached { refresh_native_from_omp(&mut account, &value, false, started); }
+                            clear_resolved_usage_failure(&mut account);
+                            failed = account.reason.as_deref().is_some_and(is_usage_failure);
+                            publisher_ref.lock()(&account)?;
                         } else if account.tool == "codex" {
                             let updated = match native::codex_usage(&account) {
                                 Ok((buckets, credits)) => { account.buckets = buckets; account.credits = credits; true }
@@ -784,7 +856,10 @@ pub fn scan(
                     native_failed |= failed;
                     if let Some(mut account) = account {
                         if let Some(value) = &omp_usage {
-                            if refresh_native_from_omp(&mut account, value, false, started).1 { publisher.lock()(&account)?; }
+                            let updated = refresh_native_from_omp(&mut account, value, false, started).1;
+                            let before = account.reason.clone();
+                            clear_resolved_usage_failure(&mut account);
+                            if updated || account.reason != before { publisher.lock()(&account)?; }
                         }
                         result.accounts.push(account);
                     }
@@ -810,8 +885,9 @@ pub fn scan(
                         let value = Arc::new(value);
                         *omp_cache.lock() = Some(Arc::clone(&value));
                         observed_omp = add_omp_reports(&mut result, &value, &binaries["omp"], existing);
-                        for account in &result.accounts {
+                        for account in &mut result.accounts {
                             if account.tool == "omp" || value["reports"].as_array().is_some_and(|reports| reports.iter().any(|report| matches_report(account, report))) {
+                                clear_resolved_usage_failure(account);
                                 publisher.lock()(account)?;
                             }
                         }
@@ -827,7 +903,8 @@ pub fn scan(
         if let Some(value) = &omp_usage {
             observed_omp = add_omp_reports(&mut result, value, &binaries["omp"], existing);
         }
-        if native_failed {
+        for account in &mut result.accounts { clear_resolved_usage_failure(account); }
+        if native_failed && result.accounts.iter().any(|account| account.reason.as_deref().is_some_and(is_usage_failure)) {
             result.notices.push(notice("NATIVE_USAGE_UNAVAILABLE", "일부 Claude 계정의 사용량을 공식 CLI로 조회하지 못했어요. 이전 관측 시각은 갱신하지 않았어요."));
         }
         let current: BTreeSet<_> = result.accounts.iter().map(|account| account.id.as_str()).collect();
@@ -1282,18 +1359,18 @@ mod tests {
             used_percent: Some(10.0), status: "known".into(), ..Default::default()
         });
         for code in ["PROBE_TIMEOUT", "PROBE_IO", "PROBE_START_FAILED", "PROBE_CLOSED"] {
-            let retained = failed_inspection(verified.clone(), ApiError::new(code, "조회 실패"));
+            let retained = failed_inspection(verified.clone(), ApiError::new(code, "조회 실패"), 7);
             assert!(retained.can_launch);
             assert_eq!(retained.auth_status, "authenticated");
             assert_eq!(retained.verification, "preflight-verified");
             assert_eq!(retained.identity_key, verified.identity_key);
             assert_eq!(retained.buckets[0].status, "stale");
         }
-        let unknown = failed_inspection(native_account("/fixture"), ApiError::new("PROBE_TIMEOUT", "조회 지연"));
+        let unknown = failed_inspection(native_account("/fixture"), ApiError::new("PROBE_TIMEOUT", "조회 지연"), 7);
         assert!(!unknown.can_launch);
         assert_ne!(unknown.auth_status, "authenticated");
         for code in ["AUTH_REQUIRED", "IDENTITY_DRIFT", "AUTH_OVERRIDE_CONFLICT", "PROBE_SCHEMA"] {
-            let blocked = failed_inspection(verified.clone(), ApiError::new(code, "명시적 실패"));
+            let blocked = failed_inspection(verified.clone(), ApiError::new(code, "명시적 실패"), 7);
             assert!(!blocked.can_launch, "{code}");
             assert_ne!(blocked.auth_status, "authenticated", "{code}");
             assert_eq!(blocked.identity_key, verified.identity_key);
@@ -1458,18 +1535,20 @@ mod tests {
         // 구조화된 한도가 없으면(예: 네트워크 실패) 새 관측을 만들지 않는다. 호출자는 기존 값을 그대로 둔다.
         fake_claude(&profile, &status, &status, &events(Value::Null));
         let failed = native_usage(&account, &[]).unwrap_err();
-        assert_eq!(failed.code, "NATIVE_USAGE_UNAVAILABLE");
+        assert_eq!(failed.error.code, "NATIVE_USAGE_UNAVAILABLE");
+        assert_eq!(failed.stage, "parse");
         let _ = fs::remove_file(profile.join("ran"));
 
         // 조회 도중 다른 워크스페이스 로그인으로 바뀌면 결과를 버린다.
         fake_claude(&profile, &status, &other, &events(limits));
         let _ = fs::remove_file(profile.join("ran"));
-        assert_eq!(native_usage(&account, &[]).unwrap_err().code, "IDENTITY_DRIFT");
+        let drift = native_usage(&account, &[]).unwrap_err();
+        assert_eq!((drift.error.code.as_str(), drift.stage), ("IDENTITY_DRIFT", "identity-recheck"));
 
         // 로그아웃·미검증 계정은 조회 자체를 하지 않는다.
         let mut logged_out = account.clone();
         logged_out.auth_status = "auth-required".into();
-        assert_eq!(native_usage(&logged_out, &[]).unwrap_err().code, "AUTH_REQUIRED");
+        assert_eq!(native_usage(&logged_out, &[]).unwrap_err().error.code, "AUTH_REQUIRED");
         fs::remove_dir_all(&root).unwrap();
     }
 
@@ -1488,6 +1567,144 @@ mod tests {
         assert!(native_due(&with(vec![bucket(now - NATIVE_USAGE_EVERY_MS, Some(now + 3_600_000), official)])));
         assert!(native_due(&with(vec![bucket(now - 60_000, None, "OMP usage / anthropic")])));
         assert!(native_due(&with(Vec::new())));
+    }
+
+    fn usage_bucket(status: &str, observed_at: i64, source: &str) -> QuotaBucket {
+        QuotaBucket {
+            id: "b".into(), label: "5시간".into(), model: None, used_percent: Some(40.0),
+            resets_at: Some(now_ms() + 3_600_000), observed_at, source: source.into(), status: status.into(),
+        }
+    }
+
+    #[test]
+    fn recent_stale_or_unknown_official_limits_are_requeried_but_healthy_ones_keep_the_cadence() {
+        let now = now_ms();
+        let official = quota::CLAUDE_USAGE_SOURCE;
+        let with = |status: &str, age: i64| Account {
+            tool: "claude".into(),
+            buckets: vec![usage_bucket(status, now - age, official)],
+            ..Account::default()
+        };
+        assert!(native_due(&with("stale", 60_000)));
+        assert!(native_due(&with("unknown", 60_000)));
+        assert!(!native_due(&with("known", 60_000)));
+        assert!(!native_due(&with("exhausted", 60_000)));
+        assert!(native_due(&with("known", NATIVE_USAGE_EVERY_MS)));
+        // 여러 한도 중 하나만 낡아도 다시 묻는다.
+        let mut mixed = with("known", 60_000);
+        mixed.buckets.push(usage_bucket("stale", now - 60_000, official));
+        assert!(native_due(&mixed));
+    }
+
+    #[test]
+    fn usage_failure_is_persisted_safely_marks_buckets_stale_and_keeps_observed_at() {
+        let observed_at = now_ms() - 60_000;
+        let mut account = native_account("/fixture");
+        account.buckets = vec![
+            usage_bucket("known", observed_at, quota::CLAUDE_USAGE_SOURCE),
+            QuotaBucket { used_percent: None, status: "known".into(), ..usage_bucket("known", observed_at, quota::CLAUDE_USAGE_SOURCE) },
+        ];
+        let secret = "sk-ant-oat01-SECRET person@invalid.test private prompt";
+        let failure = UsageFailure {
+            stage: "usage",
+            error: ApiError::new("PROBE_TIMEOUT", secret),
+            elapsed_ms: 22_400,
+        };
+        record_usage_failure(&mut account, &failure);
+        let reason = account.reason.clone().unwrap();
+        assert!(reason.contains("usage") && reason.contains("PROBE_TIMEOUT") && reason.contains("22400ms"), "{reason}");
+        assert!(!reason.contains("SECRET") && !reason.contains("person@") && !reason.contains("prompt"), "{reason}");
+        assert!(is_usage_failure(&reason));
+        assert_eq!(account.buckets[0].status, "stale");
+        assert_eq!(account.buckets[1].status, "unknown");
+        assert!(account.buckets.iter().all(|bucket| bucket.observed_at == observed_at));
+        // 신뢰할 수 없는 형태의 코드는 그대로 싣지 않는다.
+        let hostile = UsageFailure { stage: "usage", error: ApiError::new(secret, "x"), elapsed_ms: 1 };
+        assert!(!usage_failure_reason(&hostile).contains("SECRET"));
+        assert!(usage_failure_reason(&hostile).contains("UNKNOWN"));
+        // 오래된 값으로 남은 한도는 다음 정기 스캔에서 10분을 기다리지 않고 다시 조회된다.
+        assert!(native_due(&account));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn usage_failure_survives_identity_refresh_and_is_cleared_by_recovery_or_fresh_omp() {
+        let root = std::env::temp_dir().join(format!("aam-usage-reason-{}", new_id()));
+        fs::create_dir(&root).unwrap();
+        let profile = root.canonicalize().unwrap();
+        let status = json!({"loggedIn":true,"authMethod":"claude.ai","apiProvider":"firstParty","email":"person@invalid.test","orgId":"workspace-a"});
+        let binary = fake_claude(&profile, &status, &status, &[]);
+        let mut account = native_account(profile.to_str().unwrap());
+        account.binary_path = Some(binary.to_string_lossy().into_owned());
+        account.id = stable_id(&["claude", account.identity_key.as_deref().unwrap(), profile.to_str().unwrap()]);
+        account.auth_status = "authenticated".into();
+        account.can_launch = true;
+        account.verification = "preflight-verified".into();
+        account.buckets = vec![usage_bucket("known", now_ms() - 60_000, quota::CLAUDE_USAGE_SOURCE)];
+        record_usage_failure(&mut account, &UsageFailure {
+            stage: "usage", error: ApiError::new("PROBE_TIMEOUT", "raw"), elapsed_ms: 20_000,
+        });
+        let failed_reason = account.reason.clone();
+
+        // 다음 스캔의 신원 확인이 성공해도 해소 전에는 실패 이유와 오래된 한도 상태가 남는다.
+        let (refreshed, confirmed) = refresh_bound(&account, None);
+        assert!(confirmed && refreshed.can_launch);
+        assert_eq!(refreshed.reason, failed_reason);
+        assert_eq!(refreshed.buckets[0].status, "stale");
+
+        // 성공한 공식 조회가 해소한다.
+        let mut recovered = refreshed.clone();
+        let fresh = vec![usage_bucket("known", now_ms(), quota::CLAUDE_USAGE_SOURCE)];
+        record_usage_success(&mut recovered, fresh);
+        assert_eq!(recovered.reason, None);
+        assert_eq!(recovered.buckets[0].status, "known");
+
+        // 신선한 omp 관측이 한도를 채우면 해소된 실패 이유를 지운다. 신선하지 않으면 남긴다.
+        let mut via_omp = refreshed.clone();
+        clear_resolved_usage_failure(&mut via_omp);
+        assert_eq!(via_omp.reason, failed_reason);
+        via_omp.buckets = vec![usage_bucket("known", now_ms(), "OMP usage / anthropic")];
+        clear_resolved_usage_failure(&mut via_omp);
+        assert_eq!(via_omp.reason, None);
+
+        // 관련 없는 안내 문구는 지우지 않는다.
+        let mut other = via_omp.clone();
+        other.reason = Some("다른 안내".into());
+        clear_resolved_usage_failure(&mut other);
+        record_usage_success(&mut other, vec![usage_bucket("known", now_ms(), quota::CLAUDE_USAGE_SOURCE)]);
+        assert_eq!(other.reason.as_deref(), Some("다른 안내"));
+        fs::remove_dir_all(&root).unwrap();
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn identity_failure_keeps_safe_fixed_message_with_code_and_elapsed_time() {
+        use std::os::unix::fs::PermissionsExt;
+        let root = std::env::temp_dir().join(format!("aam-identity-fail-{}", new_id()));
+        fs::create_dir(&root).unwrap();
+        let profile = root.canonicalize().unwrap();
+        let binary = profile.join("claude");
+        let write_probe = |value: Value| {
+            fs::write(&binary, format!("#!/bin/sh\nprintf '%s\\n' '{}'\n", value)).unwrap();
+            fs::set_permissions(&binary, fs::Permissions::from_mode(0o700)).unwrap();
+        };
+        let mut old = native_account(profile.to_str().unwrap());
+        old.binary_path = Some(binary.to_string_lossy().into_owned());
+        old.auth_status = "authenticated".into();
+        old.can_launch = true;
+        let authenticated = json!({"loggedIn":true,"authMethod":"claude.ai","apiProvider":"firstParty","email":"person@invalid.test","orgId":"workspace-a"});
+        let mut different = authenticated;
+        different["orgId"] = json!("workspace-b");
+        write_probe(different);
+        let (drifted, confirmed) = refresh_bound(&old, None);
+        fs::remove_dir_all(&root).unwrap();
+        assert!(!confirmed);
+        assert!(!drifted.can_launch);
+        assert_eq!(drifted.auth_status, "error");
+        let reason = drifted.reason.unwrap();
+        assert!(reason.contains("IDENTITY_DRIFT") && reason.contains("경과:") && reason.contains("ms"), "{reason}");
+        assert!(!reason.contains("workspace-b") && !reason.contains("person@"), "{reason}");
+        assert!(!is_usage_failure(&reason));
     }
 
     #[test]

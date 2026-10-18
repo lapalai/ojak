@@ -19,7 +19,8 @@ const OUTPUT_LIMIT: usize = 2 * 1024 * 1024;
 const PROBE_TIMEOUT: Duration = Duration::from_secs(20);
 /// `omp usage`는 로그인한 모든 공급자의 한도 API를 차례로 부른다. Windows 실측 27초(계정 5개)라 일반 제한으로는 매번 시간 초과가 나
 /// 계정이 `QUOTA_STALE`로 배정에서 빠진다. 서비스 주기(60초) 안에서 끝나도록 이 조회만 길게 기다린다.
-const USAGE_PROBE_TIMEOUT: Duration = Duration::from_secs(50);
+/// Claude 스캔 전용 조회(`auth status`, `/usage`)도 같은 절대 제한을 쓴다. 실측 22.4초가 걸려 20초로는 계정이 오래된 값으로 남는다.
+pub(crate) const USAGE_PROBE_TIMEOUT: Duration = Duration::from_secs(50);
 
 pub(crate) fn search_dirs() -> Vec<PathBuf> {
     let mut dirs: Vec<PathBuf> = std::env::var_os("PATH")
@@ -533,7 +534,8 @@ pub(crate) fn run_json_until(
 }
 
 /// 줄마다 JSON 이벤트를 내는 조회(`claude -p ... --output-format stream-json`). 해석되지 않는 줄은 건너뛰고,
-/// 이벤트가 하나도 없으면 오류다. 시간·크기 제한은 다른 조회와 같다.
+/// 이벤트가 하나도 없으면 오류다. Claude 스캔 한도 조회 전용이라 시간 제한은 `USAGE_PROBE_TIMEOUT`(50초, 절대 제한)이고
+/// 출력 크기 제한은 다른 조회와 같다.
 pub(crate) fn run_ndjson(
     program: &Path,
     args: &[&str],
@@ -541,6 +543,7 @@ pub(crate) fn run_ndjson(
     cwd: &Path,
 ) -> Result<Vec<Value>, ApiError> {
     let mut probe = Probe::spawn(program, args, env, cwd)?;
+    probe.deadline = Instant::now() + USAGE_PROBE_TIMEOUT;
     probe.child.stdin.take();
     while probe.pump()? {}
     let events: Vec<Value> = probe
@@ -557,15 +560,25 @@ pub(crate) fn run_ndjson(
     Ok(events)
 }
 
-/// `omp usage --json`처럼 여러 원격 API를 순회하는 느린 조회. 시간 제한만 `USAGE_PROBE_TIMEOUT`으로 늘린다.
+/// `omp usage --json`·Claude 스캔 `auth status --json`처럼 느릴 수 있는 조회. 시간 제한만 `USAGE_PROBE_TIMEOUT`으로 늘린다.
 pub(crate) fn run_json_slow(
     program: &Path,
     args: &[&str],
     env: &BTreeMap<String, String>,
     cwd: &Path,
 ) -> Result<Value, ApiError> {
+    run_json_within(program, args, env, cwd, USAGE_PROBE_TIMEOUT)
+}
+
+pub(crate) fn run_json_within(
+    program: &Path,
+    args: &[&str],
+    env: &BTreeMap<String, String>,
+    cwd: &Path,
+    limit: Duration,
+) -> Result<Value, ApiError> {
     let mut probe = Probe::spawn(program, args, env, cwd)?;
-    probe.deadline = Instant::now() + USAGE_PROBE_TIMEOUT;
+    probe.deadline = Instant::now() + limit;
     probe.output()
 }
 
@@ -864,6 +877,7 @@ mod tests {
         drop(probe);
         fs::remove_dir_all(dir).unwrap();
     }
+
 }
 
 #[cfg(all(test, windows))]

@@ -226,6 +226,8 @@ enum OmpBrokerAction {
 #[derive(Subcommand)]
 enum OmpBridgeAction {
     Status { #[arg(long)] json: bool },
+    #[command(about = "현재 omp 카탈로그와 fallback 시작 모델을 읽기 전용으로 대조해요.")]
+    CheckModels,
     Connect,
     Disconnect,
 }
@@ -586,6 +588,7 @@ fn execute(paths: &Paths, action: Action) -> Result<(), ApiError> {
             }
             OmpBridgeAction::Connect => print_json(&omp_bridge::connect(paths)?)?,
             OmpBridgeAction::Disconnect => print_json(&omp_bridge::disconnect(paths)?)?,
+            OmpBridgeAction::CheckModels => print_json(&omp_bridge::check_models()?)?,
         },
         Action::OmpObserver { action } => {
             #[cfg(windows)]

@@ -33,6 +33,7 @@ export default function App() {
   const [setupRevision, setSetupRevision] = useState(0);
   const [launchMessage, setLaunchMessage] = useState<string | null>(null);
   const [version, setVersion] = useState<string | null>(null);
+  const [inspectorHost, setInspectorHost] = useState<HTMLDivElement | null>(null);
   const [masked, setMasked] = useState(() => { try { return localStorage.getItem("aam.privacy") !== "visible"; } catch { return true; } });
   const policyAction = useAction();
   const integrationAction = useAction();
@@ -98,7 +99,7 @@ export default function App() {
         <div className="credit"><button type="button" className="version-link" onClick={() => setDialog({ kind: "settings" })} title={t("about.open")}>Ojak {version ?? ""}</button><span>{t("about.madeBy", { name: "lio" })}</span></div>
       </div>
     </aside>
-    <main className="main-pane">
+    <main className={`main-pane${view === "usage" ? " usage-pane" : ""}`}>
       <div className="main-titlebar" data-tauri-drag-region />
       {!snapshot ? <ServiceUnavailable error={error} connecting={connecting} onRetry={() => { void reload(); }} onInstall={() => setDialog({ kind: "service" })} /> : <div className="workspace-scroll" key={view}><div className="main-content">
         {error && <div className="offline-notice"><ErrorMessage error={error} /><p>{t("offline.notice")}</p><button type="button" className="button" onClick={() => { void reload(); }}>{t("offline.retry")}</button></div>}
@@ -106,11 +107,12 @@ export default function App() {
         <ActionFeedback error={integrationAction.error} message={integrationAction.message} />
         {isTauri() && <ServiceVersionNotice snapshot={snapshot} onReload={onReload} />}
         {launchMessage && <div className="launch-notice" role="status"><Terminal size={16} /><span>{launchMessage}</span><button type="button" className="text-button" onClick={() => { setView("sessions"); setLaunchMessage(null); }}>{t("launch.viewSessions")}<ChevronRight size={13} /></button></div>}
-        {view === "usage" && <UsageView snapshot={snapshot} masked={masked} online={online} refreshing={busy} onRefresh={refresh} onReload={onReload} onConnect={() => setView("connect")} onSessions={() => setView("sessions")} onAdd={onAdd} onSetup={() => setSetupRequest(value => value + 1)} setupRequest={setupRequest} setupRevision={setupRevision} />}
+        {view === "usage" && <UsageView snapshot={snapshot} masked={masked} online={online} refreshing={busy} onRefresh={refresh} onReload={onReload} onConnect={() => setView("connect")} onSessions={() => setView("sessions")} onAdd={onAdd} onSetup={() => setSetupRequest(value => value + 1)} setupRequest={setupRequest} setupRevision={setupRevision} inspectorHost={inspectorHost} />}
         {view === "tokens" && <TokenUsageView />}
         {view === "sessions" && <SessionsView snapshot={snapshot} masked={masked} online={online} onNewSession={onNewSession} onResume={onResume} />}
         {view === "connect" && <ConnectionsView snapshot={snapshot} masked={masked} online={online} refreshing={busy} onRefresh={refresh} onReload={onReload} onAdd={onAdd} onService={() => setDialog({ kind: "service" })} onIntegration={action => setDialog({ kind: "integration", action })} />}
       </div></div>}
+      {view === "usage" && <div className="usage-inspector-host" ref={setInspectorHost} />}
     </main>
     {dialog?.kind === "service" && <ServiceDialog onClose={() => setDialog(null)} onReload={onReload} />}
     {dialog?.kind === "integration" && <IntegrationDialog action={dialog.action} onClose={() => setDialog(null)} onReload={onReload} />}

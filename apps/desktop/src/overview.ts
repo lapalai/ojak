@@ -108,18 +108,6 @@ export function compareRows(a: Pick<UsageRow, "key" | "unknown" | "group" | "sor
   return Number(a.unknown) - Number(b.unknown) || Number(!a.group) - Number(!b.group) || a.sortKey.localeCompare(b.sortKey) || a.key.localeCompare(b.key);
 }
 
-// --- 펼침 ------------------------------------------------------------------
-
-/// 펼침은 계정 ID로 기억한다. 묶음 키는 구성원이 바뀌면 달라질 수 있지만 구성원 ID는 그대로라 갱신 뒤에도 유지된다.
-export function isExpanded(open: ReadonlySet<string>, ids: readonly string[]): boolean {
-  return ids.some(id => open.has(id));
-}
-export function toggleExpanded(open: ReadonlySet<string>, ids: readonly string[]): Set<string> {
-  const next = new Set(open);
-  if (isExpanded(open, ids)) for (const id of ids) next.delete(id);
-  else for (const id of ids) next.add(id);
-  return next;
-}
 
 // --- 한도 고르기 -----------------------------------------------------------
 
