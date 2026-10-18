@@ -95,6 +95,8 @@ export interface OmpBridgeStatus {
   bridge: OmpBridgeState | null;
 }
 export const ompBridgeAction = (action: "status" | "connect" | "disconnect") => native<OmpBridgeStatus>("omp_bridge_action", { action });
+export interface OmpModelCheck { modelFallback: boolean; unknownSources: string[] }
+export const ompModelCheck = () => native<OmpModelCheck>("omp_bridge_action", { action: "check-models" });
 /// bridge.log에서 모은 (공급자, 모델, 계정)별 요청 시계열. `series`·`total`은 대화 요청, `auxiliary`는 judge 같은 보조 요청 수다. `series`는 오래된 구간부터 5분 단위다.
 export interface UsageBucket { provider: string; model: string; account: string; series: number[]; total: number; auxiliary: number; sessions: string[] }
 export interface BridgeUsage { binMinutes: number; from: number; to: number; buckets: UsageBucket[] }

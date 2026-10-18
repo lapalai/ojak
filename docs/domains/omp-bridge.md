@@ -87,6 +87,7 @@ Claude·Codex는 Ojak에 등록된 기존 공식 CLI 로그인과 omp의 원래 
 - 공급자 계정이 어느 인증 소스에도 없고 후보 gateway도 없으면 `401 / UPSTREAM_AUTH_REQUIRED`를 돌려준다. 공식 CLI의 인증 실패·계정 변경·배정 꺼짐·키체인 잠금·파일 접근 오류는 별도 코드와 해결 행동으로 구분한다. 최초 조회 전·gateway 장애·한도 소진을 미로그인으로 단정하지 않는다.
 - 오류 본문은 `{error:{type,message,code?}}` 형식이다. omp의 pi-native 처리기가 메시지만 읽을 수 있어 advisor·judge 경고에 JSON 전체가 노출되지 않는다. 인증·연결 오류는 요청한 omp 화면과 Ojak 연결 화면에 표시한다. OS 알림은 기존 한도 리셋 전 알림만 사용하며 인증 실패마다 중복 알림을 보내지 않는다.
 - 종료 화면의 최근 15분 omp 사용 안내와 관리 CLI 세션 보호는 별개다. `PREPARED/STARTING/ACTIVE/SUSPECT/ORPHANED`는 사용 중지를 막고, 종료 확인 전까지 슬롯을 유지한다. UI는 사용 중지 버튼을 비활성화하고 해당 터미널 종료 또는 `앱만 종료`를 안내한다.
+- **모델 설정 점검(0.14.0):** 연결 → omp → `모델 설정 점검`은 `aam omp-bridge check-models`를 명시적으로 실행한다. `omp config get retry.modelFallback|retry.fallbackChains --json`과 `omp models --kind all --json`을 읽어 `{modelFallback,unknownSources}`를 반환한다. 역할 키(사용자 역할 포함)는 모델 id로 검사하지 않고, `provider/*`·`provider/prefix/*`는 같은 공급자의 id 접두어로 검사한다. 누락 모델을 나열하고 자동 fallback이 꺼진 경우에도 시작 경고가 날 수 있음을 안내한다. 대상 fallback 배열·역할에 배정한 모델까지 검증하는 기능은 아니며, 카탈로그가 비거나 조회에 실패하면 `OMP_MODELS_UNAVAILABLE`로 알린다. 기존 5초 상태 폴링에는 모델 조회를 추가하지 않으며 인증·설정·실행 중인 서비스는 변경하지 않는다.
 
 ## 주의
 - gateway는 상속된 `OMP_*`/`PI_*` 환경을 지우고 전용 `PI_CODING_AGENT_DIR=<AAM_HOME>/bridge/agent`로 띄운다. 안 그러면 사용자 설정이 요청을 다시 브릿지로 돌려 루프가 된다 (`bridge.rs:946-973`).

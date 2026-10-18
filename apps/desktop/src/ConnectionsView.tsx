@@ -1,7 +1,7 @@
 import { useEffect, useState } from "react";
 import { ArrowUpRight, Cable, Download, RefreshCw, Server } from "lucide-react";
-import { exportDiagnostics, hostConnections, ompBridgeAction, ompBrokerAction, stopService, toApiError } from "./api";
-import type { OmpBridgeStatus, OmpBrokerStatus } from "./api";
+import { exportDiagnostics, hostConnections, ompBridgeAction, ompBrokerAction, ompModelCheck, stopService, toApiError } from "./api";
+import type { OmpBridgeStatus, OmpBrokerStatus, OmpModelCheck } from "./api";
 import { ActionFeedback, Badge, Busy, Dot, ErrorMessage, Modal } from "./components";
 import { ProviderLoginDialog, loginProviderNames } from "./LoginDialog";
 import { loginProviderOf } from "./login";
@@ -34,6 +34,12 @@ function OmpPanel({ masked, accounts, online, onReload }: { masked: boolean; acc
   const [bridge, setBridge] = useState<OmpBridgeStatus | null>(null);
   const [statusError, setStatusError] = useState<ApiError | null>(null);
   const action = useAction();
+  const modelAction = useAction();
+  const [modelCheck, setModelCheck] = useState<OmpModelCheck | null>(null);
+  const checkModels = () => {
+    setModelCheck(null);
+    void modelAction.run(async () => { setModelCheck(await ompModelCheck()); });
+  };
   const refresh = async () => {
     const [nextBroker, nextBridge] = await Promise.all([ompBrokerAction("status"), ompBridgeAction("status")]);
     setBroker(nextBroker); setBridge(nextBridge); setStatusError(null);
@@ -84,6 +90,12 @@ function OmpPanel({ masked, accounts, online, onReload }: { masked: boolean; acc
     {bridge?.bridge?.blocks.length ? <p className="gate-reason">{t("omp.blocked", { list: bridge.bridge.blocks.map(block => t("omp.blockEntry", { who: masked ? t("privacy.accountHidden") : block.email, scope: block.scope ? ` ${block.scope}` : "", reason: block.reason, until: absoluteTime(block.until) })).join(", ") })}</p> : null}
     <div className="row-actions"><span className="hint">{t("omp.hint")}</span><button type="button" className="button" disabled={action.pending} onClick={() => { void action.run(refresh, () => t("omp.refreshed")); }}><RefreshCw size={13} />{t("omp.recheck")}</button>{connected || (storeReady && loginReady) ? <><button type="button" className="button" disabled={action.pending} onClick={resync}>{t("omp.resync")}</button><button type="button" className="button" disabled={action.pending} onClick={disconnect}>{t("common.disconnect")}</button></> : <button type="button" className="button primary" disabled={action.pending || broker === null} onClick={connect}>{action.pending ? <Busy label={t("common.connecting")} /> : t("common.connect")}</button>}</div>
     <div className="row-actions"><span className="hint">{t("omp.login.official")}</span>{(["xai-oauth", "google-antigravity"] as LoginProvider[]).map(provider => <button key={provider} type="button" className="button" disabled={!online || action.pending} onClick={() => setLogin({ provider })}>{t("omp.login.signIn", { provider: loginProviderNames[provider] })}</button>)}</div>
+    <div className="row-actions"><span className="hint">{t("omp.models.hint")}</span><button type="button" className="button" disabled={modelAction.pending} onClick={checkModels}>{modelAction.pending ? <Busy /> : <RefreshCw size={13} />}{t("omp.models.check")}</button></div>
+    {modelCheck && <div role="status">
+      <p className={modelCheck.unknownSources.length ? "gate-reason" : "field-help"}>{t(modelCheck.unknownSources.length ? "omp.models.unknown" : "omp.models.valid")}</p>
+      {modelCheck.unknownSources.length > 0 && <><ul className="field-help">{modelCheck.unknownSources.map(source => <li key={source}><code>{privacyText(source, masked)}</code></li>)}</ul><p className="field-help">{t(modelCheck.modelFallback ? "omp.models.enabled" : "omp.models.disabled")} {t("omp.models.fix")}</p></>}
+    </div>}
+    <ActionFeedback error={modelAction.error} message={null} />
     <ActionFeedback error={action.error || statusError} message={action.message} />
     {login && <ProviderLoginDialog request={login} accounts={accounts} online={online} onReload={onReload} onClose={() => setLogin(null)} />}
   </div>;

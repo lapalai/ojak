@@ -1,6 +1,6 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { compareRows, criticalLimit, groupAlias, isExpanded, loginTarget, meaningfulLabel, overviewOf, quotaRows, quotaTone, toggleExpanded, watchable, watchedMembers, whenBand, windowKind } from "./overview.ts";
+import { compareRows, criticalLimit, groupAlias, loginTarget, meaningfulLabel, overviewOf, quotaRows, quotaTone, watchable, watchedMembers, whenBand, windowKind } from "./overview.ts";
 import { quotaReading } from "./limits.ts";
 import type { Account, AccountQuotaSummary, QuotaBucket } from "./types.ts";
 
@@ -134,16 +134,6 @@ test("rows are ordered by name, never by usage, and unknown-route rows come last
   assert.deepEqual(sorted, ["a", "z", "reg", "route"]);
 });
 
-test("expanded state follows account IDs, so it survives the group key changing", () => {
-  let open: ReadonlySet<string> = new Set();
-  open = toggleExpanded(open, ["a", "b"]);
-  assert.equal(isExpanded(open, ["b"]), true);
-  // 갱신 뒤 구성원이 늘거나 줄어도 하나라도 남아 있으면 계속 펼쳐져 있다.
-  assert.equal(isExpanded(open, ["b", "c"]), true);
-  assert.equal(isExpanded(open, ["c"]), false);
-  open = toggleExpanded(open, ["a", "b", "c"]);
-  assert.equal(open.size, 0);
-});
 
 test("only a user-chosen label counts as an account name", () => {
   assert.equal(meaningfulLabel("Claude Code · 기본 프로필"), null);

@@ -1,5 +1,5 @@
 use crate::{
-    process::{base_env, executable, run_json, Probe},
+    process::{base_env, executable, run_json, run_json_within, Probe, USAGE_PROBE_TIMEOUT},
     quota::{codex_buckets, codex_credits, stable_id, text},
     safety::{canonical_profile, check_settings, profile_var},
 };
@@ -8,7 +8,7 @@ use serde_json::{json, Value};
 use std::{
     collections::BTreeMap,
     path::{Path, PathBuf},
-    time::Instant,
+    time::{Duration, Instant},
 };
 
 /// omp 계정은 Ojak이 직접 실행하지 않습니다. omp에서 `/model`로 `ojak-*` 모델을 고르면
@@ -222,6 +222,40 @@ pub(crate) fn inspect_identity_until(
     deadline: Instant,
 ) -> Result<Account, ApiError> {
     inspect_core(tool, profile, binary, label, profile, false, Some(deadline))
+}
+
+/// 스캔(상태 갱신·한도 조회 뒤 재확인) 전용 identity 확인. Claude 조회는 실측 20초를 넘길 수 있어
+/// 이 경로만 50초 절대 deadline(`USAGE_PROBE_TIMEOUT`)을 쓴다. Codex는 `inspect_identity`와 같다.
+/// 실행 전 검증·인증 접근·실행 검사는 이 함수를 쓰지 않고 기존 제한을 유지한다.
+pub(crate) fn inspect_identity_for_scan(
+    tool: &str,
+    profile: &Path,
+    binary: &Path,
+    label: &str,
+) -> Result<Account, ApiError> {
+    inspect_identity_for_scan_within(tool, profile, binary, label, USAGE_PROBE_TIMEOUT)
+}
+
+fn inspect_identity_for_scan_within(
+    tool: &str,
+    profile: &Path,
+    binary: &Path,
+    label: &str,
+    limit: Duration,
+) -> Result<Account, ApiError> {
+    if tool != "claude" {
+        return inspect_identity(tool, profile, binary, label);
+    }
+    let account = blank_account(tool, profile, binary, label);
+    check_settings(tool, profile, profile)?;
+    let value = run_json_within(
+        binary,
+        &["auth", "status", "--json"],
+        &profile_env(tool, profile),
+        profile,
+        limit,
+    )?;
+    parse_claude(&value, account, profile)
 }
 
 fn inspect_core(
@@ -583,4 +617,29 @@ done"#,
         assert_eq!(rate_calls(&profile), 0);
         std::fs::remove_dir_all(profile.parent().unwrap()).unwrap();
     }
+
+    #[cfg(unix)]
+    fn fake_claude(script: &str) -> (PathBuf, PathBuf) {
+        let root = std::env::temp_dir().join(format!("aam-native-claude-{}", aam_protocol::new_id()));
+        std::fs::create_dir_all(root.join("profile")).unwrap();
+        let root = root.canonicalize().unwrap();
+        let binary = root.join("claude");
+        crate::process::test_support::write_script(&binary, script);
+        (root.join("profile"), binary)
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn claude_scan_identity_is_bounded_by_its_absolute_deadline() {
+        use crate::process::test_support::retry_start;
+        let (profile, binary) = fake_claude("sleep 30");
+        let started = Instant::now();
+        let result = retry_start(|| {
+            inspect_identity_for_scan_within("claude", &profile, &binary, "계정", Duration::from_millis(500))
+        });
+        assert_eq!(result.unwrap_err().code, "PROBE_TIMEOUT");
+        assert!(started.elapsed() < Duration::from_secs(10));
+        std::fs::remove_dir_all(profile.parent().unwrap()).unwrap();
+    }
 }
+
