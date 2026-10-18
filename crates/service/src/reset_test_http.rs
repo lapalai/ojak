@@ -57,12 +57,11 @@ impl Drop for Server {
 
 #[test]
 fn incomplete_connection_does_not_consume_the_next_response() {
-    use std::net::{Shutdown, TcpStream};
+    use std::net::TcpStream;
     let expected = serde_json::json!({"available_count": 1});
     let server = Server::new(vec![Some((200, expected.clone()))]);
     let mut incomplete = TcpStream::connect(server.url.trim_start_matches("http://")).unwrap();
     incomplete.write_all(b"GET /incomplete HTTP/1.1\r\n").unwrap();
-    incomplete.shutdown(Shutdown::Both).unwrap();
     drop(incomplete);
     let actual: Value = reqwest::blocking::Client::builder()
         .no_proxy().timeout(Duration::from_secs(2)).build().unwrap()

@@ -104,6 +104,7 @@ npx tauri signer generate -w "$HOME/.tauri/ojak.key"
 - Windows의 실제 오류가 남아 있던 Orca 터미널에서 공식 `/restart`로 해당 omp만 같은 대화·실행 옵션으로 재시작했다. 원래 작업을 실행하거나 파일을 수정하지 않는 연결 확인 요청에 `OJAK_SESSION_OK`가 반환되고 TUI가 idle로 돌아왔음을 확인했다. 과거 오류 문구는 대화 이력에 남아 있지만 새 요청은 성공했다. 다른 터미널이나 Orca는 종료하지 않았다.
 - Mac Orca 1.4.224·Windows Orca 1.4.227은 교체하지 않았다. Windows의 기존 터미널/TUI 복구는 확인했지만 Orca structured ACP 호환·전체 클라이언트 동시 전환을 검증한 것은 아니다. upstream `omp update`로 일반 배포판을 다시 설치하면 필수 호환 계약이 사라질 수 있으므로 수정본 유지가 필요하다. 공개 릴리스 게이트는 그대로 유지한다.
 - 복구 도중 사용자가 V3의 “fileless 기법 탐지 / 악성코드와 유사한 행위를 수행” 경고를 보고했다. 탐지 대상·시각을 확보하지 못해 원인이나 오탐 여부는 미확정이다. 사용자의 재개 지시 후 Windows 확장 갱신과 요청 검증은 `cmd`에서 실제 실행 파일을 직접 호출했으며 PowerShell EncodedCommand·ExecutionPolicy Bypass를 사용하지 않았다. 백신 설정·예외·격리는 변경하지 않았다. 사용자가 보호를 껐다고 알렸으므로 보호 재활성화를 요청했으며, 보호가 켜진 상태의 오탐 해소를 검증했다고 주장하지 않는다.
+- 이후 CI run `39095087515`의 Mac 실패는 DMG가 아니라 `reset_test_http.rs` 회귀 테스트의 `shutdown(Shutdown::Both).unwrap()`에서 발생한 `NotConnected`였다. 불완전 요청의 연결 종료는 소켓 drop만으로 충분하므로 중복 shutdown을 제거했다. 실제 다음 HTTP 응답·요청 기록 검증은 유지했으며 로컬 Mac의 `cargo test -p aam-service reset_ -- --test-threads=1` 15개가 통과했다. 테스트 코드만 변경했으며 설치 실행 파일·버전은 바꾸지 않았다.
 
 ## 0.16.0 새 디자인 Mac 배포 (2026-10-18)
 
