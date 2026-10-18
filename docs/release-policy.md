@@ -94,8 +94,16 @@ npx tauri signer generate -w "$HOME/.tauri/ojak.key"
 - PowerShell `Start-Process -Wait`가 설치 완료 뒤에도 자식 서비스 종료를 기다려 모니터만 남았다. 설치 완료는 installer log의 prepare/finish OK, 실제 CLI·실행 서비스·감독 프로세스 0.16.0, `setup --check`의 ready true·serviceVersionMismatch false로 별도 확인했다. 설치 Task 등록을 정리했고 기존 omp·Orca의 확인한 4개 PID가 유지됐음을 확인했다. 네이티브 Windows 화면의 시각 검증은 하지 않았다.
 - Windows proof는 사용자 홈의 `ojak-016-verified-install.json`이다. `setup --status`의 미검증 ready false와 실제 `setup --check`의 ready true를 구분해서 기록했다.
 - 공개용 서명 빌드는 설치한 로컬 0.16.0과 다른 산출물이므로 0.16.1로 분리했다. PR #43 (`release/0.16.0`)의 제품 코드 commit `0e059dd`는 CI run `39086044435`에서 macOS·Windows의 테스트·타입 검사·전체 unsigned 설치 파일 빌드를 통과했다. 필수 reviewer `antoniopark0-sys`에게 승인 요청했으며, 승인 전 main 병합·태그·서명 draft·공개를 진행하지 않는다.
-- 사용자가 보고한 `BRIDGE_ADMISSION_STOPPED` 문구는 확장의 durableNativeStream 사전 검사에서 requestKind/sessionId/liveContext/persistSession 중 하나라도 확인되지 않을 때 발생한다. 확인한 실행본은 Mac omp 18.12.1, Windows omp 18.11.3이며 요구되는 18.12.0-ojak.1 수정본과 다르다. 클라이언트 교체는 사용자 선택으로 하지 않았으며 해당 세션의 호환성 복구·새 요청 종단 성공은 미검증이다. 호환 검사를 우회하거나 API 인증 설정을 바꾸지 않는다.
+- 사용자가 처음 보고한 `BRIDGE_ADMISSION_STOPPED` 문구는 확장의 durableNativeStream 사전 검사에서 requestKind/sessionId/liveContext/persistSession 중 하나라도 확인되지 않을 때 발생했다. 당시 실행본은 Mac omp 18.12.1, Windows omp 18.11.3으로 필수 수정본과 달랐다. Windows의 추가 `BRIDGE_CLIENT_UPGRADE_REQUIRED` 오류는 구형 확장이 `X-Ojak-Admission`을 보내지 않아 서버에서 거절한 경우였다. 호환 검사·인증 설정을 우회하지 않고 아래 복구를 수행했다.
 - 현재 Mac·Windows 로컬 설치는 0.16.0, 공개 최신은 0.13.2다. 공개 후보 0.16.1의 서명된 동일 산출물 양 OS 적용과 앱 안 업데이트 검증·공개는 아직 완료하지 않았다.
+
+### 로컬 omp 연동 복구
+
+- 사용자의 추가 복구 요청으로 공개 v0.13.2의 동일 omp `18.12.0-ojak.1` 바이너리를 적용했다. GitHub asset digest와 실제 SHA-256을 대조했다(Mac `8aafda40a5371da9c8249c3319b69fe1197e52cf49d3a0fca04f98cd283502ac`, Windows `7708ef018390d318072d44e85b0178d4d9bdf34b055d0342d1ae6588799dfd73`). 기존 실행 파일은 백업하고 새 파일로 엔트리만 교체했으며 기존 프로세스는 강제 종료하지 않았다. Ojak 실행 산출물은 기존 0.16.0 그대로다.
+- 양 OS에서 공식 `aam omp-bridge connect`로 소유 확장을 갱신했다. Mac의 Claude Sonnet 4.6 실제 응답, Windows의 `OJAK_WINDOWS_BRIDGE_OK` 응답과 각 세션의 `ojak.admission.v1` queued → submitted → completed, 실제 bridge.log 전달 기록을 확인했다. 응답 메시지의 공급자가 `anthropic`인 것은 브릿지가 원래 공급자의 메시지를 전달하기 때문이며, 경유 증거는 journal과 브릿지 기록을 함께 사용했다.
+- Windows의 실제 오류가 남아 있던 Orca 터미널에서 공식 `/restart`로 해당 omp만 같은 대화·실행 옵션으로 재시작했다. 원래 작업을 실행하거나 파일을 수정하지 않는 연결 확인 요청에 `OJAK_SESSION_OK`가 반환되고 TUI가 idle로 돌아왔음을 확인했다. 과거 오류 문구는 대화 이력에 남아 있지만 새 요청은 성공했다. 다른 터미널이나 Orca는 종료하지 않았다.
+- Mac Orca 1.4.224·Windows Orca 1.4.227은 교체하지 않았다. Windows의 기존 터미널/TUI 복구는 확인했지만 Orca structured ACP 호환·전체 클라이언트 동시 전환을 검증한 것은 아니다. upstream `omp update`로 일반 배포판을 다시 설치하면 필수 호환 계약이 사라질 수 있으므로 수정본 유지가 필요하다. 공개 릴리스 게이트는 그대로 유지한다.
+- 복구 도중 사용자가 V3의 “fileless 기법 탐지 / 악성코드와 유사한 행위를 수행” 경고를 보고했다. 탐지 대상·시각을 확보하지 못해 원인이나 오탐 여부는 미확정이다. 사용자의 재개 지시 후 Windows 확장 갱신과 요청 검증은 `cmd`에서 실제 실행 파일을 직접 호출했으며 PowerShell EncodedCommand·ExecutionPolicy Bypass를 사용하지 않았다. 백신 설정·예외·격리는 변경하지 않았다. 사용자가 보호를 껐다고 알렸으므로 보호 재활성화를 요청했으며, 보호가 켜진 상태의 오탐 해소를 검증했다고 주장하지 않는다.
 
 ## 0.16.0 새 디자인 Mac 배포 (2026-10-18)
 
