@@ -87,6 +87,16 @@ npx tauri signer generate -w "$HOME/.tauri/ojak.key"
 
 `Client verification`은 고정된 omp·Orca 수정본을 별도 Mac runner에서 빌드한다. omp 실행 파일의 실제 버전 출력, Orca 전체 Mac 설치 파일(9개 원격 대상 포함), 격리 HOME의 실제 원격 터미널 왕복을 검사한다. 결과는 `verification-only-mac-clients`에만 보관하며 upstream이나 Ojak Release로 게시하지 않는다. 공식 네이티브 입력은 고정 SHA-256과 원본 템플릿 봉인 검증을 모두 통과해야 가져온다. 작업 실행·성공 여부는 각 Actions run의 실제 결과로 확인한다.
 
+## 0.16 Windows 반영 및 공개 후보 진행 (2026-10-18)
+
+- Windows PC의 기존 0.10.1에서 0.16.0 설치 파일을 빌드했다. Rust 431개 통과(서브프로세스 전용 helper 1개는 부모 테스트에서 실행), desktop 102개·omp 확장 25개·타입 검사 및 NSIS 빌드가 통과했다. 소스 commit은 `4183eaf`, setup SHA-256은 `401c44257760cd78c2d78befb8f1c05e51f322d8e48145e4ca1c10be0b5577f1`이다.
+- 사용자는 “ojak만 종료하고 업데이트”를 명시 선택했다. 모델 요청·인증 갱신이 없는 시점에 같은 사용자·Interactive/Limited Task로 Ojak만 업데이트했다. 최초 설치는 `INSTALLER_FILES_BUSY`로 중단됐으며, 잠금을 잡고 있던 같은 설치 경로의 `aam.exe omp-observer` 보조 프로세스만 정리한 뒤 NSIS prepare·finish가 성공했다. omp·Orca 프로세스 및 실행 파일은 종료·교체하지 않았다.
+- PowerShell `Start-Process -Wait`가 설치 완료 뒤에도 자식 서비스 종료를 기다려 모니터만 남았다. 설치 완료는 installer log의 prepare/finish OK, 실제 CLI·실행 서비스·감독 프로세스 0.16.0, `setup --check`의 ready true·serviceVersionMismatch false로 별도 확인했다. 설치 Task 등록을 정리했고 기존 omp·Orca의 확인한 4개 PID가 유지됐음을 확인했다. 네이티브 Windows 화면의 시각 검증은 하지 않았다.
+- Windows proof는 사용자 홈의 `ojak-016-verified-install.json`이다. `setup --status`의 미검증 ready false와 실제 `setup --check`의 ready true를 구분해서 기록했다.
+- 공개용 서명 빌드는 설치한 로컬 0.16.0과 다른 산출물이므로 0.16.1로 분리했다. PR #43 (`release/0.16.0`)의 제품 코드 commit `0e059dd`는 CI run `39086044435`에서 macOS·Windows의 테스트·타입 검사·전체 unsigned 설치 파일 빌드를 통과했다. 필수 reviewer `antoniopark0-sys`에게 승인 요청했으며, 승인 전 main 병합·태그·서명 draft·공개를 진행하지 않는다.
+- 사용자가 보고한 `BRIDGE_ADMISSION_STOPPED` 문구는 확장의 durableNativeStream 사전 검사에서 requestKind/sessionId/liveContext/persistSession 중 하나라도 확인되지 않을 때 발생한다. 확인한 실행본은 Mac omp 18.12.1, Windows omp 18.11.3이며 요구되는 18.12.0-ojak.1 수정본과 다르다. 클라이언트 교체는 사용자 선택으로 하지 않았으며 해당 세션의 호환성 복구·새 요청 종단 성공은 미검증이다. 호환 검사를 우회하거나 API 인증 설정을 바꾸지 않는다.
+- 현재 Mac·Windows 로컬 설치는 0.16.0, 공개 최신은 0.13.2다. 공개 후보 0.16.1의 서명된 동일 산출물 양 OS 적용과 앱 안 업데이트 검증·공개는 아직 완료하지 않았다.
+
 ## 0.16.0 새 디자인 Mac 배포 (2026-10-18)
 
 - 사용자의 요청에 따라 기존 0.14/0.15 작업본의 사용 현황 개편·오른쪽 상세 패널·설정 초안 대화상자·모델 설정 점검과 Claude 조회 수정을 모두 포함했다. `bump-version.mjs 0.16.0` 후 npm package lock을 재생성하고 Cargo lock도 갱신했다.
