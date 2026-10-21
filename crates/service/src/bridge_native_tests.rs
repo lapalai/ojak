@@ -790,10 +790,19 @@ fn permit_waiters_are_served_in_arrival_order_instead_of_failing_busy() {
     let one = spawn_call(&second, true, Duration::from_secs(5));
     wait_until("second queued", || budget.waiting() == 1);
     // 같은 소스의 추가 대기자는 따로 자리를 기다리지 않는다(대기열은 프로필 수를 넘지 않는다).
-    let extra = spawn_call(&second, true, Duration::from_secs(5));
+    let (joined_tx, joined_rx) = mpsc::channel();
+    let extra_source = Arc::clone(&second);
+    let extra = std::thread::spawn(move || {
+        let checks = std::cell::Cell::new(0);
+        extra_source.ensure(true, Instant::now() + Duration::from_secs(5), &|| {
+            checks.set(checks.get() + 1);
+            if checks.get() == 2 { joined_tx.send(()).unwrap(); }
+            false
+        })
+    });
     let two = spawn_call(&third, true, Duration::from_secs(5));
     wait_until("third queued", || budget.waiting() == 2);
-    std::thread::sleep(Duration::from_millis(100));
+    joined_rx.recv_timeout(Duration::from_secs(5)).unwrap();
     assert_eq!((quick_a.calls(), quick_b.calls()), (0, 0), "waiters must not run past the global limit");
     slow.open();
     held.join().unwrap().unwrap();
@@ -803,6 +812,39 @@ fn permit_waiters_are_served_in_arrival_order_instead_of_failing_busy() {
     assert_eq!((quick_a.calls(), quick_b.calls()), (1, 1));
     assert_eq!((budget.active(), budget.waiting()), (0, 0));
     assert_eq!(second.auth_status().busy_rejections + third.auth_status().busy_rejections, 0);
+}
+
+#[test]
+fn a_queued_waiter_observes_a_refresh_that_finishes_before_it_wakes() {
+    let env = Env::new();
+    let fake = Fake::new(true, true);
+    let budget = Arc::new(RefreshBudget::new(1));
+    let held = budget.acquire_until(Instant::now() + Duration::from_secs(10), &|| false).unwrap();
+    let source = source_with(&env, env.account(), &fake, &budget, Duration::from_secs(10), Duration::from_millis(50));
+    let first = spawn_call(&source, true, Duration::from_secs(10));
+    wait_until("refresh queued", || budget.waiting() == 1);
+    let (waiting_tx, waiting_rx) = mpsc::channel();
+    let (resume_tx, resume_rx) = mpsc::channel();
+    let delayed_source = Arc::clone(&source);
+    let delayed = std::thread::spawn(move || {
+        let checks = std::cell::Cell::new(0);
+        delayed_source.ensure(true, Instant::now() + Duration::from_secs(10), &|| {
+            checks.set(checks.get() + 1);
+            if checks.get() == 2 {
+                waiting_tx.send(()).unwrap();
+                resume_rx.recv_timeout(Duration::from_secs(10)).unwrap();
+            }
+            false
+        })
+    });
+    waiting_rx.recv_timeout(Duration::from_secs(10)).unwrap();
+    drop(held);
+    first.join().unwrap().unwrap();
+    resume_tx.send(()).unwrap();
+    delayed.join().unwrap().unwrap();
+    assert_eq!(fake.calls(), 1, "a waiter already queued for this refresh must share its result");
+    call(&source, true, Duration::from_secs(5)).unwrap();
+    assert_eq!(fake.calls(), 2, "a new forced refresh after completion must still run");
 }
 
 #[test]
