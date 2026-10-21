@@ -14,8 +14,8 @@ index afa049bc..4c58f384 100644
 +Other agents, unmanaged omp configurations, SSH execution, WSL, and reattaching an existing
 +process do not use the client's Ojak gate.
 +
-+This source fork is version `1.5.0-ojak.1` and supports the coupled omp
-+`18.12.0-ojak.1` ACP client explicitly. Other prerelease omp builds remain unsupported;
++This source fork is version `1.5.0-ojak.3` and supports the coupled omp
++`18.12.0-ojak.2` ACP client explicitly. Other prerelease omp builds remain unsupported;
 +the existing stable-release compatibility rule is unchanged.
 +
 +During resource pressure or a temporary Ojak service outage, the pane shows a waiting notice.
@@ -67,7 +67,7 @@ index ae91aafa..79048779 100644
  {
    "name": "orca",
 -  "version": "1.4.227",
-+  "version": "1.5.0-ojak.2",
++  "version": "1.5.0-ojak.3",
    "description": "Next-gen IDE for parallel agentic development",
    "homepage": "https://github.com/stablyai/orca",
    "author": "stablyai",
@@ -83,7 +83,7 @@ index 3f814ada..0e1c9254 100644
 -  supportsVersion: (version) => isStableCliVersionFrom(version, '17.0.5'),
 +  // Stable releases from 17.0.5, plus the coupled Ojak fork whose ACP contract is verified here.
 +  supportsVersion: (version) =>
-+    version === '18.12.0-ojak.1' || isStableCliVersionFrom(version, '17.0.5'),
++    version === '18.12.0-ojak.2' || isStableCliVersionFrom(version, '17.0.5'),
    // `omp models --json` lists every model without the `enabledModels` filter a chat applies, so it
    // could offer models a chat refuses; its chats' own listings fill the catalog instead.
    modelDiscovery: {
@@ -195,7 +195,7 @@ index c432ef13..93fad174 100644
    })
  
 -  it.each(['17.0.5', '17.2.12', '18.4.5'])('admits OMP %s', async (version) => {
-+  it.each(['17.0.5', '18.12.0-ojak.1'])('admits OMP %s', async (version) => {
++  it.each(['17.0.5', '18.12.0-ojak.2'])('admits OMP %s', async (version) => {
      const launch = resolver(ompRecord(), {
        probeVersion: async (_input, supports) => supports(version)
      })
@@ -203,7 +203,7 @@ index c432ef13..93fad174 100644
    })
  
 -  it.each(['17.0.4', '16.9.0', '18.0.0-beta.1'])(
-+  it.each(['17.0.4', '18.0.0-beta.1', '18.12.0-ojak.2'])(
++  it.each(['17.0.4', '18.0.0-beta.1', '18.12.0-ojak.3'])(
      'refuses OMP %s before spawning it, as a host that cannot run the chat',
      async (version) => {
        const launch = resolver(ompRecord(), {

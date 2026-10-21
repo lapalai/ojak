@@ -34,7 +34,7 @@ jobs:
       fail-fast: true
       matrix:
         include:
-          - os: macos-14
+          - os: macos-15
             platform: darwin-aarch64
           - os: windows-latest
             platform: windows-x86_64
@@ -128,6 +128,7 @@ jobs:
           cargo build -p aam-launcher
           npm run test:desktop
           npm run typecheck
+          node --test scripts/package-compatible-omp.test.mjs
           if [ "$RUNNER_OS" = "Windows" ]; then
             writer="${GITHUB_WORKSPACE}/target/debug/aam.exe"
           else
@@ -140,6 +141,40 @@ jobs:
           AAM_OBSERVER_TEST_WRITER="$writer" node --test \
             integrations/omp/aam-accounts.test.mjs \
             integrations/omp/aam-observer.test.mjs
+
+      - name: Install checksum-pinned Bun for compatible omp builds
+        run: |
+          set -eu
+          # Pins from oven-sh/bun bun-v1.4.3/SHASUMS256.txt.
+          if [ "$RUNNER_OS" = "Windows" ]; then
+            asset=bun-windows-x64
+            expected=0bf84e808552beea67bf1202a287a35c6c825d837b287b3f8e9dd513dba35d3d
+          else
+            asset=bun-darwin-aarch64
+            expected=80afd4c069b46a6fa8f3ec520bebc750a7843e4a8d5b9583d29ad436c00a3403
+          fi
+          curl --fail --location --proto '=https' --proto-redir '=https' --tlsv1.2 --max-time 120 \
+            "https://github.com/oven-sh/bun/releases/download/bun-v1.4.3/${asset}.zip" \
+            --output "$RUNNER_TEMP/bun.zip"
+          EXPECTED_BUN_SHA256="$expected" node --input-type=module <<'EOF'
+          import { createHash } from "node:crypto";
+          import { readFileSync } from "node:fs";
+          import { join } from "node:path";
+          const hash = createHash("sha256").update(readFileSync(join(process.env.RUNNER_TEMP, "bun.zip"))).digest("hex");
+          if (hash !== process.env.EXPECTED_BUN_SHA256) throw new Error("Pinned Bun archive checksum mismatch");
+          EOF
+          if [ "$RUNNER_OS" = "Windows" ]; then
+            powershell -NoProfile -Command 'Expand-Archive -Path "$env:RUNNER_TEMP/bun.zip" -DestinationPath "$env:RUNNER_TEMP/bun"'
+          else
+            unzip -q "$RUNNER_TEMP/bun.zip" -d "$RUNNER_TEMP/bun"
+          fi
+          echo "$RUNNER_TEMP/bun/$asset" >> "$GITHUB_PATH"
+
+      - name: Prepare pinned compatible client source
+        run: node scripts/prepare-client-forks.mjs "$RUNNER_TEMP/compatible-clients"
+
+      - name: Build and execute native compatible omp
+        run: node scripts/package-compatible-omp.mjs build "$RUNNER_TEMP/compatible-clients/oh-my-pi" "$RUNNER_TEMP/ojak-${{ matrix.platform }}"
 
       - name: Build
         env:
@@ -218,6 +253,13 @@ jobs:
           path: ${{ runner.temp }}/dist
           merge-multiple: true
 
+      - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
+        with:
+          node-version: 22
+
+      - name: Generate same-release omp compatibility manifest
+        run: node scripts/package-compatible-omp.mjs manifest "$RUNNER_TEMP/dist"
+
       - name: Stage draft GitHub Release
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
@@ -254,7 +296,7 @@ jobs:
           };
           writeFileSync("latest.json", `${JSON.stringify(manifest, null, 2)}\n`);
           EOF
-          sha256sum "$(basename "$dmg")" Ojak.app.tar.gz Ojak.app.tar.gz.sig "$(basename "$setup")" "$(basename "$setup").sig" > SHA256SUMS
+          sha256sum "$(basename "$dmg")" Ojak.app.tar.gz Ojak.app.tar.gz.sig "$(basename "$setup")" "$(basename "$setup").sig" omp-darwin-arm64 omp-windows-x64.exe omp-compatible.json > SHA256SUMS
           test -s SHA256SUMS
           gh release create "$GITHUB_REF_NAME" --repo "$GITHUB_REPOSITORY" \
             --draft \
@@ -262,4 +304,4 @@ jobs:
             --notes "$notes" \
             "$(basename "$dmg")" Ojak.app.tar.gz Ojak.app.tar.gz.sig \
             "$(basename "$setup")" "$(basename "$setup").sig" \
-            latest.json SHA256SUMS
+            latest.json SHA256SUMS omp-darwin-arm64 omp-windows-x64.exe omp-compatible.json

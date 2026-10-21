@@ -28,6 +28,9 @@
 - 코드와 릴리스는 공개 저장소 `lapalai/ojak` 한 곳이다. 별도 `ojak-releases` 저장소는 쓰지 않는다.
 - 앱은 `plugins.updater.endpoints`의 `latest.json`을 인증 없이 받는다. 주소는 `https://github.com/lapalai/ojak/releases/latest/download/latest.json`이다.
 - `v*` 태그를 이 저장소에 푸시하면 `.github/workflows/release.yml`이 macOS DMG, Windows setup.exe, 업데이터 서명, `latest.json`, `SHA256SUMS`를 같은 저장소의 **비공개 draft Release**에 올린다. 정식 최신 버전은 바뀌지 않는다. 워크플로는 `pull_request`/`pull_request_target`이 없고, `github.repository`가 `lapalai/ojak`인 태그 푸시에서만 돈다. 포크 pull request에는 서명 비밀키가 전달되지 않는다. 태그가 annotated이고 main에 있는 커밋을 가리키는지도 서명 전에 검사한다("태그 보호").
+- 같은 draft에는 native Mac arm64·Windows x64 호스트에서 빌드하고 `--version`을 실행한 `omp-darwin-arm64`, `omp-windows-x64.exe`와 `omp-compatible.json`도 포함한다. `scripts/package-compatible-omp.mjs build <준비한 omp 소스> <stage>`가 pinned 버전을 대조하고, 두 OS 산출물을 모은 뒤 `manifest <stage>`가 실제 바이트의 크기·SHA-256을 기록한다. 세 파일 모두 `SHA256SUMS`에 포함한다. 어느 OS 빌드라도 없으면 draft 생성을 중단한다.
+- omp `18.12.0-ojak.2`부터 일반 `omp update`·`--check`·`--force`·`--stable` 및 시작 시 업데이트 안내는 공개 stable `lapalai/ojak` 최신 Release만 조회한다. 같은 Release의 manifest는 `schemaVersion: 1`, `admissionProtocol: 1`, Ojak fork `version`, `platforms.darwin-arm64`·`platforms.win32-x64`의 `{asset,sha256,size}`를 담는다. draft·prerelease·누락/불일치 manifest·미지원 플랫폼·네트워크 오류에서는 기존 실행 파일을 보존한다. `--canary`는 명시적으로 거절하며 upstream/npm/build-service로 우회하지 않는다. 기존 채널 설정과 인증 설정은 바꾸지 않고 플러그인 업데이트는 기존 경로를 유지한다.
+- 이 호환 manifest는 GitHub 공개 Release 신뢰 경계 안의 무결성 계약이며 별도 코드 서명을 대신하지 않는다. 공개 전에는 두 OS에서 실제 업데이트·실패 시 rollback과 Orca의 명시적 omp 버전 계약도 확인한다. 소스 변경이나 draft 생성만으로 설치·공개 완료라고 기록하지 않는다.
 
 ## 공개 전 수동 단계
 1. `plugins.updater.pubkey`는 이미 실제 minisign 공개키다. 그와 한 쌍인 비밀키 내용만 GitHub Actions secret `TAURI_SIGNING_PRIVATE_KEY`에 넣는다. 암호가 있으면 `TAURI_SIGNING_PRIVATE_KEY_PASSWORD`도 넣는다. 비밀키는 저장소·로그·진단에 넣지 말고, 저장소 밖에도 보관한다. 잃으면 이미 설치된 앱은 앱 안 업데이트를 검증할 수 없다. 첫 태그 전에 비밀키를 잃었다면 새 쌍을 만들고 공개키를 바꾼 뒤에만 태그를 푸시한다.
@@ -86,6 +89,16 @@ npx tauri signer generate -w "$HOME/.tauri/ojak.key"
 브랜치·PR CI는 `node scripts/build.mjs --verify-build`로 Windows NSIS·Mac DMG 전체 빌드를 검증하고 `verification-only-*` Actions artifact에 7일 보관한다. 서명 키를 받지 않으며 업데이터 산출물·태그·Release를 만들지 않는다. 태그나 다른 이벤트에서 이 옵션을 사용하면 거절한다. 이 빌드 성공은 설치·서명·공개 승인 검증을 대신하지 않는다.
 
 `Client verification`은 고정된 omp·Orca 수정본을 별도 Mac runner에서 빌드한다. omp 실행 파일의 실제 버전 출력, Orca 전체 Mac 설치 파일(9개 원격 대상 포함), 격리 HOME의 실제 원격 터미널 왕복을 검사한다. 결과는 `verification-only-mac-clients`에만 보관하며 upstream이나 Ojak Release로 게시하지 않는다. 공식 네이티브 입력은 고정 SHA-256과 원본 템플릿 봉인 검증을 모두 통과해야 가져온다. 작업 실행·성공 여부는 각 Actions run의 실제 결과로 확인한다.
+
+## 0.16.2 호환 omp 업데이트 복구 (2026-10-19)
+
+- Mac의 공식 omp 18.12.2를 백업하고 검증된 18.12.0-ojak.1로 먼저 복구했다. 이어 호환 업데이트를 구현한 새 18.12.0-ojak.2를 빌드해 설치했다. 기존 omp·Orca 프로세스는 종료하지 않았으며 실행 중인 일반판 세션은 저장 후 재시작해야 새 실행본을 사용한다.
+- 새 Mac omp SHA-256은 `de6d393a0d01d065e2abf51f39b6c8e003b5036b4a4e86140d6e43513f963914`이다. 실제 주 요청의 `OJAK_COMPATIBLE_UPDATE_OK`, admission queued → submitted → completed 및 advisor의 정상 stop을 확인했다.
+- 업데이트 관련 테스트 120개 통과·1개 skip, omp 타입 검사, 패키징 테스트 3개, launcher omp_bridge 검사 6개가 통과했다. 깨끗한 pinned checkout에서 두 fork 패치 적용을 확인했다. 기존 일반판 설치 명령 문자열만 고정한 테스트 2개는 삭제했다.
+- 격리된 실제 omp 실행 파일을 새 버전으로 교체하고 `--version` 실행까지 확인했다. manifest가 주장하는 버전과 실제 실행 파일 버전이 다를 때 원래 실행 파일 해시로 원복됨을 확인했다. 이 검증의 릴리스 전송은 주입된 fixture이며 공개 다운로드 성공을 뜻하지 않는다.
+- 실제 GitHub 공개 endpoint를 사용하는 새 실행본의 `update`, `--check`, `--force`는 호환 manifest가 아직 없는 현재 릴리스를 명시적으로 거절했고 실행 파일 해시가 유지됐다. `--canary`도 거절한다. 공개 배포 전까지 업데이트 보류 메시지는 정상이며 upstream 일반판으로 대체하지 않는다.
+- Ojak 0.16.2 앱/DMG를 빌드하고 ad-hoc codesign 검증을 통과했다. 관리 ACTIVE·ORPHANED 세션을 확인해 Ojak 앱 설치본 0.16.0 및 실행 서비스를 교체·재시작하지 않았다. 기존 앱의 연결/확장 갱신은 이전 omp 버전을 요구할 수 있으므로 관리 작업 종료 후 0.16.2 앱을 함께 반영해야 한다.
+- Windows 빌드·설치, 새 Orca 설치, 공개 릴리스 게시, 서명된 앱 업데이트는 수행하지 않았다. 공개 시에는 새 호환 클라이언트와 manifest를 동일 draft에 모으고 기존 양 OS 검증 게이트를 통과해야 한다.
 
 ## 0.16 Windows 반영 및 공개 후보 진행 (2026-10-18)
 

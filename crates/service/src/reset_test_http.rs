@@ -21,6 +21,9 @@ impl Server {
             let mut replies: VecDeque<_> = replies.into();
             while !done.load(Ordering::SeqCst) {
                 let Ok((mut stream, _)) = listener.accept() else { thread::sleep(Duration::from_millis(5)); continue; };
+                // Winsock inherits the listener's nonblocking mode on accepted sockets.
+                // Only accept is polled; request reads use the timeout below.
+                stream.set_nonblocking(false).unwrap();
                 stream.set_read_timeout(Some(Duration::from_secs(2))).unwrap();
                 let mut bytes = Vec::new(); let mut buffer = [0u8; 4096];
                 let parsed = loop {
@@ -68,4 +71,24 @@ fn incomplete_connection_does_not_consume_the_next_response() {
         .get(&server.url).send().unwrap().json().unwrap();
     assert_eq!(actual, expected);
     assert_eq!(server.requests.lock()[0].0, "GET / HTTP/1.1");
+}
+
+#[test]
+fn fragmented_request_waits_for_the_remaining_body() {
+    use std::net::TcpStream;
+    let expected = serde_json::json!({"code": "reset"});
+    let server = Server::new(vec![Some((200, expected.clone()))]);
+    let mut client = TcpStream::connect(server.url.trim_start_matches("http://")).unwrap();
+    client.set_read_timeout(Some(Duration::from_secs(3))).unwrap();
+    client.write_all(b"POST /consume HTTP/1.1\r\nHost: localhost\r\nContent-Length: 2\r\nConnection: close\r\n\r\n{").unwrap();
+    // The server must wait, not treat a temporary lack of bytes as a disconnect.
+    thread::sleep(Duration::from_millis(100));
+    client.write_all(b"}").unwrap();
+    let mut response = String::new();
+    client.read_to_string(&mut response).unwrap();
+    let (head, body) = response.split_once("\r\n\r\n").unwrap();
+    assert!(head.starts_with("HTTP/1.1 200 "));
+    assert_eq!(serde_json::from_str::<Value>(body).unwrap(), expected);
+    assert_eq!(server.posts(), 1);
+    assert_eq!(server.requests.lock()[0].1, serde_json::json!({}));
 }
