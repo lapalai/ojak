@@ -141,6 +141,57 @@ fn abort(grant: &LeaseGrant) -> LeaseAction {
 }
 #[cfg(windows)]
 #[test]
+fn stopped_uninstall_persists_idempotent_admission_barrier_and_can_cancel() {
+    let fixture = Fixture::new();
+    let now = now_ms();
+    fixture.save(&account_fixture("offline", now));
+    let ended = fixture.service.acquire(request("ended"), now).unwrap();
+    fixture.service.finish(abort(&ended), true, now).unwrap();
+    let permit = prepare_stopped_uninstall(&fixture.service.paths).unwrap();
+    assert_eq!(prepare_stopped_uninstall(&fixture.service.paths).unwrap(), permit);
+    assert_eq!(fixture.service.acquire(request("blocked"), now).unwrap_err().code, "ADMISSION_DISABLED");
+    assert_eq!(metadata::<Option<String>>(&fixture.service.lock().unwrap().connection, "uninstallPermit").unwrap(), Some(Some(permit.clone())));
+    cancel_stopped_uninstall(&fixture.service.paths, Some(&permit)).unwrap();
+    let allowed = fixture.service.acquire(request("after-cancel"), now).unwrap();
+    fixture.service.finish(abort(&allowed), true, now).unwrap();
+}
+
+#[cfg(windows)]
+#[test]
+fn stopped_uninstall_preserves_every_held_state_even_when_expired() {
+    for state in ["PREPARED", "STARTING", "ACTIVE", "SUSPECT", "ORPHANED"] {
+        let fixture = Fixture::new();
+        let now = now_ms();
+        fixture.save(&account_fixture("held-offline", now));
+        let grant = fixture.service.acquire(request("held"), now).unwrap();
+        {
+            let store = fixture.service.lock().unwrap();
+            let mut record = lease(&store.connection, &grant.session.id).unwrap();
+            record.session.state = state.into();
+            save_lease(&store.connection, &record).unwrap();
+            store.connection.execute("UPDATE leases SET expires_at=1 WHERE id=?1", [&grant.session.id]).unwrap();
+        }
+        assert_eq!(prepare_stopped_uninstall(&fixture.service.paths).unwrap_err().code, "SESSION_BUSY", "{state}");
+        let store = fixture.service.lock().unwrap();
+        assert_eq!(lease(&store.connection, &grant.session.id).unwrap().session.state, state);
+        assert_eq!(metadata::<Option<String>>(&store.connection, "uninstallPermit").unwrap().flatten(), None);
+    }
+}
+
+#[cfg(windows)]
+#[test]
+fn stopped_uninstall_rejects_startup_lock_and_unknown_schema_without_permit() {
+    let fixture = Fixture::new();
+    let lifetime = server::service_lifetime_lock(&fixture.service.paths).unwrap();
+    assert_eq!(prepare_stopped_uninstall(&fixture.service.paths).unwrap_err().code, "SERVICE_ALREADY_RUNNING");
+    drop(lifetime);
+    fixture.service.lock().unwrap().connection.pragma_update(None, "user_version", 99).unwrap();
+    assert_eq!(prepare_stopped_uninstall(&fixture.service.paths).unwrap_err().code, "SCHEMA_VERSION_UNSUPPORTED");
+    assert_eq!(metadata::<Option<String>>(&fixture.service.lock().unwrap().connection, "uninstallPermit").unwrap().flatten(), None);
+}
+
+#[cfg(windows)]
+#[test]
 fn stopped_recovery_requires_matching_permit_and_reopens_new_admission() {
     let fixture = Fixture::new();
     let now = now_ms();

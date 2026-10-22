@@ -18,7 +18,7 @@ use std::{
     time::{Duration, Instant},
 };
 use windows_sys::Win32::{
-    Foundation::{ERROR_FILE_NOT_FOUND, WAIT_OBJECT_0, WAIT_TIMEOUT},
+    Foundation::{ERROR_FILE_NOT_FOUND, FILETIME, WAIT_OBJECT_0, WAIT_TIMEOUT},
     Storage::FileSystem::{FILE_FLAG_OPEN_REPARSE_POINT, FILE_SHARE_READ},
     System::{
         Registry::{
@@ -27,7 +27,7 @@ use windows_sys::Win32::{
             REG_SZ, RRF_NOEXPAND, RRF_RT_REG_EXPAND_SZ, RRF_RT_REG_SZ,
         },
         Threading::{
-            OpenProcess, QueryFullProcessImageNameW, TerminateProcess, WaitForSingleObject,
+            GetProcessTimes, OpenProcess, QueryFullProcessImageNameW, TerminateProcess, WaitForSingleObject,
             PROCESS_QUERY_LIMITED_INFORMATION, PROCESS_SYNCHRONIZE, PROCESS_TERMINATE,
         },
     },
@@ -47,6 +47,29 @@ const APP_RUN_VALUE: &str = "Ojak";
 
 #[path = "install_update_windows.rs"]
 mod update;
+#[path = "install_path_windows.rs"]
+mod install_path;
+
+pub fn installation_directory(path: &Path) -> Result<PathBuf, ApiError> {
+    install_path::resolve(path)
+}
+
+pub fn write_installer_directory(path: &Path, output: &Path) -> Result<(), ApiError> {
+    use std::{io::Write, os::windows::ffi::OsStrExt};
+    let resolved = install_path::resolve_for_creation(path)?;
+    let wide: Vec<u16> = resolved.as_os_str().encode_wide().collect();
+    // NSIS와 레지스트리는 Win32 드라이브 경로를 사용한다. 콘솔 코드 페이지로 변환하지 않는다.
+    let wide = wide.strip_prefix(&[92, 92, 63, 92]).unwrap_or(&wide);
+    if wide.len() > 1022 || wide.len() < 3 || wide[1] != 58 || wide[2] != 92
+        || wide.iter().any(|ch| matches!(*ch, 0 | 10 | 13))
+    {
+        return Err(error("INVALID_INSTALL_PATH", "설치 프로그램이 안전하게 처리할 수 없는 경로입니다."));
+    }
+    let bytes: Vec<u8> = wide.iter().flat_map(|ch| ch.to_le_bytes()).collect();
+    let mut file = fs::OpenOptions::new().write(true).create_new(true).open(output).map_err(io_error)?;
+    file.write_all(&bytes).map_err(io_error)?;
+    file.sync_all().map_err(io_error)
+}
 
 pub fn installer(paths: &Paths, action: &str, directory: &Path) -> Result<(), ApiError> {
     update::run(paths, action, directory)
@@ -595,17 +618,17 @@ impl ServiceProcess {
             Err(failure) if failure.raw_os_error() == Some(ERROR_FILE_NOT_FOUND as i32) => return Ok(None),
             Err(_) => return Err(error("UNMANAGED_SERVICE", "서비스 연결의 소유자를 확인하지 못해 복구 기록을 보존했습니다.")),
         };
-        let handle = unsafe { OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION | PROCESS_TERMINATE | PROCESS_SYNCHRONIZE, 0, pid) };
+        let handle = unsafe { OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION | PROCESS_SYNCHRONIZE, 0, pid) };
         if handle.is_null() { return Err(error("UNMANAGED_SERVICE", "서비스 프로세스를 확인하지 못해 중지하지 않았습니다.")); }
         let mut process = Self { handle: unsafe { OwnedHandle::from_raw_handle(handle as _) }, pid, image: None };
         if !aam_protocol::winutil::same_user_process(pid) || !process.alive() {
             return Err(error("UNMANAGED_SERVICE", "현재 사용자의 실행 중 서비스가 아니므로 중지하지 않았습니다."));
         }
         let parent = binary.parent().ok_or_else(|| error("FOREIGN_INSTALL", "서비스 설치 경로를 확인하지 못했습니다."))?;
-        update::directory(parent)?;
+        let binary = installation_directory(parent)?.join(binary.file_name().ok_or_else(|| error("FOREIGN_INSTALL", "서비스 실행 파일 이름이 없습니다."))?);
         // 동일 파일 객체를 유지하고 승인·종료가 끝날 때까지 쓰기와 이름 교체를 막는다.
         let file = fs::OpenOptions::new().read(true).share_mode(FILE_SHARE_READ)
-            .custom_flags(FILE_FLAG_OPEN_REPARSE_POINT).open(binary).map_err(io_error)?;
+            .custom_flags(FILE_FLAG_OPEN_REPARSE_POINT).open(&binary).map_err(io_error)?;
         let metadata = file.metadata().map_err(io_error)?;
         if !metadata.is_file() || metadata.file_attributes() & 0x400 != 0 {
             return Err(error("UPDATE_UNSAFE_FILE", "서비스 실행 파일의 종류를 확인하지 못했습니다."));
@@ -639,13 +662,31 @@ impl ServiceProcess {
         }
         Ok(permit.unwrap().to_owned())
     }
+    /// 종료 권한은 실제로 끝내야 하는 이 순간에만, 같은 프로세스 객체임을 다시 확인한 뒤 얻는다. 연결 핸들은 조회·대기 권한만 가진다
+    /// (같은 사용자의 다른 세션이 시작한 서비스에는 조회·대기만 허용된다). 연결 핸들을 쥐고 있어 PID는 재사용되지 않으며,
+    /// 그래도 새 핸들의 생성 시각이 연결한 객체와 같고 아직 끝나지 않았으며 같은 사용자의 프로세스인지 확인한다.
+    fn terminator(&self) -> Option<OwnedHandle> {
+        let raw = unsafe { OpenProcess(PROCESS_TERMINATE | PROCESS_QUERY_LIMITED_INFORMATION | PROCESS_SYNCHRONIZE, 0, self.pid) };
+        if raw.is_null() { return None; }
+        let reopened = unsafe { OwnedHandle::from_raw_handle(raw as _) };
+        let times = |handle: &OwnedHandle| -> Option<(u64, u64)> {
+            let zero = FILETIME { dwLowDateTime: 0, dwHighDateTime: 0 };
+            let (mut created, mut exited, mut kernel, mut user) = (zero, zero, zero, zero);
+            (unsafe { GetProcessTimes(handle.as_raw_handle() as _, &mut created, &mut exited, &mut kernel, &mut user) } != 0)
+                .then(|| ((u64::from(created.dwHighDateTime) << 32) | u64::from(created.dwLowDateTime), (u64::from(exited.dwHighDateTime) << 32) | u64::from(exited.dwLowDateTime)))
+        };
+        let (original, current) = (times(&self.handle)?, times(&reopened)?);
+        (original.0 != 0 && original == current && original.1 == 0 && aam_protocol::winutil::same_user_process(self.pid)).then_some(reopened)
+    }
     fn stop(&self) -> bool {
-        unsafe {
-            // 이미 끝난 프로세스에는 TerminateProcess가 실패한다. 중요한 것은 종료됐다는 사실이라 결과는 종료 대기로 확인한다.
-            // 중지 도중 충돌한 서비스도 종료로 본다. 관문이 있어 감독 프로세스가 되살리지 않는다.
-            let _ = TerminateProcess(self.handle.as_raw_handle() as _, 0);
-            WaitForSingleObject(self.handle.as_raw_handle() as _, 10_000) == WAIT_OBJECT_0
+        // 이미 끝난 프로세스에는 종료를 시도하지 않는다. 중요한 것은 종료됐다는 사실이라 결과는 종료 대기로 확인한다.
+        // 중지 도중 충돌한 서비스도 종료로 본다. 관문이 있어 감독 프로세스가 되살리지 않는다.
+        // 종료 권한을 얻지 못하거나 같은 객체임을 확인하지 못하면 종료하지 않고 실패를 돌려 호출자가 승인(permit)을 취소한다.
+        if self.alive() {
+            let Some(terminator) = self.terminator() else { return false };
+            unsafe { TerminateProcess(terminator.as_raw_handle() as _, 0); }
         }
+        unsafe { WaitForSingleObject(self.handle.as_raw_handle() as _, 10_000) == WAIT_OBJECT_0 }
     }
 }
 
@@ -741,8 +782,8 @@ fn service_shutdown(paths: &Paths, remove_installation: bool) -> Result<String, 
 
 /// 앱이 등록한 서비스를 내려 실행 파일을 바꿀 수 있는 상태로 만들고, 그 관문을 돌려준다. 호출자는 파일 작업이 끝날 때까지 관문을 쥔다.
 /// 먼저 관문을 걸어(감독 프로세스는 작업자를 만들지 않고 멈춘다) 서비스 pipe를 찾는다. 서비스가 있으면 같은 프로세스 객체에 대해 lease 안전 검사(permit)와
-/// 종료를 하고, 감독 프로세스를 끝내기로 확정한다. 서비스가 없을 때(감독 프로세스만 재시작을 기다리거나 아무것도 없음)는 `rollback`이 아니면
-/// 저장된 lease의 생존을 확인할 수 없으므로 거절한다. `rollback`은 파일만 되돌리고 서비스를 다시 시작해 lease를 새로 확인하므로 서비스가 없어도 진행한다.
+/// 종료를 하고, 감독 프로세스를 끝내기로 확정한다. 서비스가 없을 때도 시작 잠금과 저장소를 직접 확인해 점유 lease가 없을 때만 승인한다.
+/// `rollback`은 파일을 되돌리고 서비스를 다시 시작해 lease를 새로 확인하므로 이 종료 승인을 만들지 않는다.
 /// 거절·실패로 돌아가면 감독 프로세스는 확정하지 않았으므로 관문을 놓는 순간 작업자 감독을 이어 가서 자동 복구가 살아 있다.
 fn retire_registered(paths: &Paths, record_path: &Path, record: &mut ServiceRecord, rollback: bool) -> Result<aam_service::supervisor::Fence, ApiError> {
     let mut fence = aam_service::supervisor::engage(paths)?;
@@ -758,8 +799,9 @@ fn retire_registered(paths: &Paths, record_path: &Path, record: &mut ServiceReco
             }
             return Err(error("SERVICE_STOP_FAILED", "서비스 종료를 확인하지 못했습니다. 설치 기록은 보존했습니다."));
         }
-    } else if !rollback && paths.database.exists() && record.uninstall_permit.is_none() {
-        return Err(error("LEASE_STATE_UNKNOWN", "서비스가 꺼져 있지만 저장된 lease의 생존 여부를 확인할 수 없습니다. 서비스를 다시 시작하여 안전하게 제거하세요."));
+    } else if !rollback && paths.database.try_exists().map_err(io_error)? {
+        record.uninstall_permit = Some(aam_service::prepare_stopped_uninstall(paths)?);
+        save(record_path, record)?;
     }
     fence.commit_retirement();
     fence.wait_supervisor_exit(SUPERVISOR_EXIT_WAIT)?;
@@ -809,7 +851,7 @@ pub fn service_restart(paths: &Paths) -> Result<(), ApiError> {
 
 /// 다른 설치의 서비스는 사용 중지하지 않는다. 기록 없는 실행 중 서비스도 건드리지 않는다.
 pub fn confirm_removal_target(paths: &Paths, install_dir: &Path) -> Result<(), ApiError> {
-    let install_dir = update::directory(install_dir)?;
+    let install_dir = installation_directory(install_dir)?;
     if let Some(record) = read_owned::<ServiceRecord>(&paths.home.join("service-install.json"))? {
         if record.owner != OWNER || record.binary_path.parent().and_then(|path| path.canonicalize().ok()).as_ref() != Some(&install_dir) {
             return Err(error("FOREIGN_INSTALL", "다른 설치가 관리하는 서비스는 제거하지 않습니다."));
@@ -822,7 +864,7 @@ pub fn confirm_removal_target(paths: &Paths, install_dir: &Path) -> Result<(), A
 
 /// 앱이 만든 HKCU Run `Ojak`만 지운다. 값이 이 설치 폴더의 Ojak.exe를 가리킬 때만 앱 소유로 본다.
 pub fn remove_app_autostart(install_dir: &Path) -> Result<(), ApiError> {
-    let install_dir = update::directory(install_dir)?;
+    let install_dir = installation_directory(install_dir)?;
     let key = open_key(RUN_KEY, true)?;
     let Some((value, _)) = read_value(&key, APP_RUN_VALUE)? else {
         return Ok(());
@@ -857,7 +899,10 @@ fn app_owns_autostart(value: &str, install_dir: &Path) -> bool {
 fn is_app_in_dir(program: &str, dir: &[String]) -> bool {
     let segments = path_segments(program);
     match segments.split_last() {
-        Some((name, parent)) => parent == dir && is_app_exe(name),
+        Some((name, parent)) if is_app_exe(name) => parent == dir
+            || Path::new(program).parent().and_then(|path| installation_directory(path).ok())
+                .is_some_and(|resolved| path_segments(&resolved.to_string_lossy()) == dir),
+        Some(_) => false,
         None => false,
     }
 }

@@ -37,6 +37,9 @@ enum Action {
         /// NSIS에 전달할 비밀 없는 ASCII 오류 코드 파일.
         #[arg(long)]
         error_file: Option<PathBuf>,
+        /// NSIS가 파일 작업에 사용할 검증된 실제 설치 경로(UTF-16LE).
+        #[arg(long)]
+        resolved_directory_file: Option<PathBuf>,
     },
     #[command(about = "계정, 한도, 대화 상태를 보여 줘요.")]
     Status {
@@ -368,7 +371,7 @@ fn setup_omp(paths: &Paths, install: bool) -> Value {
 
 
 #[cfg(windows)]
-fn run_installer(paths: &Paths, action: &str, directory: &Path) -> Result<(), ApiError> {
+fn run_installer(paths: &Paths, action: &str, directory: &Path, resolved_file: Option<&Path>) -> Result<(), ApiError> {
     let failed = |_| ApiError::new("INSTALLER_LOCK_FAILED", "설치 도우미의 잠금 소유권을 확인하지 못했습니다.");
     if !paths.home.try_exists().map_err(failed)? {
         aam_protocol::secure::restrict_dir(&paths.home).map_err(failed)?;
@@ -380,18 +383,23 @@ fn run_installer(paths: &Paths, action: &str, directory: &Path) -> Result<(), Ap
         Err(std::fs::TryLockError::Error(failure)) => return Err(failed(failure)),
     }
     // NSIS 부모가 종료되어도 helper의 전체 수명 동안 guard가 살아 있다. 서비스 자식에는 상속하지 않는다.
+    if action == "resolve" {
+        let output = resolved_file.ok_or_else(|| ApiError::new("INVALID_ARGUMENT", "설치 경로 결과 파일이 필요합니다."))?;
+        return install::write_installer_directory(directory, output);
+    }
+    let directory = install::installation_directory(directory)?;
     if action == "remove" {
-        install::confirm_removal_target(paths, directory)?;
+        install::confirm_removal_target(paths, &directory)?;
         deactivate::run(paths, false)?;
     }
-    install::installer(paths, action, directory)
+    install::installer(paths, action, &directory)
 }
 
 fn execute(paths: &Paths, action: Action) -> Result<(), ApiError> {
     match action {
         #[cfg(windows)]
-        Action::Installer { action, directory, error_file } => {
-            let result = run_installer(paths, &action, &directory);
+        Action::Installer { action, directory, error_file, resolved_directory_file } => {
+            let result = run_installer(paths, &action, &directory, resolved_directory_file.as_deref());
             if let Some(path) = error_file {
                 // 원문 오류에는 사용자 경로 등이 있을 수 있다. NSIS에는 코드만 전달한다.
                 let code = result.as_ref().err().map_or("OK", |error| error.code.as_str());
@@ -539,8 +547,11 @@ fn execute(paths: &Paths, action: Action) -> Result<(), ApiError> {
                     IntegrationAction::Uninstall => install::integration_uninstall(paths)?,
                     IntegrationAction::RefreshExtensions => {
                         if install::is_current_launcher(paths)? {
-                            omp_bridge::refresh_installed()?;
-                            omp_observer::run("refresh").map_err(|failure| ApiError::new("EXTENSION_FAILED", failure.to_string()))?;
+                            // 브릿지(작업 보존)의 omp 수정본 요건이 안 맞아도 사용량 관측 확장 갱신은 별개로 한다. 둘 다 시도한 뒤 첫 오류를 알린다.
+                            let bridge = omp_bridge::refresh_installed();
+                            let observer = omp_observer::run("refresh").map_err(|failure| ApiError::new("EXTENSION_FAILED", failure.to_string()));
+                            bridge?;
+                            observer?;
                         }
                         String::new()
                     }
@@ -909,15 +920,15 @@ mod installer_tests {
         let held = aam_protocol::secure::open_owned_file(&paths.home.join("installer-operation.lock")).unwrap();
         held.try_lock().unwrap();
         let error_file = root.join("error.txt");
-        let failure = execute(&paths, Action::Installer { action: "prepare".into(), directory: app.clone(), error_file: Some(error_file.clone()) }).unwrap_err();
+        let failure = execute(&paths, Action::Installer { action: "prepare".into(), directory: app.clone(), error_file: Some(error_file.clone()), resolved_directory_file: None }).unwrap_err();
         assert_eq!(failure.code, "INSTALLER_ALREADY_RUNNING");
         assert_eq!(std::fs::read_to_string(error_file).unwrap(), "INSTALLER_ALREADY_RUNNING");
         assert!(!paths.home.join("installer-update.json").exists());
         assert!(!paths.home.join("installer-backup").exists());
         assert_eq!(std::fs::read(app.join("aam.exe")).unwrap(), b"original launcher");
         drop(held);
-        execute(&paths, Action::Installer { action: "prepare".into(), directory: app.clone(), error_file: None }).unwrap();
-        execute(&paths, Action::Installer { action: "recover".into(), directory: app.clone(), error_file: None }).unwrap();
+        execute(&paths, Action::Installer { action: "prepare".into(), directory: app.clone(), error_file: None, resolved_directory_file: None }).unwrap();
+        execute(&paths, Action::Installer { action: "recover".into(), directory: app.clone(), error_file: None, resolved_directory_file: None }).unwrap();
         assert!(!paths.home.join("installer-update.json").exists());
         assert_eq!(std::fs::read(app.join("aam-service.exe")).unwrap(), b"original service");
         std::fs::remove_dir_all(root).unwrap();

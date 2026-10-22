@@ -125,28 +125,40 @@ fn describe(program: &Blocker) -> String {
 fn list(programs: &[Blocker]) -> String {
     programs.iter().map(describe).collect::<Vec<_>>().join("\n")
 }
-pub(super) fn message(step: Step, programs: &[Blocker]) -> String {
-    match step {
-        Step::Normal => format!(
+/// 같은 동의 절차가 쓰이는 목적. 복구는 이미 실행 파일 일부가 새 버전일 수 있어 "바꾸지 않았다"고 말하면 안 된다.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(super) enum Purpose { Update, Recovery }
+
+pub(super) fn message(purpose: Purpose, step: Step, programs: &[Blocker]) -> String {
+    match (purpose, step) {
+        (Purpose::Update, Step::Normal) => format!(
             "Ojak 실행 파일을 쓰고 있는 프로그램이 있어 업데이트를 이어갈 수 없어요.\n\n{}\n\n[예]를 누르면 위 프로그램에 정상 종료를 요청해요. 실행 중인 작업이 중단될 수 있으니 먼저 저장해 주세요. 위 프로그램을 실행한 앱은 닫지 않아요.\n[아니요]를 누르면 더 이상 프로그램을 닫지 않고 업데이트를 중단해요.",
             list(programs)
         ),
-        Step::Force => format!(
+        (Purpose::Update, Step::Force) => format!(
             "정상 종료를 요청했지만 아래 프로그램이 아직 실행 중이에요.\n\n{}\n\n강제로 종료하면 저장하지 않은 작업이 사라질 수 있고, 종료한 프로그램은 자동으로 다시 시작되지 않아요. 위 프로그램만 종료하며 실행한 앱은 닫지 않아요. 실행한 앱이 켜져 있으면 같은 프로그램이 다시 나타날 수 있고, 그러면 다시 물어봐요.\n\n위 프로그램을 강제로 종료할까요? [아니요]를 누르면 아무것도 종료하지 않고 업데이트를 중단해요.",
+            list(programs)
+        ),
+        (Purpose::Recovery, Step::Normal) => format!(
+            "이전 업데이트를 이전 버전으로 되돌리는 중인데, Ojak 실행 파일을 쓰고 있는 프로그램이 있어 마칠 수 없어요. 일부 Ojak 파일이 이미 새 버전일 수 있어요.\n\n{}\n\n[예]를 누르면 위 프로그램에 정상 종료를 요청해요. 실행 중인 작업이 중단될 수 있으니 먼저 저장해 주세요. 위 프로그램을 실행한 앱은 닫지 않아요.\n[아니요]를 누르면 더 이상 프로그램을 닫지 않아요. 복구는 끝나지 않은 채 복구 기록이 남고, 설치 파일을 다시 실행하면 이어서 복구해요.",
+            list(programs)
+        ),
+        (Purpose::Recovery, Step::Force) => format!(
+            "정상 종료를 요청했지만 아래 프로그램이 아직 실행 중이에요.\n\n{}\n\n강제로 종료하면 저장하지 않은 작업이 사라질 수 있고, 종료한 프로그램은 자동으로 다시 시작되지 않아요. 위 프로그램만 종료하며 실행한 앱은 닫지 않아요. 실행한 앱이 켜져 있으면 같은 프로그램이 다시 나타날 수 있고, 그러면 다시 물어봐요.\n\n위 프로그램을 강제로 종료할까요? [아니요]를 누르면 아무것도 종료하지 않아요. 복구는 끝나지 않은 채 복구 기록이 남고, 설치 파일을 다시 실행하면 이어서 복구해요.",
             list(programs)
         ),
     }
 }
 
 /// 실제 MessageBox. 표준 `예`/`아니요` 두 버튼, 두 단계 모두 기본 버튼이 `아니요`.
-pub(super) struct Native;
+pub(super) struct Native(pub(super) Purpose);
 impl Consent for Native {
     fn ask(&mut self, step: Step, programs: &[Blocker]) -> Answer {
         let mut session = 0u32;
         // 세션 0(서비스)이나 확인 불가면 보이지 않는 창에서 영원히 기다릴 수 있다. 동의를 받지 못한 것으로 본다.
         if unsafe { ProcessIdToSessionId(GetCurrentProcessId(), &mut session) } == 0 || session == 0 { return Answer::Unavailable; }
-        let text = utf16(&message(step, programs));
-        let title = utf16("Ojak 업데이트");
+        let text = utf16(&message(self.0, step, programs));
+        let title = utf16(if self.0 == Purpose::Recovery { "Ojak 업데이트 복구" } else { "Ojak 업데이트" });
         match unsafe { MessageBoxW(ptr::null_mut(), text.as_ptr(), title.as_ptr(), MB_YESNO | MB_ICONWARNING | MB_SETFOREGROUND | MB_DEFBUTTON2) } {
             IDYES => Answer::Yes,
             IDNO => Answer::No,

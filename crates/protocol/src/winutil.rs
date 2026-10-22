@@ -19,15 +19,18 @@ use windows_sys::Win32::{
     Security::{
         Authorization::{
             ConvertSidToStringSidW, ConvertStringSecurityDescriptorToSecurityDescriptorW,
-            GetNamedSecurityInfoW, GetSecurityInfo, SetNamedSecurityInfoW, SetSecurityInfo,
-            SDDL_REVISION_1, SE_FILE_OBJECT,
+            GetNamedSecurityInfoW, GetSecurityInfo, SetEntriesInAclW, SetNamedSecurityInfoW,
+            SetSecurityInfo, EXPLICIT_ACCESS_W, GRANT_ACCESS, NO_MULTIPLE_TRUSTEE,
+            SDDL_REVISION_1, SE_FILE_OBJECT, SE_KERNEL_OBJECT, SE_OBJECT_TYPE, TRUSTEE_IS_SID,
+            TRUSTEE_IS_USER, TRUSTEE_W,
         },
-        EqualSid, GetSecurityDescriptorDacl, GetTokenInformation, TokenOwner, TokenUser,
+        EqualSid, GetSecurityDescriptorDacl, GetTokenInformation, TokenOwner, TokenUser, NO_INHERITANCE,
         DACL_SECURITY_INFORMATION, OWNER_SECURITY_INFORMATION,
         PROTECTED_DACL_SECURITY_INFORMATION, SECURITY_ATTRIBUTES, TOKEN_OWNER, TOKEN_QUERY, TOKEN_USER,
     },
     Storage::FileSystem::{
-        CreateFileW, GetFileAttributesW, GetFileInformationByHandle, ReadFile, WriteFile,
+        CreateFileW, GetFileAttributesW, GetFileInformationByHandle, ReadFile, WriteFile, READ_CONTROL,
+        SYNCHRONIZE, WRITE_DAC,
         BY_HANDLE_FILE_INFORMATION, FILE_ATTRIBUTE_REPARSE_POINT, FILE_FLAG_FIRST_PIPE_INSTANCE,
         FILE_FLAG_OVERLAPPED, FILE_SHARE_READ, FILE_SHARE_WRITE, INVALID_FILE_ATTRIBUTES,
         OPEN_EXISTING, PIPE_ACCESS_DUPLEX,
@@ -506,28 +509,93 @@ pub fn pipe_server_pid_of(handle: &OwnedHandle) -> io::Result<u32> {
     if unsafe { GetNamedPipeServerProcessId(handle.as_raw_handle() as HANDLE, &mut pid) } == 0 || pid == 0 {
         return Err(io_error());
     }
-    if !same_user_process(pid) {
-        return Err(io::Error::new(io::ErrorKind::PermissionDenied, "서비스가 현재 사용자 프로세스가 아닙니다"));
+    match check_same_user_process(pid) {
+        Ok(true) => {}
+        Ok(false) => {
+            return Err(io::Error::new(io::ErrorKind::PermissionDenied, "서비스가 현재 사용자 프로세스가 아닙니다"));
+        }
+        Err(error) => {
+            return Err(io::Error::new(error.kind(), format!("서비스 프로세스의 사용자를 확인하지 못했습니다: {error}")));
+        }
     }
     Ok(pid)
 }
 
-pub fn same_user_process(pid: u32) -> bool {
+/// 프로세스 `pid`가 현재 사용자 소유인지. 확인 자체를 못 하면(권한·종료·토큰 실패) `Err`이며, 그 경우를 신뢰하지 않는다.
+fn check_same_user_process(pid: u32) -> io::Result<bool> {
     if pid == 0 {
-        return false;
+        return Err(io::Error::new(io::ErrorKind::InvalidInput, "유효하지 않은 프로세스 ID입니다"));
     }
     let process = unsafe { OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION, 0, pid) };
     if process.is_null() {
-        return false;
+        return Err(io_error());
     }
     let process = unsafe { OwnedHandle::from_raw_handle(process as RawHandle) };
-    let Ok(peer) = token_user(process.as_raw_handle() as HANDLE) else {
-        return false;
+    let peer = token_user(process.as_raw_handle() as HANDLE)?;
+    let current = UserSid::current()?;
+    Ok((unsafe { EqualSid(peer.sid(), current.sid()) }) != 0)
+}
+
+pub fn same_user_process(pid: u32) -> bool {
+    check_same_user_process(pid).unwrap_or(false)
+}
+
+/// 객체 DACL에 `mask`를 같은 사용자(토큰 사용자 SID)에게 허용하는 ACE를 더한다. 기존 ACE는 바꾸지 않는다.
+/// NULL DACL(모두 허용)은 이미 열려 있으므로 그대로 둔다.
+fn grant_current_user(handle: HANDLE, kind: SE_OBJECT_TYPE, mask: u32) -> io::Result<()> {
+    let user = UserSid::current()?;
+    let mut dacl = ptr::null_mut();
+    let mut descriptor = ptr::null_mut();
+    let status = unsafe {
+        GetSecurityInfo(handle, kind, DACL_SECURITY_INFORMATION, ptr::null_mut(), ptr::null_mut(), &mut dacl, ptr::null_mut(), &mut descriptor)
     };
-    let Ok(current) = UserSid::current() else {
-        return false;
+    if status != 0 {
+        return Err(io::Error::from_raw_os_error(status as i32));
+    }
+    let _descriptor = SecurityDescriptor { raw: descriptor };
+    if dacl.is_null() {
+        return Ok(());
+    }
+    let entry = EXPLICIT_ACCESS_W {
+        grfAccessPermissions: mask,
+        grfAccessMode: GRANT_ACCESS,
+        grfInheritance: NO_INHERITANCE,
+        Trustee: TRUSTEE_W {
+            pMultipleTrustee: ptr::null_mut(),
+            MultipleTrusteeOperation: NO_MULTIPLE_TRUSTEE,
+            TrusteeForm: TRUSTEE_IS_SID,
+            TrusteeType: TRUSTEE_IS_USER,
+            ptstrName: user.sid().cast(),
+        },
     };
-    (unsafe { EqualSid(peer.sid(), current.sid()) }) != 0
+    let mut merged = ptr::null_mut();
+    let status = unsafe { SetEntriesInAclW(1, &entry, dacl, &mut merged) };
+    if status != 0 {
+        return Err(io::Error::from_raw_os_error(status as i32));
+    }
+    let _merged = SecurityDescriptor { raw: merged.cast() };
+    let status = unsafe {
+        SetSecurityInfo(handle, kind, DACL_SECURITY_INFORMATION, ptr::null_mut(), ptr::null_mut(), merged, ptr::null())
+    };
+    if status != 0 {
+        return Err(io::Error::from_raw_os_error(status as i32));
+    }
+    Ok(())
+}
+
+/// 서비스 프로세스(감독·작업자 각각)가 시작할 때 부른다. 승격(관리자) 토큰으로 시작한 프로세스의 기본 DACL은 관리자·SYSTEM만 허용해,
+/// 같은 사용자의 일반(필터링된) 데스크톱 세션이 `OpenProcess`/`OpenProcessToken`으로 SID를 확인하지 못하고 서비스를 "중지됨"으로 본다.
+/// 같은 사용자 SID에게 프로세스 조회·종료 대기(PROCESS_QUERY_LIMITED_INFORMATION | SYNCHRONIZE)와 토큰 조회(TOKEN_QUERY)만 허용한다.
+/// 종료·메모리·스레드·토큰 수정 권한은 주지 않으며, 클라이언트의 SID 검증은 그대로다. 실패하면 서비스를 시작하지 않는다.
+pub fn allow_same_user_peer_inspection() -> io::Result<()> {
+    let process = unsafe { GetCurrentProcess() };
+    grant_current_user(process, SE_KERNEL_OBJECT, PROCESS_QUERY_LIMITED_INFORMATION | SYNCHRONIZE)?;
+    let mut token = INVALID_HANDLE_VALUE;
+    if unsafe { OpenProcessToken(process, TOKEN_QUERY | READ_CONTROL | WRITE_DAC, &mut token) } == 0 {
+        return Err(io_error());
+    }
+    let token = unsafe { OwnedHandle::from_raw_handle(token as RawHandle) };
+    grant_current_user(token.as_raw_handle() as HANDLE, SE_KERNEL_OBJECT, TOKEN_QUERY)
 }
 
 /// 서버 쪽: 클라이언트 프로세스를 여는 대신 파이프 가장(impersonation)으로 클라이언트 토큰을 직접 읽는다.
@@ -1179,4 +1247,83 @@ mod stdio_tests {
         assert!(text.contains("SETUP_COMPLETE"));
         assert!(still_running, "capture must finish before the detached service exits");
     }
+}
+
+#[cfg(test)]
+mod peer_access_tests {
+    use super::*;
+    use windows_sys::Win32::Security::{GetAce, ACCESS_ALLOWED_ACE, ACE_HEADER};
+
+    /// SYSTEM만 허용하는 DACL의 이벤트. 만든 핸들은 생성 시 요청한 모든 권한(READ_CONTROL·WRITE_DAC 포함)을 가진다.
+    fn system_only_event() -> OwnedHandle {
+        let mut raw = ptr::null_mut();
+        let sddl = wide("D:P(A;;GA;;;SY)");
+        assert_ne!(
+            unsafe { ConvertStringSecurityDescriptorToSecurityDescriptorW(sddl.as_ptr(), SDDL_REVISION_1, &mut raw, ptr::null_mut()) },
+            0
+        );
+        let sd = SecurityDescriptor { raw };
+        let attributes = security_attributes(&sd);
+        let event = unsafe { CreateEventW(&attributes, 1, 0, ptr::null()) };
+        assert!(!event.is_null());
+        unsafe { OwnedHandle::from_raw_handle(event as RawHandle) }
+    }
+
+    /// (SID 문자열, 마스크) 허용 ACE 목록.
+    fn allowed_aces(handle: &OwnedHandle) -> Vec<(String, u32)> {
+        let mut dacl = ptr::null_mut();
+        let mut descriptor = ptr::null_mut();
+        let status = unsafe {
+            GetSecurityInfo(handle.as_raw_handle() as HANDLE, SE_KERNEL_OBJECT, DACL_SECURITY_INFORMATION, ptr::null_mut(), ptr::null_mut(), &mut dacl, ptr::null_mut(), &mut descriptor)
+        };
+        assert_eq!(status, 0);
+        let _descriptor = SecurityDescriptor { raw: descriptor };
+        assert!(!dacl.is_null());
+        let mut aces = Vec::new();
+        for index in 0..unsafe { (*dacl).AceCount } {
+            let mut raw = ptr::null_mut();
+            assert_ne!(unsafe { GetAce(dacl, u32::from(index), &mut raw) }, 0);
+            assert_eq!(unsafe { (*raw.cast::<ACE_HEADER>()).AceType }, 0, "only allow ACEs expected");
+            let ace = unsafe { &*raw.cast::<ACCESS_ALLOWED_ACE>() };
+            let sid = sid_string(ptr::addr_of!(ace.SidStart).cast_mut().cast()).unwrap();
+            aces.push((sid, ace.Mask));
+        }
+        aces
+    }
+
+    #[test]
+    fn grant_adds_only_the_requested_rights_for_the_current_user_and_keeps_existing_aces() {
+        let event = system_only_event();
+        let me = current_user_sid().unwrap();
+        let before = allowed_aces(&event);
+        assert!(before.iter().all(|(sid, _)| *sid != me));
+        // 이벤트에는 프로세스 전용 QUERY_LIMITED_INFORMATION 비트가 없다. 객체에 유효한 대기 권한만 요청한다.
+        let mask = SYNCHRONIZE;
+        grant_current_user(event.as_raw_handle() as HANDLE, SE_KERNEL_OBJECT, mask).unwrap();
+        let aces = allowed_aces(&event);
+        assert_eq!(aces.iter().find(|(sid, _)| sid == "S-1-5-18"), before.iter().find(|(sid, _)| sid == "S-1-5-18"));
+        let mut mine = aces.iter().filter(|(sid, _)| *sid == me);
+        assert_eq!(mine.next().map(|(_, granted)| *granted), Some(mask), "only requested rights may be granted");
+        assert!(mine.next().is_none(), "the user must have a single merged grant");
+        // 두 번 불러도 같은 마스크만 남고 권한이 늘지 않는다.
+        grant_current_user(event.as_raw_handle() as HANDLE, SE_KERNEL_OBJECT, mask).unwrap();
+        let repeated = allowed_aces(&event);
+        let mut mine = repeated.iter().filter(|(sid, _)| *sid == me);
+        assert_eq!(mine.next().map(|(_, granted)| *granted), Some(mask));
+        assert!(mine.next().is_none());
+        assert_eq!(repeated.iter().find(|(sid, _)| sid == "S-1-5-18"), before.iter().find(|(sid, _)| sid == "S-1-5-18"));
+    }
+
+    #[test]
+    fn peer_check_never_trusts_what_it_cannot_prove() {
+        assert!(check_same_user_process(0).is_err());
+        assert!(!same_user_process(0));
+        assert!(check_same_user_process(std::process::id()).unwrap());
+        // SYSTEM이 아닌 실행자에게 PID 4는 외부 사용자다. 접근 거부도 신뢰 실패로 유지한다.
+        if current_user_sid().unwrap() != "S-1-5-18" {
+            assert!(!matches!(check_same_user_process(4), Ok(true)));
+            assert!(!same_user_process(4));
+        }
+    }
+
 }

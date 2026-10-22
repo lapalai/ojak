@@ -107,6 +107,22 @@ pub(crate) fn omp() -> Result<PathBuf, ApiError> {
     Ok(std::env::var_os("OMP_NATIVE_BIN").map(PathBuf::from).unwrap_or(fallback))
 }
 
+/// 포크가 빌드 버전에 새기는 작업 보존 계약 번호. `X.Y.Z-ojak.N`의 N이다. 일반 배포판에는 이 표식이 없다.
+/// 기반 버전(X.Y.Z)은 보지 않는다: 같은 수정을 새 omp에 옮긴 `18.12.6-ojak.1` 같은 포크도 같은 계약이다.
+/// 이 값은 설정을 바꾸기 전의 사전 점검일 뿐이다. 실제 차단선은 확장(`persistSession` 없으면 요청 전 중단)과
+/// 서비스(`X-Ojak-Admission` 없으면 거절)에 그대로 있다.
+fn admission_contract(version: &str) -> Option<u64> {
+    let (base, revision) = version.trim().split_once("-ojak.")?;
+    if base.is_empty() || !base.split('.').all(|part| !part.is_empty() && part.bytes().all(|byte| byte.is_ascii_digit())) {
+        return None;
+    }
+    revision.split('+').next()?.parse().ok()
+}
+
+fn client_meets(installed: &str, required: &str) -> bool {
+    matches!((admission_contract(installed), admission_contract(required)), (Some(have), Some(need)) if have >= need)
+}
+
 /// The coupled client fork owns persistence and the no-replay fence. Check it
 /// before replacing a working extension or enabling the new bridge protocol.
 fn require_admission_client() -> Result<(), ApiError> {
@@ -119,11 +135,14 @@ fn require_admission_client() -> Result<(), ApiError> {
     let output = std::process::Command::new(omp()?).arg("--version").output()
         .map_err(|_| error("OMP_ADMISSION_CLIENT_REQUIRED", "작업 보존 기능이 있는 omp 수정본을 먼저 설치해 주세요."))?;
     let installed = std::str::from_utf8(&output.stdout).ok().map(str::trim).and_then(|text| text.strip_prefix("omp/"));
-    if !output.status.success() || installed != Some(required) {
-        return Err(ApiError::new("OMP_ADMISSION_CLIENT_REQUIRED",
-            format!("작업 보존·자동 재개에는 omp {required} 수정본이 필요해요. 기존 확장과 연결 설정은 변경하지 않았어요.")));
+    if output.status.success() && installed.is_some_and(|version| client_meets(version, required)) {
+        return Ok(());
     }
-    Ok(())
+    let current = installed.filter(|version| !version.is_empty() && version.len() <= 32 && version.bytes().all(|byte| byte.is_ascii_alphanumeric() || b".-+".contains(&byte)));
+    Err(ApiError::new("OMP_ADMISSION_CLIENT_REQUIRED", match current {
+        Some(version) => format!("지금 omp {version}에는 작업 보존·자동 재개 기능이 없어요. Ojak 수정본(-ojak.N 표식, 예: {required})이 필요해요. 계정·한도 조회는 계속 동작하고, 기존 확장과 연결 설정은 변경하지 않았어요."),
+        None => format!("작업 보존·자동 재개에는 omp 수정본({required} 이상 계약)이 필요해요. 기존 확장과 연결 설정은 변경하지 않았어요."),
+    }))
 }
 
 /// omp 자신의 설정 명령으로 값을 읽는다. 값이 없으면 `Null`.
@@ -561,5 +580,19 @@ mod tests {
         assert_eq!(roles["default"], "ojak-claude/claude-opus-5-5");
         assert_eq!(roles["task"], "ojak-claude/claude-fable-5-1:auto");
         assert_eq!(roles["vision"], "anthropic/claude-sonnet-5");
+    }
+
+    #[test]
+    fn admission_contract_follows_the_fork_marker_not_the_base_version() {
+        let required = "18.12.0-ojak.1";
+        // 같은 수정을 새 기반에 옮긴 포크와 더 높은 계약은 통과한다.
+        for ok in ["18.12.0-ojak.1", "18.12.6-ojak.1", "19.0.0-ojak.2", "18.12.6-ojak.1+build5"] {
+            assert!(client_meets(ok, required), "{ok}");
+        }
+        // 표식 없는 일반 배포판(더 새로워도), 계약 번호가 낮거나 형식이 깨진 값은 통과하지 못한다.
+        for rejected in ["18.12.6", "18.12.0", "18.12.0-ojak.0", "18.12.6-ojak.", "18.12.6-ojak.x", "-ojak.1", "18.x.6-ojak.1", "18.12.6-rc.1-ojak.1"] {
+            assert!(!client_meets(rejected, required), "{rejected}");
+        }
+        assert!(!client_meets("18.12.6-ojak.1", "18.12.6"));
     }
 }

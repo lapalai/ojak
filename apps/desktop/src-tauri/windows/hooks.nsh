@@ -3,6 +3,7 @@ Var OjakUpdatePrepared
 Var OjakInstallerStage
 Var OjakFailureCode
 Var OjakInstallerLock
+Var OjakRecoveryFailed
 
 ; 같은 사용자의 설치·제거만 직렬화한다. share=0 + delete-on-close로 강제 종료 뒤에도 OS가 잠금을 회수한다.
 ; .onInit에서는 잡지 않는다: Tauri의 재설치 페이지가 먼저 이전 uninstaller를 자식으로 실행할 수 있다.
@@ -30,7 +31,7 @@ Var OjakInstallerLock
   StrCpy $OjakInstallerStage "${ACTION}"
   StrCpy $OjakFailureCode "HELPER_RESULT_UNAVAILABLE"
   Delete "$PLUGINSDIR\ojak-error.txt"
-  nsExec::ExecToLog '"${HELPER}" installer ${ACTION} --directory "$INSTDIR" --error-file "$PLUGINSDIR\ojak-error.txt"'
+  nsExec::ExecToLog '"${HELPER}" installer ${ACTION} --directory "$INSTDIR" --error-file "$PLUGINSDIR\ojak-error.txt" --resolved-directory-file "$PLUGINSDIR\ojak-directory.txt"'
   Pop $0
   ClearErrors
   FileOpen $1 "$PLUGINSDIR\ojak-error.txt" r
@@ -40,6 +41,35 @@ Var OjakInstallerLock
   ${EndUnless}
   DetailPrint "Ojak: stage=$OjakInstallerStage exit=$0 code=$OjakFailureCode"
   !insertmacro OJAK_LOG_LINE
+!macroend
+
+; 검증한 실제 경로를 NSIS 파일 작업에도 사용한다. 한글 경로는 UTF-16LE로 전달한다.
+!macro OJAK_RESOLVE HELPER PREFIX
+  Delete "$PLUGINSDIR\ojak-directory.txt"
+  !insertmacro OJAK_EXEC "${HELPER}" "resolve"
+  ${If} $0 == 0
+    ClearErrors
+    StrCpy $3 ""
+    FileOpen $1 "$PLUGINSDIR\ojak-directory.txt" r
+    ${Unless} ${Errors}
+      FileReadUTF16LE $1 $3
+      FileClose $1
+    ${EndUnless}
+    ${If} ${Errors}
+    ${OrIf} $3 == ""
+      StrCpy $0 1
+      StrCpy $OjakFailureCode "INVALID_INSTALL_PATH"
+    ${Else}
+      StrCpy $INSTDIR $3
+    ${EndIf}
+  ${EndIf}
+  Delete "$PLUGINSDIR\ojak-directory.txt"
+  ${If} $0 != 0
+    SetErrorLevel 1
+    StrCpy $2 "설치 위치를 안전하게 확인하지 못했어요. 앱 파일은 변경하지 않았어요. / The installation directory could not be safely verified. Application files were not changed."
+    Call ${PREFIX}OjakFail
+    Abort
+  ${EndIf}
 !macroend
 
 ; 코드만 ASCII로 기록한다. CP949/UTF-8 혼선과 원문 오류의 개인정보 유출을 피한다.
@@ -76,10 +106,24 @@ Function OjakRecoverUpdate
   Push $0
   Push $OjakInstallerStage
   Push $OjakFailureCode
+  StrCpy $OjakRecoveryFailed 0
   ${If} $OjakUpdatePrepared == 1
     !insertmacro OJAK_EXEC "$PLUGINSDIR\ojak-update\aam.exe" "recover"
+    ; 새 프로그램이 launcher를 잡아 되돌리지 못했으면, 화면이 있는 설치에서만 동의를 받아 복구를 이어 간다.
     ${If} $0 != 0
-      StrCpy $2 "이전 버전으로 되돌리지 못했어요. 실행 중인 작업을 강제로 끄지 마세요. 오류를 고친 뒤 설치 파일을 다시 실행해 주세요. 복구 기록은 남겨 뒀어요. / Could not restore the previous version. Do not force-stop running work. Fix the error, then run the installer again. The recovery record was kept."
+    ${AndIf} $OjakFailureCode == "INSTALLER_FILES_BUSY"
+    ${AndIfNot} ${Silent}
+      !insertmacro OJAK_EXEC "$PLUGINSDIR\ojak-update\aam.exe" "recover-interactive"
+    ${EndIf}
+    ${If} $0 != 0
+      StrCpy $OjakRecoveryFailed 1
+      ${If} $OjakFailureCode == "INSTALLER_FILES_BUSY"
+        StrCpy $2 "이전 버전으로 되돌리는 중인데 Ojak 실행 파일을 쓰는 프로그램이 아직 열려 있어요. 일부 Ojak 파일이 이미 새 버전일 수 있어요. 복구 기록과 백업은 보존했어요. 해당 프로그램을 종료한 뒤 설치 파일을 다시 실행하면 이어서 복구해요. 조용한(/S) 설치는 프로그램을 자동으로 닫지 않아요. / Rolling back, but a program is still using Ojak's executable. Some Ojak files may already be the new version. Recovery records and backups were kept. Close that program, then run the installer again to continue. Silent (/S) installs never close programs automatically."
+      ${ElseIf} $OjakFailureCode == "INSTALLER_CLOSE_CANCELLED"
+        StrCpy $2 "이전 버전으로 되돌리기를 끝내지 못하고 멈췄어요. 일부 Ojak 파일이 이미 새 버전일 수 있어요. 복구 기록과 백업은 보존했고 더 이상 프로그램을 닫지 않았어요. 설치 파일을 다시 실행하면 이어서 복구해요. / Rollback was not completed. Some Ojak files may already be the new version. Recovery records and backups were kept and no further programs were closed. Run the installer again to continue."
+      ${Else}
+        StrCpy $2 "이전 버전으로 되돌리지 못했어요. 실행 중인 작업을 강제로 끄지 마세요. 오류를 고친 뒤 설치 파일을 다시 실행해 주세요. 복구 기록은 남겨 뒀어요. / Could not restore the previous version. Do not force-stop running work. Fix the error, then run the installer again. The recovery record was kept."
+      ${EndIf}
       Call OjakFail
     ${EndIf}
     StrCpy $OjakUpdatePrepared 0
@@ -103,36 +147,57 @@ FunctionEnd
   SetOutPath "$PLUGINSDIR\ojak-update"
   File /oname=aam.exe "${OJAK_HOOK_DIR}\..\binaries\installer-aam.exe"
   File /oname=aam-service.exe "${OJAK_HOOK_DIR}\..\binaries\installer-aam-service.exe"
+  !insertmacro OJAK_RESOLVE "$PLUGINSDIR\ojak-update\aam.exe" ""
   CreateDirectory "$INSTDIR"
   !insertmacro OJAK_EXEC "$PLUGINSDIR\ojak-update\aam.exe" "prepare"
   ; 이전 prepare가 중단된 경우 먼저 검증된 복구를 끝낸다. 실패 기록을 지우거나 prepare를 무한 반복하지 않는다.
+  ; 복구가 실행 파일 점유로 멈추면 화면이 있는 설치에서만 같은 도우미가 동의를 받아 복구를 이어 간다(무인 설치는 닫지 않는다).
+  ; 복구가 끝나지 않았으면 prepare를 다시 부르지 않는다. 그러지 않으면 복구 실패가 UPDATE_RECOVERY_REQUIRED로 덮인다.
   ${If} $0 != 0
   ${AndIf} $OjakFailureCode == "UPDATE_RECOVERY_REQUIRED"
     DetailPrint "Ojak: recovering the previous update before starting a new transaction."
     !insertmacro OJAK_EXEC "$PLUGINSDIR\ojak-update\aam.exe" "recover"
+    ${If} $0 != 0
+    ${AndIf} $OjakFailureCode == "INSTALLER_FILES_BUSY"
+    ${AndIfNot} ${Silent}
+      DetailPrint "Ojak: recovery is blocked by a program using the executable; asking permission to close the listed programs."
+      !insertmacro OJAK_EXEC "$PLUGINSDIR\ojak-update\aam.exe" "recover-interactive"
+    ${EndIf}
     ${If} $0 == 0
       !insertmacro OJAK_EXEC "$PLUGINSDIR\ojak-update\aam.exe" "prepare"
     ${EndIf}
   ${EndIf}
   ; 실행 파일 점유(INSTALLER_FILES_BUSY)일 때만, 그리고 화면이 있는 설치에서만 도우미가 직접 동의를 받는다.
   ; 무인(/S) 설치는 프로그램을 닫지 않고 아래에서 실패로 끝난다. 동의·정상 종료·강제 종료 확인은 모두 도우미가 처리하고
-  ; prepare 트랜잭션까지 끝낸 뒤 0으로 돌아오므로 prepare를 다시 부르지 않는다.
+  ; prepare 트랜잭션까지 끝낸 뒤 0으로 돌아오므로 prepare를 다시 부르지 않는다. 마지막으로 실행한 단계가 prepare일 때만 해당한다.
   ${If} $0 != 0
   ${AndIf} $OjakFailureCode == "INSTALLER_FILES_BUSY"
+  ${AndIf} $OjakInstallerStage == "prepare"
   ${AndIfNot} ${Silent}
     DetailPrint "Ojak: executable is in use; asking permission to close the listed programs."
     !insertmacro OJAK_EXEC "$PLUGINSDIR\ojak-update\aam.exe" "prepare-interactive"
   ${EndIf}
   ${If} $0 != 0
     SetErrorLevel 1
+    ${If} $OjakInstallerStage == "recover"
+    ${OrIf} $OjakInstallerStage == "recover-interactive"
+      ; 복구 단계의 실패는 파일이 이미 일부 새 버전일 수 있다. "파일을 바꾸지 않았다"고 말하지 않는다. 복구 기록·백업은 보존된다.
+      ${If} $OjakFailureCode == "INSTALLER_CLOSE_CANCELLED"
+        StrCpy $2 "이전 업데이트 복구를 끝내지 못하고 멈췄어요. 일부 Ojak 파일이 이미 새 버전일 수 있어요. 복구 기록과 백업은 보존했고 더 이상 프로그램을 닫지 않았어요. 설치 파일을 다시 실행하면 이어서 복구해요. / The previous update was not fully rolled back. Some Ojak files may already be the new version. Recovery records and backups were kept and no further programs were closed. Run the installer again to continue the recovery."
+      ${ElseIf} $OjakFailureCode == "INSTALLER_FILES_BUSY"
+        StrCpy $2 "이전 업데이트를 되돌리는 중인데 Ojak 실행 파일을 쓰는 프로그램이 아직 열려 있어요. 일부 Ojak 파일이 이미 새 버전일 수 있어요. 복구 기록과 백업은 보존했어요. 해당 프로그램을 종료한 뒤 설치 파일을 다시 실행하면 이어서 복구해요. 조용한(/S) 설치는 프로그램을 자동으로 닫지 않아요. / Rolling back the previous update, but a program is still using Ojak's executable. Some Ojak files may already be the new version. Recovery records and backups were kept. Close that program, then run the installer again to continue. Silent (/S) installs never close programs automatically."
+      ${Else}
+        StrCpy $2 "이전 업데이트 복구를 확인하지 못해 설치를 멈췄어요. 계정 데이터와 복구 기록을 보존했어요. 백업을 임의로 지우지 말고 아래 오류 코드와 로그를 확인해 주세요. / The previous update could not be safely recovered. Account data and recovery records were preserved. Do not delete the backups; check the error code and log below."
+      ${EndIf}
+      Call OjakFail
+      Abort
+    ${EndIf}
     ${If} $OjakFailureCode == "INSTALLER_CLOSE_CANCELLED"
       Call OjakCancelled
       Abort
     ${EndIf}
     ${If} $OjakFailureCode == "INSTALLER_FILES_BUSY"
       StrCpy $2 "Ojak 실행 파일을 쓰는 프로그램이 아직 열려 있어 설치를 멈췄어요. Ojak 파일은 바꾸지 않았어요. 해당 프로그램을 종료한 뒤 설치 파일을 다시 실행해 주세요. 조용한(/S) 설치는 프로그램을 자동으로 닫지 않아요. / A program is still using Ojak's executable, so installation stopped. No Ojak files were replaced. Close that program, then run the installer again. Silent (/S) installs never close programs automatically."
-    ${ElseIf} $OjakInstallerStage == "recover"
-      StrCpy $2 "이전 업데이트 복구를 확인하지 못해 설치를 멈췄어요. 계정 데이터와 복구 기록을 보존했어요. 백업을 임의로 지우지 말고 아래 오류 코드와 로그를 확인해 주세요. / The previous update could not be safely recovered. Account data and recovery records were preserved. Do not delete the backups; check the error code and log below."
     ${ElseIf} $OjakInstallerStage == "prepare-interactive"
       StrCpy $2 "기존 Ojak을 안전하게 멈추지 못해 설치를 멈췄어요. Ojak 파일은 바꾸지 않았어요. 허용해서 이미 닫은 프로그램은 자동으로 다시 열리지 않아요. 아래 오류 코드를 확인한 뒤 설치 파일을 다시 실행해 주세요. / Could not safely stop the existing Ojak, so installation stopped. No Ojak files were replaced. Programs you already allowed to close are not reopened automatically. Check the error code below, then run the installer again."
     ${Else}
@@ -150,7 +215,12 @@ FunctionEnd
   ${If} $0 != 0
     Call OjakRecoverUpdate
     SetErrorLevel 1
-    StrCpy $2 "설치 확인에 실패했어요. 새 버전을 서비스로 시작하지 않았어요. 설치 파일을 다시 실행하면 이전 상태로 돌려요. / Installation check failed. The new version was not started. Run the installer again to restore the previous version."
+    ${If} $OjakRecoveryFailed == 1
+      ; 복구 실패는 방금 별도 창과 기록으로 알렸다. 여기서는 새 파일이 남아 있을 수 있음을 숨기지 않는다.
+      StrCpy $2 "설치 확인에 실패했고 이전 버전으로 되돌리기도 끝나지 않았어요. 일부 Ojak 파일이 새 버전일 수 있어요. 복구 기록과 백업은 보존했어요. 앞선 복구 안내를 따른 뒤 설치 파일을 다시 실행해 주세요. / Installation check failed and the rollback was not completed. Some Ojak files may be the new version. Recovery records and backups were kept. Follow the previous recovery message, then run the installer again."
+    ${Else}
+      StrCpy $2 "설치 확인 중 오류가 발생해 복구 절차를 실행했어요. 아래 오류를 확인한 뒤 설치 파일을 다시 실행해 주세요. / An error occurred during installation verification and the recovery procedure completed. Check the error below, then run the installer again."
+    ${EndIf}
     Call OjakFail
     Abort
   ${EndIf}
@@ -174,6 +244,7 @@ FunctionEnd
       Call un.OjakFail
       Abort
     ${EndIf}
+    !insertmacro OJAK_RESOLVE "$PLUGINSDIR\ojak-uninstall\aam.exe" "un."
     !insertmacro OJAK_EXEC "$PLUGINSDIR\ojak-uninstall\aam.exe" "remove"
     ${If} $0 != 0
       SetErrorLevel 1

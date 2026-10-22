@@ -81,6 +81,12 @@ fn main() {
             std::process::exit(1);
         }
     };
+    // 승격(SSH Session 0 등)으로 시작해도 같은 사용자의 일반 데스크톱이 서비스를 확인할 수 있어야 한다. 실패하면 시작하지 않는다.
+    #[cfg(windows)]
+    if aam_protocol::winutil::allow_same_user_peer_inspection().is_err() {
+        eprintln!("PEER_ACCESS_SETUP_FAILED: 같은 사용자의 다른 로그온 세션이 서비스를 확인할 수 있게 설정하지 못해 시작하지 않았어요.");
+        std::process::exit(1);
+    }
     let result = match mode {
         Mode::Worker | Mode::Foreground | Mode::SupervisedWorker => aam_service::run(paths),
         Mode::Supervise => supervise(paths),

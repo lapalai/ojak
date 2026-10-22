@@ -30,6 +30,9 @@ parking_lot = "0.12"
 [target.'cfg(target_os = "macos")'.dependencies]
 window-vibrancy = "0.6"
 
-[target.'cfg(windows)'.dependencies]
+# 앱 ID 기준이라 경로가 다른 Ojak.app(백업 사본 등)이 이미 떠 있어도 두 번째 실행을 막고 기존 창을 연다.
+[target.'cfg(any(windows, target_os = "macos"))'.dependencies]
 tauri-plugin-single-instance = "2"
+
+[target.'cfg(windows)'.dependencies]
 windows-sys = { version = "0.59", features = ["Win32_Globalization", "Win32_System_Threading"] }

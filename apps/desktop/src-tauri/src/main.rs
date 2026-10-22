@@ -362,6 +362,10 @@ async fn kickstart_managed_service() -> Result<(), ApiError> {
 
 fn relaunch(app: tauri::AppHandle) -> ! {
     QUIT_CONFIRMED.store(true, Ordering::SeqCst);
+    // `restart()`는 메인 스레드에서 종료 이벤트 없이 바로 새 프로세스를 띄운다. 단일 실행 잠금을 먼저 풀어야
+    // 새 프로세스가 이 프로세스를 "이미 실행 중"으로 보고 스스로 끝나지 않는다.
+    #[cfg(any(windows, target_os = "macos"))]
+    tauri_plugin_single_instance::destroy(&app);
     app.restart();
 }
 
@@ -799,6 +803,8 @@ async fn launch_session(intent: LaunchIntent) -> Result<Value, ApiError> {
 mod provider_login;
 mod local_usage;
 mod popover_layout;
+#[cfg(target_os = "macos")]
+mod duplicate_app;
 #[tauri::command]
 async fn choose_directory() -> Option<String> {
     rfd::AsyncFileDialog::new()
@@ -2277,11 +2283,33 @@ impl TrayStatus {
     }
 }
 fn main() {
+    // 단일 실행 잠금은 같은 잠금을 쓰는 판끼리만 통한다. 잠금이 없던 예전 사본(0.16.6 이하, 백업 번들 등)이 다른 경로에서
+    // 떠 있으면 두 창이 같은 서비스를 다른 버전으로 보여 준다. Tauri가 창·트레이를 만들기 전에 확인하고, 있으면 그 창을
+    // 앞으로 가져온 뒤 이쪽은 끝난다. 다른 사본을 대신 종료하지 않는다(사용자가 쓰던 창일 수 있다).
+    // 개발 빌드는 설치본과 함께 띄워 비교할 수 있어야 해서 검사하지 않는다.
+    #[cfg(target_os = "macos")]
+    if let (false, Ok(current)) = (cfg!(debug_assertions), std::env::current_exe()) {
+        if let Some(copy) = duplicate_app::find(&current).into_iter().next() {
+            if !std::env::args().any(|arg| arg == AUTOSTART_ARG) {
+                duplicate_app::activate(&copy);
+            }
+            return;
+        }
+    }
     let builder = tauri::Builder::default();
-    #[cfg(windows)]
+    // 앱 ID(`ai.aam.desktop`) 기준 잠금이라 설치 경로가 다른 사본이 이미 떠 있어도 새로 띄우지 않고 기존 창을 연다.
+    // 앱 재시작·업데이트는 종료 이벤트에서 잠금을 먼저 푼 뒤 새 프로세스를 띄운다.
+    #[cfg(any(windows, target_os = "macos"))]
     let builder = builder.plugin(tauri_plugin_single_instance::init(|app, args, _cwd| {
         if !args.iter().any(|argument| argument == AUTOSTART_ARG) {
-            show_main(app);
+            // 창 조작은 메인 스레드에서 한다. macOS는 백그라운드 앱이 스스로 앞으로 나오는 것을 막으므로,
+            // 자기 번들을 LaunchServices로 다시 열어(번들 ID가 아닌 경로로) 앞으로 가져온다.
+            let handle = app.clone();
+            let _ = app.run_on_main_thread(move || show_main(&handle));
+            #[cfg(target_os = "macos")]
+            if let Some(bundle) = std::env::current_exe().ok().and_then(|exe| exe.ancestors().nth(3).map(std::path::Path::to_path_buf)) {
+                let _ = std::process::Command::new("/usr/bin/open").arg(bundle).spawn();
+            }
         }
     }));
     builder

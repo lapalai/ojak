@@ -23,6 +23,8 @@
 4. 실기기 설치 검증 결과와 공개 후 앱 안 업데이트 검증 계획을 준비한다. 서명 산출물은 태그 뒤에 생기므로 이 단계에서 서명 업데이트 통과를 주장하지 않는다.
 5. `git tag -a vx.y.z -F <변경 기록 절>` → `git push origin vx.y.z`. 태그는 main에 이미 푸시된 커밋에 만들고, 반드시 annotated로 만든다. 태그를 만들 수 있는 사람은 저장소 Admin뿐이다(아래 "태그 보호"). 워크플로는 서명된 **비공개 draft**까지만 만든다. 아래 공개 전 검증을 통과하기 전에는 게시하지 않는다.
 6. 릴리스가 올라온 뒤 이 Mac의 설치본을 교체했다면 서비스를 다시 시작하고 실행 중인 서비스 버전을 확인한다. `~/Applications/Ojak.app`을 교체 → `launchctl kickstart -k gui/$(id -u)/ai.aam.service` → `aam integration install`(필요 시 `aam omp-bridge connect`). 재시작은 실행 중인 omp 브릿지 세션을 잠깐 끊으니, 세션이 있으면 끝난 뒤 한다. 그 뒤 `ps -axo command | grep '[a]am-service'`로 뜬 경로가 새 앱 안의 `aam-service`인지, `~/Applications/Ojak.app/Contents/MacOS/aam-service --version`이 새 버전인지 본다. 새 파일로 교체해도 이미 떠 있던 프로세스는 이전 코드로 남는다.
+   - **교체 전 실행 중인 앱 UI를 먼저 끈다.** `ps -axo pid,command | grep '[a]i-account-manager'`로 경로와 관계없이 모든 Ojak 창 프로세스를 찾아 종료를 확인한 뒤 교체한다. 2026-10-19 교체 때 이 단계를 빠뜨려 0.13.2 화면이 백업 경로에서 사흘간 0.16.0 서비스에 붙어 있었고 새 앱과 함께 두 개가 떴다.
+   - **백업은 실행할 수 없게 남긴다.** `~/Applications`에 `.app` 이름으로 두지 않는다. `~/Library/Application Support/AI Account Manager/app-backups/Ojak-<버전>.app.bak`처럼 확장자를 바꿔 Spotlight·Launchpad·`open`으로 실행되지 않게 한다.
 
 ## 배포 위치
 - 코드와 릴리스는 공개 저장소 `lapalai/ojak` 한 곳이다. 별도 `ojak-releases` 저장소는 쓰지 않는다.

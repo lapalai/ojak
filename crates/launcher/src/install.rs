@@ -915,7 +915,7 @@ mod windows_install;
 pub(crate) use windows_install::{effective_command, shadowing_system_tools as shadowed_tools, shell_configured, shim_installed};
 #[cfg(windows)]
 pub use windows_install::{
-    confirm_removal_target, integration_install, integration_uninstall, installer, remove_app_autostart,
+    confirm_removal_target, installation_directory, integration_install, integration_uninstall, installer, remove_app_autostart, write_installer_directory,
     service_install, service_restart, service_status, service_stop, service_uninstall, shell_install,
     shell_uninstall,
 };
