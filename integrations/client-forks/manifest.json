@@ -7,6 +7,7 @@
       "tag": "v18.11.0",
       "revision": "c2cb79e4c227aa4b22c4ccb933ff72fd88bceba4",
       "version": "18.12.0-ojak.2",
+      "admissionContract": 1,
       "sha256": "efd13049e9a986048904117fd11db724e731e31aa0eb0a79ce4906b9c043dc66"
     },
     {
