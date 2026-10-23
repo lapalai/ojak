@@ -1,0 +1,2 @@
+# 서명 전 SHA-256으로 검증하는 패치는 OS와 관계없이 같은 바이트여야 한다(Windows checkout의 CRLF 변환 금지).
+integrations/client-forks/*.patch -text
