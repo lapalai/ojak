@@ -2,6 +2,11 @@
 
 규칙은 `docs/release-policy.md`를 따른다.
 
+## 0.16.9 (2026-10-23)
+0.16.8의 공개 릴리스 빌드 실패를 고친 공개 후보입니다. 기능은 0.16.8과 같습니다.
+
+- `v0.16.8` 태그의 서명 빌드가 Windows에서 `Patch checksum mismatch: oh-my-pi`로 실패했습니다. Windows checkout이 omp 수정 패치의 줄 끝을 CRLF로 바꿔 manifest의 SHA-256과 달라졌기 때문입니다. `.gitattributes`로 `integrations/client-forks/*.patch`의 줄 끝 변환을 막아 모든 OS에서 같은 바이트로 검증합니다. 0.16.8 태그는 정책에 따라 지우거나 옮기지 않았고, 초안 릴리스도 만들어지지 않았습니다.
+
 ## 0.16.8 (2026-10-22)
 0.16.2~0.16.4(Unicode 복구·호환 업데이트, PR #44)와 0.16.5~0.16.7(Windows 설치·제거, omp 연결 검사, Mac 중복 실행)을 합친 공개 후보입니다. 공개 최신 0.13.2의 Windows 제거기가 서비스가 꺼져 있으면 `LEASE_STATE_UNKNOWN`으로 멈추는 문제는 이 버전으로 업데이트한 뒤 제거하면 해결됩니다. 리뷰 승인·태그·서명 빌드·양 OS 설치 검증 전에는 공개하지 않습니다.
 
