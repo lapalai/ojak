@@ -1368,10 +1368,35 @@ impl Bridge {
     }
 
     fn stream(&self, client: &mut TcpStream, mut request: Request, reservation: &mut admission::BodyReservation) {
-        let raw = std::mem::take(&mut request.body);
-        let body: Value = match serde_json::from_slice(&raw) {
+        let mut raw = std::mem::take(&mut request.body);
+        let body: Value = match parse_client_json(&mut raw) {
             Ok(value) => value,
-            Err(_) => return respond(client, 400, &json!({ "error": "요청 본문이 JSON이 아니에요." })),
+            Err(error) => {
+                // 파서의 원문 오류에는 입력 문자가 들어갈 수 있으므로 분류·위치·길이만 기록한다.
+                let category = match error.classify() {
+                    serde_json::error::Category::Eof => "Eof",
+                    serde_json::error::Category::Syntax => "Syntax",
+                    serde_json::error::Category::Data => "Data",
+                    serde_json::error::Category::Io => "Io",
+                };
+                let declared = request.header("content-length").and_then(|value| value.parse::<usize>().ok());
+                self.write_log_line(&format!(
+                    "{} bridge/json session=- outcome=rejected category={} line={} column={} declared={} received={}",
+                    now_ms(), category, error.line(), error.column(),
+                    declared.map_or_else(|| "-".to_owned(), |length| length.to_string()), raw.len()
+                ));
+                return respond(client, 400, &json!({ "error": {
+                    "code": "BRIDGE_INVALID_JSON",
+                    "message": "Ojak이 요청 본문을 JSON으로 읽지 못했어요. 모델에는 전달하지 않았으며, 원인 분류를 bridge.log에 기록했어요.",
+                    "submitted": false,
+                    "retryable": false,
+                    "category": category,
+                    "line": error.line(),
+                    "column": error.column(),
+                    "declaredLength": declared,
+                    "receivedLength": raw.len()
+                }}));
+            }
         };
         let Some(Target { provider, model, session, turn }) = request_target(&body) else {
             let named = body.get("modelId").and_then(Value::as_str).unwrap_or_default();
@@ -1580,6 +1605,59 @@ impl Bridge {
             gateway.unhealthy_until = now + UNHEALTHY_MS;
         }
     }
+}
+
+/// JS JSON.stringify preserves lone UTF-16 surrogates as escapes; Rust strings cannot.
+/// Match UTF-8 encoding's replacement semantics only for those non-scalar values.
+/// Normal requests take the original parser path; failed requests reuse their buffer.
+fn parse_client_json(raw: &mut [u8]) -> serde_json::Result<Value> {
+    let original = match serde_json::from_slice(raw) {
+        Ok(value) => return Ok(value),
+        Err(error) => error,
+    };
+    let mut changed = false;
+    let mut in_string = false;
+    let mut i = 0;
+    while i < raw.len() {
+        match raw[i] {
+            b'"' => { in_string = !in_string; i += 1; }
+            b'\\' if in_string => {
+                if let Some(unit) = json_unicode_escape(&raw[i..]) {
+                    if (0xD800..=0xDBFF).contains(&unit)
+                        && json_unicode_escape(&raw[i + 6..]).is_some_and(|low| (0xDC00..=0xDFFF).contains(&low))
+                    {
+                        i += 12;
+                        continue;
+                    }
+                    if (0xD800..=0xDFFF).contains(&unit) {
+                        raw[i + 2..i + 6].copy_from_slice(b"fffd");
+                        changed = true;
+                    }
+                    i += 6;
+                } else {
+                    // Skip the escaped byte, including an escaped backslash or quote.
+                    i += 2;
+                }
+            }
+            _ => i += 1,
+        }
+    }
+    if changed { serde_json::from_slice(raw) } else { Err(original) }
+}
+
+fn json_unicode_escape(bytes: &[u8]) -> Option<u16> {
+    if bytes.len() < 6 || &bytes[..2] != b"\\u" { return None; }
+    let mut value = 0;
+    for &byte in &bytes[2..6] {
+        let digit = match byte {
+            b'0'..=b'9' => byte - b'0',
+            b'a'..=b'f' => byte - b'a' + 10,
+            b'A'..=b'F' => byte - b'A' + 10,
+            _ => return None,
+        };
+        value = (value << 4) | u16::from(digit);
+    }
+    Some(value)
 }
 
 /// pi-native 본문에서 (공급자, 모델 ID, 세션 ID)를 꺼낸다.
@@ -3623,14 +3701,11 @@ mod tests {
                 let Ok(mut stream) = stream else { break };
                 let (release, held, served) = (Arc::clone(&worker_release), Arc::clone(&worker_held), Arc::clone(&worker_served));
                 std::thread::spawn(move || {
-                    let mut buffer = Vec::new();
-                    let mut chunk = [0u8; 4096];
-                    while head_end(&buffer).is_none() {
-                        match stream.read(&mut chunk) {
-                            Ok(0) | Err(_) => return,
-                            Ok(read) => buffer.extend_from_slice(&chunk[..read]),
-                        }
-                    }
+                    let deadline = Instant::now() + Duration::from_secs(30);
+                    let Ok((request, rest)) = read_head(&mut stream, deadline) else { return };
+                    // Consume the upload before closing, otherwise an unread body can reset TCP
+                    // and discard the final SSE event on an immediately released stream.
+                    if read_body(&mut stream, request, rest, deadline).is_err() { return; }
                     served.fetch_add(1, Ordering::SeqCst);
                     if disconnect { return; }
                     let _ = stream.write_all(b"HTTP/1.1 200 OK\r\nContent-Type: text/event-stream\r\nConnection: close\r\n\r\ndata: {\"type\":\"start\"}\n\n");
@@ -3662,6 +3737,77 @@ mod tests {
     fn stream_request(token: &str, session: usize) -> String {
         let body = json!({"modelId": "anthropic/claude-test", "options": {"model": {"id": "claude-test", "provider": "anthropic"}, "sessionId": format!("s-{session}")}}).to_string();
         format!("POST /v1/pi/stream HTTP/1.1\r\nHost: localhost\r\nAuthorization: Bearer {token}\r\nX-Ojak-Admission: 1\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}", body.len())
+    }
+
+    #[test]
+    fn client_json_preserves_scalars_and_literal_escapes_while_replacing_unpaired_surrogates() {
+        for (input, expected) in [
+            (r#""\ud835""#, "\u{fffd}"),
+            (r#""\udc00""#, "\u{fffd}"),
+            (r#""\uD835\uDC00""#, "\u{1d400}"),
+            (r#""\\ud835""#, "\\ud835"),
+            (r#""\\\ud835""#, "\\\u{fffd}"),
+            (r#""\ud835\ud835\udc00""#, "\u{fffd}\u{1d400}"),
+            (r#""\ud835\n끝""#, "\u{fffd}\n끝"),
+        ] {
+            assert_eq!(parse_client_json(&mut input.as_bytes().to_vec()).unwrap(), json!(expected));
+        }
+        let mut mixed = br#"{"literal":"\\ud835","pair":"\ud835\udc00","bad":"\ud835"}"#.to_vec();
+        assert_eq!(parse_client_json(&mut mixed).unwrap(), json!({"literal":"\\ud835","pair":"\u{1d400}","bad":"\u{fffd}"}));
+        for malformed in [r#"{"x":"\ud835",}"#, r#"{"x":"\ud835"#, r#"{"x":"\ud83z"}"#] {
+            assert!(parse_client_json(&mut malformed.as_bytes().to_vec()).is_err());
+        }
+    }
+
+    #[test]
+    fn unpaired_surrogate_context_reaches_upstream_once() {
+        let h = harness(Duration::from_secs(5));
+        let gateway = synthetic_gateway(&h);
+        gateway.release.store(true, Ordering::SeqCst);
+        let payload = r#"{"modelId":"anthropic/claude-test","context":{"messages":[{"role":"toolResult","content":[{"type":"text","text":"ok"}],"details":{"displayContent":{"text":"\ud835"}}}]},"options":{}}"#;
+        let request = format!(
+            "POST /v1/pi/stream HTTP/1.1\r\nHost: localhost\r\nAuthorization: Bearer {}\r\nX-Ojak-Admission: 1\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",
+            h.public_token, payload.len(), payload
+        );
+        let response = exchange(h.public, &request);
+        assert!(response.starts_with("HTTP/1.1 200 "), "{response}");
+        assert!(response.contains(r#""type":"done""#));
+        assert_eq!(gateway.served.load(Ordering::SeqCst), 1);
+        wait_idle(&h.bridge);
+    }
+
+    #[test]
+    fn invalid_json_rejects_incomplete_body_without_forwarding_or_leaking_content() {
+        assert_invalid_json_rejection(r#"{"private":"secret-marker""#, "Eof");
+    }
+
+    #[test]
+    fn invalid_json_rejects_syntax_error_without_forwarding_or_leaking_content() {
+        assert_invalid_json_rejection(r#"{"private":"secret-marker",}"#, "Syntax");
+    }
+
+    fn assert_invalid_json_rejection(payload: &str, category: &str) {
+        let h = harness(Duration::from_secs(5));
+        let gateway = synthetic_gateway(&h);
+        let request = format!(
+            "POST /v1/pi/stream HTTP/1.1\r\nHost: localhost\r\nAuthorization: Bearer {}\r\nX-Ojak-Admission: 1\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",
+            h.public_token, payload.len(), payload
+        );
+        let response = exchange(h.public, &request);
+        assert!(response.starts_with("HTTP/1.1 400 "), "{response}");
+        let body: Value = serde_json::from_str(response.split_once("\r\n\r\n").unwrap().1).unwrap();
+        assert_eq!(body["error"]["code"], "BRIDGE_INVALID_JSON");
+        assert_eq!(body["error"]["submitted"], false);
+        assert_eq!(body["error"]["category"], category);
+        assert_eq!(body["error"]["declaredLength"], payload.len());
+        assert_eq!(body["error"]["receivedLength"], payload.len());
+        assert_eq!(gateway.served.load(Ordering::SeqCst), 0);
+        let log = fs::read_to_string(h.home.join("logs/bridge.log")).unwrap();
+        assert!(!response.contains("secret-marker"));
+        assert!(!log.contains("secret-marker"));
+        assert!(log.contains(&format!("category={category}")));
+        assert!(log.lines().all(|line| parse_usage_line(line).is_none()));
+        wait_idle(&h.bridge);
     }
 
     #[test]

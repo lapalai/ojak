@@ -14,7 +14,7 @@ Tauri 2 + React 19/Vite 메뉴바 앱(제품명 Ojak, bundle id `ai.aam.desktop`
 공식 Claude 조회가 미로그인을 반환하면 등록된 identity는 보존한 채 `auth-required`로 갱신하므로 이 버튼을 사용할 수 있다. 같은 identity로 다시 로그인하면 복구되고, 다른 identity로 바뀌면 기존 바인딩을 자동 교체하지 않는다.
 공통: `App.tsx`, `state.ts`(`useSnapshot`, `useBridge`, `useAction`, 공급자 별칭), `api.ts`, `types.ts`, `dialogs.tsx`, `components.tsx`, `i18n.ts`.
 - `useSnapshot(observe = true)`는 상태 조회·강제 새로고침에 같은 관측 옵션을 전달한다. `Popover.tsx`는 외부 세션을 표시하지 않으므로 `useSnapshot(false)`로 프로세스 관측을 생략하고 저장된 계정·사용량만 읽는다. 본 창은 기존 관측을 유지한다.
-Windows는 `tauri-plugin-single-instance`를 다른 플러그인보다 먼저 등록한다. 두 번째 실행은 기존 `main` 창을 다시 표시·포커스하고 종료하며, 자동 시작 인수로 들어온 중복 실행은 창을 열지 않는다. macOS의 기존 `Reopen` 처리는 유지한다.
+Windows와 macOS 모두 `tauri-plugin-single-instance`를 다른 플러그인보다 먼저 등록한다(앱 ID 기준이라 설치 경로가 다른 사본도 같은 잠금을 쓴다). 두 번째 실행은 기존 `main` 창을 다시 표시·포커스하고 종료하며, 자동 시작 인수로 들어온 중복 실행은 창을 열지 않는다. `relaunch`는 메인 스레드 `restart()`가 종료 이벤트를 건너뛰므로 잠금을 먼저 푼다. macOS는 잠금을 모르는 예전 판 사본(0.16.6 이하, 백업 번들 등)이 떠 있으면 `duplicate_app.rs`가 같은 사용자의 다른 `*.app/Contents/MacOS/ai-account-manager`를 찾아 그 번들을 `open`으로 앞으로 가져오고 새 앱은 끝난다. 다른 사본을 종료하지 않는다. setup 단계의 모달 대화상자는 이벤트 루프 전이라 응답 없이 닫혀 쓰지 않는다. 자동 시작은 창을 띄우지 않고 끝내고, 디버그 빌드는 검사하지 않는다. macOS의 기존 `Reopen` 처리는 유지한다.
 - 사용 현황의 계정 상세 `ResetCreditsPanel.tsx`는 저장된 초기화권 정보만 먼저 읽는다. 사용자가 조회할 때 공급자에서 수량·만료·범위를 확인하며, 별도 확인란 동의 뒤에만 `resetCredits.redeem`을 한 번 호출한다. 닫기·IPC 오류·재열기로 mutation을 재전송하지 않는다. `unknown/unsupported/known(0)`을 구분하고 결과 불명은 읽기 전용 조회로 복구한다. 유료 크레딧과 별개이며 초기화권으로 다른 한도·세션 슬롯을 해제한다고 약속하지 않는다.
 
 ## 글꼴·조판 (`styles.css`)

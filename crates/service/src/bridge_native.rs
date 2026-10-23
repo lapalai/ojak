@@ -199,6 +199,8 @@ struct SourceState {
     blocks: Vec<Value>,
     /// 결과를 기다리는 공유 job.
     job: Option<Arc<Job>>,
+    /// Retain the latest job so permit waiters can observe it even after a fast completion.
+    last_job: Option<Arc<Job>>,
     /// worker 스레드가 실제로 끝나기 전까지 true. 대기자가 떠나거나 job이 시간 초과로 정리돼도 새 worker를 겹쳐 띄우지 않는다.
     running: bool,
     /// 한 대기자가 이 프로필의 전역 갱신 자리를 기다리는 중이다. 다른 대기자는 자리를 따로 기다리지 않고 그 결과를 함께 기다린다.
@@ -497,6 +499,7 @@ impl Source {
         let job = Arc::new(Job { force, deadline: now + self.job_budget, started: now, stage: Lock::new("state-check"), result: OnceLock::new() });
         state.running = true;
         state.job = Some(Arc::clone(&job));
+        state.last_job = Some(Arc::clone(&job));
         Ok(JobGuard { source: Arc::clone(self), job, key, outcome: None, permit: Some(permit) })
     }
 
@@ -547,6 +550,8 @@ impl Source {
     /// 최신 access를 보장한다. 신선하면 즉시, 아니면 공유 job에 합류하거나 시작한다.
     /// 시작할 때 전역 갱신 자리가 없으면 상태 잠금 밖에서 순서대로 기다린다(프로필마다 대기자는 하나).
     fn ensure(self: &Arc<Self>, force: bool, deadline: Instant, cancel: &dyn Fn() -> bool) -> Result<(), ApiError> {
+        let mut joined_start = false;
+        let mut preceding_job: Option<Arc<Job>> = None;
         loop {
             if Instant::now() >= deadline {
                 return Err(timeout_error());
@@ -558,11 +563,19 @@ impl Source {
             if !force && state.fresh() {
                 return Ok(());
             }
-            if let Some(job) = state.job.clone() {
+            let joined_job = state.job.clone().or_else(|| {
+                if !joined_start { return None; }
+                state.last_job.as_ref()
+                    .filter(|job| preceding_job.as_ref().is_none_or(|previous| !Arc::ptr_eq(previous, job)))
+                    .cloned()
+            });
+            if let Some(job) = joined_job {
                 drop(state);
                 let outcome = self.wait_job(&job, deadline, cancel)?;
                 if force && !job.force {
                     // 강제 갱신은 진행 중이던 일반 조회와 합칠 수 없다. 끝난 뒤 다시 판단한다.
+                    joined_start = false;
+                    preceding_job = None;
                     continue;
                 }
                 return outcome;
@@ -574,6 +587,10 @@ impl Source {
                 state.failed = None;
             }
             if state.starting {
+                if !joined_start {
+                    preceding_job = state.last_job.clone();
+                    joined_start = true;
+                }
                 // 다른 대기자가 이 프로필의 전역 자리를 기다린다. 자리를 따로 기다리지 않고 그가 시작할 job을 함께 기다린다.
                 let _ = self.changed.wait_until(&mut state, deadline.min(Instant::now() + WAIT_SLICE));
                 continue;

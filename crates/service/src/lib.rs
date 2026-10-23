@@ -37,13 +37,17 @@ fn cancel_uninstall_metadata(connection: &rusqlite::Connection, permit: &str) ->
     set_metadata(connection, "uninstallPermit", &Option::<String>::None)
 }
 
-/// installer 전용: 서비스가 확실히 종료된 뒤 같은 승인만 취소한다. lease·계정·인증은 변경하지 않는다.
+/// 설치 도우미가 서비스의 시작 잠금을 잡고 저장소의 종료 승인을 변경한다.
+/// 중지됐다는 사실만으로 lease를 만료시키거나 슬롯을 반환하지 않는다.
 #[cfg(windows)]
-pub fn cancel_stopped_uninstall(paths: &Paths, expected_permit: Option<&str>) -> Result<(), ApiError> {
+fn stopped_uninstall<T>(
+    paths: &Paths,
+    operation: impl FnOnce(&rusqlite::Transaction<'_>) -> Result<T, ApiError>,
+) -> Result<T, ApiError> {
     let _lifetime = server::service_lifetime_lock(paths)?;
     match service_pid(paths) {
         Err(failure) if failure.raw_os_error() == Some(2) => {}
-        _ => return Err(ApiError::new("UNMANAGED_SERVICE", "서비스 종료를 확인하지 못해 배정 차단을 해제하지 않았습니다.")),
+        _ => return Err(ApiError::new("UNMANAGED_SERVICE", "서비스 종료를 확인하지 못해 설치 상태를 변경하지 않았습니다.")),
     }
     if !aam_protocol::secure::owned_by_current_user(&paths.database).unwrap_or(false) {
         return Err(ApiError::new("UNSAFE_PATH", "관리 저장소의 소유를 확인하지 못했습니다."));
@@ -59,16 +63,38 @@ pub fn cancel_stopped_uninstall(paths: &Paths, expected_permit: Option<&str>) ->
     let tx = connection.transaction_with_behavior(TransactionBehavior::Immediate).map_err(db_error)?;
     // 타임아웃·재부팅 추정으로 lease를 풀지 않는다. 불확실 상태도 보존한다.
     if leases(&tx)?.iter().any(|record| scheduler::holds_capacity(&record.session.state)) {
-        return Err(ApiError::new("SESSION_BUSY", "활성·불확실 대화가 남아 배정 차단을 해제하지 않았습니다."));
+        return Err(ApiError::new("SESSION_BUSY", "활성·불확실 대화가 남아 설치 상태를 변경하지 않았습니다."));
     }
-    let stored = metadata::<Option<String>>(&tx, "uninstallPermit")?.flatten();
-    match (expected_permit, stored.as_deref()) {
-        (Some(expected), Some(_)) => cancel_uninstall_metadata(&tx, expected)?,
-        (None, Some(current)) => cancel_uninstall_metadata(&tx, current)?,
-        // 이미 취소된 승인으로 재시도하면 다시 열 상태가 없다. live RPC의 엄격한 검사는 유지한다.
-        (_, None) => {}
-    }
-    tx.commit().map_err(db_error)
+    let result = operation(&tx)?;
+    tx.commit().map_err(db_error)?;
+    Ok(result)
+}
+
+/// 서비스가 꺼져 있어도 저장소에 점유 lease가 없음을 증명한 경우에만 종료를 승인한다.
+/// 승인을 먼저 저장하므로 저장 직후 서비스가 시작돼도 새 배정은 닫혀 있다.
+#[cfg(windows)]
+pub fn prepare_stopped_uninstall(paths: &Paths) -> Result<String, ApiError> {
+    stopped_uninstall(paths, |tx| {
+        let permit = metadata::<Option<String>>(tx, "uninstallPermit")?
+            .flatten().unwrap_or_else(new_id);
+        set_metadata(tx, "uninstallPermit", &Some(&permit))?;
+        Ok(permit)
+    })
+}
+
+/// installer 전용: 서비스가 확실히 종료된 뒤 같은 승인만 취소한다. lease·계정·인증은 변경하지 않는다.
+#[cfg(windows)]
+pub fn cancel_stopped_uninstall(paths: &Paths, expected_permit: Option<&str>) -> Result<(), ApiError> {
+    stopped_uninstall(paths, |tx| {
+        let stored = metadata::<Option<String>>(tx, "uninstallPermit")?.flatten();
+        match (expected_permit, stored.as_deref()) {
+            (Some(expected), Some(_)) => cancel_uninstall_metadata(tx, expected)?,
+            (None, Some(current)) => cancel_uninstall_metadata(tx, current)?,
+            // DB 변경 뒤 receipt 저장이 중단돼도 같은 승인으로 다시 완료할 수 있다.
+            (_, None) => {}
+        }
+        Ok(())
+    })
 }
 
 pub struct Service {

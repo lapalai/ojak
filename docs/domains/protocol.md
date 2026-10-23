@@ -21,6 +21,7 @@
 - `call` (`lib.rs:458`): 4바이트 길이 prefix + JSON `RpcRequest` → `RpcResponse`
 - `read_frame`/`write_frame` (`lib.rs:435`, `lib.rs:449`)
 - Windows `call_for_process`는 요청을 보낼 **동일 pipe 연결**에서 현재 사용자와 기대 서버 PID를 검사한다. 호출자는 PID 재사용을 막도록 검증한 프로세스 핸들을 호출 완료까지 유지해야 한다. installer의 안전 승인·취소는 이 경로를 쓰며, RPC wire version·메서드·프레임 형식은 바꾸지 않는다.
+- Windows 서비스는 시작 시 자기 프로세스 DACL에 현재 사용자 SID의 `PROCESS_QUERY_LIMITED_INFORMATION | SYNCHRONIZE`, 토큰 DACL에 `TOKEN_QUERY`만 추가해 관리자 SSH와 일반 데스크톱 사이에서도 기존 SID 검증을 수행할 수 있게 한다. 기존 ACE를 유지하고 강제 종료·메모리·토큰 수정 권한은 추가하지 않는다. 설정 실패는 `PEER_ACCESS_SETUP_FAILED`로 시작을 중단하며, 확인 실패를 같은 사용자로 간주하는 fallback은 없다. 0.16.6 격리 실행에서 관리자 서비스 → 일반 Session 1 조회와 일반 권한 서비스의 시작·응답을 확인했다.
 - `resetCredits.read({accountId,refresh?})`는 저장된 결과 또는 명시적 공급자 조회, `resetCredits.redeem({accountId,quoteId,creditId,requestId,confirmed})`는 확인된 한 번의 사용이다. 두 메서드만 RPC 읽기 제한 90초를 사용하며 나머지는 60초다. 전송 실패를 mutation 재시도 근거로 쓰지 않는다.
 
 ## 주요 엔티티

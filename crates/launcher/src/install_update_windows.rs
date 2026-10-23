@@ -61,19 +61,26 @@ fn hash_file(file: &mut fs::File) -> Result<String, ApiError> {
     }
     Ok(format!("{:x}", hash.finalize()))
 }
-fn copy(source: &Path, destination: &Path) -> Result<(), ApiError> {
-    let mut input = aam_protocol::secure::open_read_no_follow(source).map_err(io_error)?;
+/// 대상이 없거나 읽지 못하거나 기대 hash와 다르면 true. 읽지 못하면 보수적으로 되돌려야 하는 것으로 본다.
+fn needs_restore(path: &Path, expected: &str) -> bool {
+    hash(path).map_or(true, |current| current != expected)
+}
+fn copy_io(source: &Path, destination: &Path) -> std::io::Result<()> {
+    let mut input = aam_protocol::secure::open_read_no_follow(source)?;
     let temporary = destination.with_extension(format!("update-{}", aam_protocol::new_id()));
     let result = (|| {
-        let mut output = fs::OpenOptions::new().write(true).create_new(true).open(&temporary).map_err(io_error)?;
-        std::io::copy(&mut input, &mut output).map_err(io_error)?;
-        output.flush().map_err(io_error)?;
-        output.sync_all().map_err(io_error)?;
+        let mut output = fs::OpenOptions::new().write(true).create_new(true).open(&temporary)?;
+        std::io::copy(&mut input, &mut output)?;
+        output.flush()?;
+        output.sync_all()?;
         drop(output);
-        fs::rename(&temporary, destination).map_err(io_error)
+        fs::rename(&temporary, destination)
     })();
     if result.is_err() { let _ = fs::remove_file(&temporary); }
     result
+}
+fn copy(source: &Path, destination: &Path) -> Result<(), ApiError> {
+    copy_io(source, destination).map_err(io_error)
 }
 pub(super) fn directory(path: &Path) -> Result<PathBuf, ApiError> {
     use std::os::windows::fs::MetadataExt;
@@ -210,7 +217,8 @@ fn restore_state(paths: &Paths, state: &BTreeMap<String, String>) -> Result<(), 
         // 일반 권한 launcher의 소유권 검사(read_owned)를 통과해야 한다.
         let backup = state_backup(paths, &name);
         if state.contains_key(&name) {
-            if backup.try_exists().map_err(io_error)? {
+            // 바뀌지 않은 shim 복사본은 다시 쓰지 않는다. 실행 중인 복사본을 덮어쓰다 복구가 실패하는 일을 막는다.
+            if backup.try_exists().map_err(io_error)? && state.get(&name).is_none_or(|expected| needs_restore(&target, expected)) {
                 let mut bytes = Vec::new();
                 aam_protocol::secure::open_read_no_follow(&backup).map_err(io_error)?.read_to_end(&mut bytes).map_err(io_error)?;
                 atomic_write(&target, &bytes)?;
@@ -271,6 +279,11 @@ fn clear_orphan(paths: &Paths, install_dir: &Path) -> Result<(), ApiError> {
 fn files_busy() -> ApiError {
     error("INSTALLER_FILES_BUSY", "Ojak 실행 파일을 쓰는 프로그램이 남아 있어요. 열려 있는 omp와 Ojak 명령을 종료한 뒤 다시 시도해 주세요. 앱 실행 파일은 바꾸지 않았어요.")
 }
+/// 복구 중의 점유는 "파일을 바꾸지 않았다"고 말할 수 없다. 코드는 그대로 두고 설명만 정확히 한다.
+fn recovery_busy(failure: ApiError) -> ApiError {
+    if failure.code != "INSTALLER_FILES_BUSY" { return failure; }
+    error("INSTALLER_FILES_BUSY", "이전 버전으로 되돌리는 중인데 Ojak 실행 파일을 쓰는 프로그램이 남아 있어요. 일부 Ojak 파일이 이미 새 버전일 수 있어요. 복구 기록과 백업은 보존했고, 해당 프로그램을 종료한 뒤 설치 파일을 다시 실행하면 이어서 복구해요.")
+}
 /// `aam.exe`를 쓰기로 열 수 있으면 true. 사용 중(32·33)이면 `wait` 동안 기다린 뒤 false. 그 밖의 오류는 그대로 낸다.
 fn released(install_dir: &Path, wait: std::time::Duration) -> Result<bool, ApiError> {
     let path = install_dir.join("aam.exe");
@@ -292,12 +305,12 @@ fn ensure_launcher_released(install_dir: &Path) -> Result<(), ApiError> {
     if launcher()? == install_dir.join("aam.exe") { return Ok(()); }
     if released(install_dir, std::time::Duration::from_secs(5))? { Ok(()) } else { Err(files_busy()) }
 }
-/// `prepare-interactive` 전용. 조용한 `prepare`는 이 경로를 거치지 않는다. 사용자 동의 없이는 프로세스를 닫지 않으며,
+/// `prepare-interactive`·`recover-interactive` 전용. 조용한 단계는 이 경로를 거치지 않는다. 사용자 동의 없이는 프로세스를 닫지 않으며,
 /// 동의가 끝난 뒤에도 같은 쓰기 잠금 확인으로 다시 검증한다.
-fn release_launcher_interactively(install_dir: &Path) -> Result<(), ApiError> {
+fn release_launcher_interactively(install_dir: &Path, purpose: blockers::Purpose) -> Result<(), ApiError> {
     match ensure_launcher_released(install_dir) {
         Err(failure) if failure.code == "INSTALLER_FILES_BUSY" => {
-            blockers::negotiate(&mut blockers::System::new(install_dir)?, &mut blockers::Native)?;
+            blockers::negotiate(&mut blockers::System::new(install_dir)?, &mut blockers::Native(purpose))?;
             ensure_launcher_released(install_dir)
         }
         other => other,
@@ -318,7 +331,7 @@ fn owned_service(paths: &Paths, install_dir: &Path) -> Result<Option<ServiceReco
 }
 
 pub(super) fn run(paths: &Paths, action: &str, install_dir: &Path) -> Result<(), ApiError> {
-    let install_dir = directory(install_dir)?;
+    let install_dir = super::installation_directory(install_dir)?;
     match action {
         "prepare" | "prepare-interactive" => {
             if paths.home.join(RECEIPT).exists() || paths.home.join(BACKUP).exists() {
@@ -329,7 +342,7 @@ pub(super) fn run(paths: &Paths, action: &str, install_dir: &Path) -> Result<(),
             let was_running = running(paths) || aam_service::supervisor::running(paths);
             if was_running && service.is_none() { return Err(error("UNMANAGED_SERVICE", "등록되지 않은 실행 중 서비스가 있어 업데이트하지 않았습니다.")); }
             // 조용한 prepare는 닫지 않고 실패한다. 동의 UI와 종료는 prepare-interactive에서만, 백업·영수증을 만들기 전에 일어난다.
-            if action == "prepare-interactive" { release_launcher_interactively(&install_dir)?; } else { ensure_launcher_released(&install_dir)?; }
+            if action == "prepare-interactive" { release_launcher_interactively(&install_dir, blockers::Purpose::Update)?; } else { ensure_launcher_released(&install_dir)?; }
             private_dir(&paths.home)?;
             let backup = paths.home.join(BACKUP);
             // Exclusive creation prevents two installers from sharing or overwriting a transaction.
@@ -386,7 +399,7 @@ pub(super) fn run(paths: &Paths, action: &str, install_dir: &Path) -> Result<(),
             save(&paths.home.join(RECEIPT), &update)?;
             clear(paths, &update)
         }
-        "recover" => {
+        "recover" | "recover-interactive" => {
             if !paths.home.join(RECEIPT).try_exists().map_err(io_error)? { return clear_orphan(paths, &install_dir); }
             let mut update = load(paths, &install_dir)?;
             if update.committed {
@@ -399,12 +412,21 @@ pub(super) fn run(paths: &Paths, action: &str, install_dir: &Path) -> Result<(),
                 return clear(paths, &update);
             }
             let mut service = owned_service(paths, &install_dir)?;
-            ensure_launcher_released(&install_dir)?;
+            // 백업 증거부터 확인한다. 증거가 깨졌으면 프로그램을 닫도록 묻지 않고 바로 멈춘다.
             for (name, expected) in &update.files {
                 verify_restore(&paths.home.join(BACKUP).join(name), &install_dir.join(name), expected)?;
             }
             for (name, expected) in update.state.iter().flatten() {
                 verify_restore(&state_backup(paths, name), &paths.home.join(name), expected)?;
+            }
+            // launcher를 실제로 덮어써야 할 때만 잠금을 요구한다. 새 파일을 쓰지 못한 채 실패한 설치는 launcher가 원본 그대로라
+            // omp 같은 사용 중 프로그램이 있어도 복구된다. 닫기 동의는 화면 있는 `recover-interactive`에서만 받는다.
+            if let Some(expected) = update.files.get("aam.exe") {
+                let backup_present = paths.home.join(BACKUP).join("aam.exe").try_exists().map_err(io_error)?;
+                if backup_present && needs_restore(&install_dir.join("aam.exe"), expected) {
+                    let released = if action == "recover-interactive" { release_launcher_interactively(&install_dir, blockers::Purpose::Recovery) } else { ensure_launcher_released(&install_dir) };
+                    released.map_err(recovery_busy)?;
+                }
             }
             // 먼저 실제 pipe peer를 검증한다. 다른 설치가 연결했으면 소유 기록도 바꾸지 않는다.
             let binary = install_dir.join("aam-service.exe");
@@ -459,9 +481,16 @@ pub(super) fn run(paths: &Paths, action: &str, install_dir: &Path) -> Result<(),
                 }
                 fence = Some(held);
             }
-            for name in update.files.keys() {
+            // 실행 중일 수 있는 launcher를 먼저 되돌린다. 실패해도 서비스 파일은 아직 그대로라 한 세대가 섞이지 않는다.
+            // 이미 원본과 같은 파일은 다시 쓰지 않는다: 실행 중인 `aam.exe`는 덮어쓸 수 없고, 바뀌지 않은 파일을 쓸 이유도 없다.
+            for name in FILES {
+                let Some(expected) = update.files.get(name) else { continue };
                 let backup = paths.home.join(BACKUP).join(name);
-                if backup.try_exists().map_err(io_error)? { copy(&backup, &install_dir.join(name))?; }
+                if !backup.try_exists().map_err(io_error)? || !needs_restore(&install_dir.join(name), expected) { continue; }
+                copy_io(&backup, &install_dir.join(name)).map_err(|failure| {
+                    // 검사 뒤 새로 뜬 프로그램이 파일을 잡았다. 복구 기록과 백업은 그대로 둔다(다음 복구가 이어서 한다).
+                    if name == "aam.exe" && matches!(failure.raw_os_error(), Some(5 | 32 | 33)) && !released(&install_dir, std::time::Duration::ZERO).unwrap_or(false) { recovery_busy(files_busy()) } else { io_error(failure) }
+                })?;
             }
             // shim은 복구한 launcher와 같은 세대로 되돌린다. 새 launcher로 다시 만들면 이전 launcher가 모르는 형식이 된다.
             match &update.state {
@@ -728,6 +757,89 @@ mod tests {
         run(&fixture.paths, "recover", &fixture.app).unwrap();
         for name in FILES { assert_eq!(fs::read(fixture.app.join(name)).unwrap(), b"original"); }
         assert!(!fixture.paths.home.join(RECEIPT).exists());
+    }
+
+    /// 실행 중인 이미지처럼 읽기는 허용하고 쓰기·교체는 막는 점유(FILE_SHARE_READ).
+    fn hold(path: &Path) -> fs::File {
+        use std::os::windows::fs::OpenOptionsExt;
+        fs::OpenOptions::new().read(true).share_mode(1).open(path).unwrap()
+    }
+
+    #[test]
+    fn late_launcher_holder_after_prepare_rolls_back_without_rewriting_the_unchanged_launcher_and_blocks_a_new_transaction() {
+        // prepare 뒤에 omp가 새 `aam.exe` 자식을 띄웠고, NSIS는 서비스 파일만 바꾸고 launcher를 쓰지 못했다.
+        let fixture = Fixture::new();
+        fs::write(fixture.app.join("aam.exe"), b"original launcher").unwrap();
+        fs::write(fixture.app.join("aam-service.exe"), b"original service").unwrap();
+        run(&fixture.paths, "prepare", &fixture.app).unwrap();
+        let held = hold(&fixture.app.join("aam.exe"));
+        fs::write(fixture.app.join("aam-service.exe"), b"new service").unwrap();
+        // 조용한 복구도 닫지 않고 끝낸다: 되돌릴 launcher가 원본과 같아 쓸 필요가 없다.
+        run(&fixture.paths, "recover", &fixture.app).unwrap();
+        assert_eq!(fs::read(fixture.app.join("aam.exe")).unwrap(), b"original launcher");
+        assert_eq!(fs::read(fixture.app.join("aam-service.exe")).unwrap(), b"original service");
+        assert!(!fixture.paths.home.join(RECEIPT).exists() && !fixture.paths.home.join(BACKUP).exists());
+        // 점유가 남아 있는 동안 새 트랜잭션은 만들어지지 않는다(복구 기록도 남지 않는다).
+        assert_eq!(run(&fixture.paths, "prepare", &fixture.app).unwrap_err().code, "INSTALLER_FILES_BUSY");
+        assert!(!fixture.paths.home.join(RECEIPT).exists() && !fixture.paths.home.join(BACKUP).exists());
+        drop(held);
+        run(&fixture.paths, "prepare", &fixture.app).unwrap();
+        run(&fixture.paths, "recover", &fixture.app).unwrap();
+    }
+
+    #[test]
+    fn existing_receipt_reports_recovery_required_before_any_blocker_check_and_recover_then_unblocks_the_retry() {
+        // 이전 시도가 영수증을 남긴 채 끝났고 새 `aam.exe`가 떠 있다. prepare가 점유 오류로 가로채면 복구 동의 순서가 꼬인다.
+        let fixture = Fixture::new();
+        for name in FILES { fs::write(fixture.app.join(name), b"original").unwrap(); }
+        run(&fixture.paths, "prepare", &fixture.app).unwrap();
+        let held = hold(&fixture.app.join("aam.exe"));
+        for action in ["prepare", "prepare-interactive"] {
+            assert_eq!(run(&fixture.paths, action, &fixture.app).unwrap_err().code, "UPDATE_RECOVERY_REQUIRED");
+        }
+        run(&fixture.paths, "recover", &fixture.app).unwrap();
+        assert_eq!(run(&fixture.paths, "prepare", &fixture.app).unwrap_err().code, "INSTALLER_FILES_BUSY");
+        assert!(!fixture.paths.home.join(RECEIPT).exists() && !fixture.paths.home.join(BACKUP).exists());
+        drop(held);
+    }
+
+    #[test]
+    fn partially_replaced_launcher_held_by_a_new_process_preserves_receipt_backup_and_changed_files_until_it_is_released() {
+        let fixture = Fixture::new();
+        for name in FILES { fs::write(fixture.app.join(name), b"original").unwrap(); }
+        run(&fixture.paths, "prepare", &fixture.app).unwrap();
+        // NSIS가 launcher를 먼저 새 파일로 바꿨고, 그 새 launcher를 omp 자식이 곧바로 실행해 잡고 있다.
+        for name in FILES { fs::write(fixture.app.join(name), b"new").unwrap(); }
+        let held = hold(&fixture.app.join("aam.exe"));
+        // 조용한 복구는 닫지 않고 멈춘다. 파일·영수증·백업은 그대로다.
+        let failure = run(&fixture.paths, "recover", &fixture.app).unwrap_err();
+        assert_eq!(failure.code, "INSTALLER_FILES_BUSY");
+        assert!(failure.message.contains("새 버전"), "복구 실패는 파일이 바뀌지 않았다고 말하면 안 된다: {}", failure.message);
+        assert!(!failure.message.contains("바꾸지 않았어요"));
+        for name in FILES { assert_eq!(fs::read(fixture.app.join(name)).unwrap(), b"new"); }
+        assert!(fixture.paths.home.join(RECEIPT).exists());
+        assert_eq!(fs::read(fixture.paths.home.join(BACKUP).join("aam.exe")).unwrap(), b"original");
+        assert_eq!(fs::read(fixture.paths.home.join(BACKUP).join("aam-service.exe")).unwrap(), b"original");
+        // 같은 영수증으로 이어서 복구한다. 점유가 사라진 뒤에는 두 파일 모두 원본이다.
+        drop(held);
+        run(&fixture.paths, "recover", &fixture.app).unwrap();
+        for name in FILES { assert_eq!(fs::read(fixture.app.join(name)).unwrap(), b"original"); }
+        assert!(!fixture.paths.home.join(RECEIPT).exists() && !fixture.paths.home.join(BACKUP).exists());
+    }
+
+    #[test]
+    fn tampered_backup_stops_recovery_before_any_launcher_lock_decision() {
+        // 백업 증거가 깨졌으면 "프로그램을 닫으면 복구된다"고 안내하지 않고 증거 오류로 멈춘다.
+        let fixture = Fixture::new();
+        for name in FILES { fs::write(fixture.app.join(name), b"original").unwrap(); }
+        run(&fixture.paths, "prepare", &fixture.app).unwrap();
+        for name in FILES { fs::write(fixture.app.join(name), b"new").unwrap(); }
+        fs::write(fixture.paths.home.join(BACKUP).join("aam.exe"), b"tampered").unwrap();
+        let held = hold(&fixture.app.join("aam.exe"));
+        assert_eq!(run(&fixture.paths, "recover", &fixture.app).unwrap_err().code, "UPDATE_BACKUP_FAILED");
+        for name in FILES { assert_eq!(fs::read(fixture.app.join(name)).unwrap(), b"new"); }
+        assert!(fixture.paths.home.join(RECEIPT).exists());
+        drop(held);
     }
 
 }

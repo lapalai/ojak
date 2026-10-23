@@ -26,6 +26,7 @@ Claude·Codex는 Ojak에 등록된 기존 공식 CLI 로그인과 omp의 원래 
 
 ### 인증 갱신과 연결 예산
 - 공식 CLI·키체인·DB·소켓 I/O 중에는 인증 상태 mutex를 잡지 않는다. 같은 Source의 동시 갱신은 성공·실패 결과를 공유하며, 실패 후 3초 동안 같은 실패를 재사용한다. 프로필 경로는 등록 때의 canonical 경로를 유지하며, Source를 재생성해도 같은 프로필 worker를 겹쳐 띄우지 않는다.
+- 전역 슬롯 대기 중 합류한 요청은 해당 갱신이 먼저 완료되어도 결과를 공유한다. Source는 마지막 job을 하나 보존하고 합류 직전 job과 구별한다. 완료 후 새로 들어온 강제 갱신은 이전 결과를 재사용하지 않으며, 일반 조회 결과가 강제 갱신을 대신하지 않는다.
 - 인증 worker는 전역 최대 4개다. 소스마다 전역 슬롯 대기자는 하나이며 FIFO로 최대 10초(요청 마감 이내) 기다린다. 만료·취소된 요청은 새 worker를 시작하지 않는다. 시작한 worker의 전후 identity 검사·키체인·공식 CLI 갱신에는 같은 20초 deadline을 전달한다. 대기자 취소·요청 마감은 이미 공유 중인 worker를 취소하지 않는다. OS 동기 작업이 남으면 프로필 점유·permit을 유지하고 늦은 결과를 버려 시간 초과 뒤 중복 갱신을 막는다.
 - 헤더 수신은 30초, 모델 대기 뒤 본문 수신은 별도 30초다. native 요청은 헤더 수신부터 합계 45초, long-poll은 그 안에서 최대 25초다. 정상 TCP write-half-close는 취소가 아니며 reset 등 명백한 오류는 대기만 중단한다. 모델 SSE에는 전체 마감을 적용하지 않고 기존 upstream 300초 idle timeout을 유지한다.
 - `AAM_BRIDGE_MAX_CONNECTIONS`는 전체 상한(64–512, 기본 256)이다. native 프로필 수 `P`에 따라 짧은 내부 요청은 `min(P + 4, 16)`, long-poll은 `min(2P, 24)`를 예약한다. 공개 몫 `U`에서는 제어용 `max(8, U/16)`과 대기용 `max(4, U/8)`을 빼고 모델 스트림을 받는다. 상한은 초당 요청 수가 아니라 열린 연결 수이며 기존 스트림은 끊지 않는다.
@@ -44,15 +45,17 @@ Claude·Codex는 Ojak에 등록된 기존 공식 CLI 로그인과 omp의 원래 
 - `integrations/client-forks/manifest.json`에 고정한 omp·Orca 수정본이 필요하다. `aam omp-bridge connect`와 소유 확장 갱신은 omp 버전이 일치하지 않으면 기존 설정을 변경하기 전에 멈춘다. 재현 가능한 소스는 `node scripts/prepare-client-forks.mjs <새 디렉터리>`로 준비한다.
 - 확장은 Ojak 모델을 `ojak-durable-native` API로 등록하고, 준비 상태를 확인한 뒤에만 원래 pi-native 직렬화·전송을 시작한다. 기본 요청은 현재 `providerSessionId` 소유권과 `persistSession()` stable-storage fence가 필수다. 명시적 ephemeral 보조 호출은 주 대화 journal을 수정하지 않는다.
 - `GET /v1/admission`은 `{version:1,ready,reason,poll_after_ms,resources}`를 반환한다. 준비 상태는 자리 예약이 아니며 최종 HTTP FIFO·본문 예산을 계속 적용한다. 모델 POST의 `X-Ojak-Admission: 1`이 없으면 `BRIDGE_CLIENT_UPGRADE_REQUIRED`로 전달 전에 거절한다.
+- 연결·확장 갱신 전 launcher는 `omp --version`의 포크 표식(`X.Y.Z-ojak.N`)으로 사전 점검한다(`omp_bridge::admission_contract`). N이 `integrations/client-forks/manifest.json`의 요구 계약 이상이면 기반 버전과 무관하게 통과하고, 표식 없는 일반 omp는 더 새 버전이어도 `OMP_ADMISSION_CLIENT_REQUIRED`다. 이 점검은 설정 변경 전 안내용이며 실제 차단선은 확장(`persistSession` 없으면 요청 전 `BRIDGE_ADMISSION_STOPPED`)과 서비스(`X-Ojak-Admission` 없으면 `BRIDGE_CLIENT_UPGRADE_REQUIRED`)다. 계약이 바뀌면 manifest의 N을 올리고 포크 patch·확장·서비스를 함께 바꾼다.
 - omp는 실제 입력과 `ojak.admission.v1` marker를 저장한 뒤 최대 15분 기다린다. 프로세스 안의 대기자는 최대 32개, 보존 context 데이터는 보수적 가중치로 256 MiB까지다(실제 RSS 상한 아님). GET 실패는 미전송 대기이며, POST는 명시적인 `admission_wait`·`submitted:false`와 허용 코드가 있을 때만 다시 대기한다. 일반 503·ECONNRESET은 재전송 근거가 아니다.
 - 전송 직전에 `submitted`를 fsync하고, 응답 완료를 확인한 뒤 `completed`를 기록한다. 재시작은 같은 세션·분기의 최신 `queued` 작업만 자동 재개한다. 대기 한도에 닿은 `paused`는 `/ojak-resume`으로 명시적으로 재개한다. 취소·전송됨·결과 불명·다른 분기의 작업은 자동 재개하지 않는다. 저장 실패도 전송을 막는다.
 - `before_subagent_admission`은 기존 task/eval 스케줄러 안에서, child session·worktree 등 무거운 자원을 만들기 전에 기다린다. Orca도 terminal·structured ACP/Pi 실행 전에 기존 SQLite journal에 의도를 저장하며, 호스트당 32개/4 MiB·동시 시작 1개·시작 간격 2초를 적용한다. 종료는 대기를 보존하고 명시적 취소는 재개하지 않는다.
 - Orca 재시작은 기존 소유권·워크스페이스·권한을 다시 확인하고 현재 설정으로 시작 계획을 재구성한다. 저장된 shell 명령이나 환경/토큰을 그대로 실행하지 않는다. 닫힌 소유자는 자동으로 되살리지 않으며 미전송 작업은 화면에서 취소·복사·명시적 재개할 수 있다.
-- 첫 structured 시작은 공급자-visible index가 생기기 전에도 workspace tab이 저장될 수 있다. 복구는 실제 tab 소유권으로 판정하고, 아직 공급자 대화를 만들지 않았다면 기존 예약 session/tab을 재사용한다. Orca의 ACP 버전 검사에는 검증한 `18.12.0-ojak.1`만 추가하며 다른 prerelease를 일괄 허용하지 않는다.
+- 첫 structured 시작은 공급자-visible index가 생기기 전에도 workspace tab이 저장될 수 있다. 복구는 실제 tab 소유권으로 판정하고, 아직 공급자 대화를 만들지 않았다면 기존 예약 session/tab을 재사용한다. Orca의 ACP 버전 검사에는 결합된 `18.12.0-ojak.2`만 추가하며 다른 prerelease를 일괄 허용하지 않는다.
 
 ### 수정본 재현과 빌드 범위
-- 현재 후보 버전: Ojak `0.13.2`, omp `18.12.0-ojak.1`, Orca `1.5.0-ojak.2`(upstream `v1.4.227`). 패치와 각 upstream MIT 라이선스는 `integrations/client-forks`에 있다.
+- 현재 소스 후보 버전: Ojak `0.16.2`, omp `18.12.0-ojak.2`, Orca `1.5.0-ojak.3`(upstream `v1.4.227`). 패치와 각 upstream MIT 라이선스는 `integrations/client-forks`에 있다. 이 버전 표는 설치·빌드 검증 완료를 뜻하지 않는다.
 - `node scripts/prepare-client-forks.mjs --check`는 패치 해시만 검사한다. `node scripts/prepare-client-forks.mjs <새 디렉터리>`는 공식 tag를 clone하고 commit 일치·`git apply --check` 후 패치를 적용한다. 빌드·설치·기존 checkout 변경은 하지 않는다.
+- 일반 `omp update`와 시작 시 업데이트 안내는 공개 stable Ojak Release의 `omp-compatible.json`만 사용한다. 동일 릴리스의 두 OS asset 이름·크기·SHA-256과 admission protocol 1을 검사하고 기존 atomic replacement·버전 검증·rollback으로 설치한다. `--check`는 대상 파일을 바꾸지 않고 `--force`도 검증을 생략하지 않는다. `--canary`·누락된 manifest·네트워크 오류는 실행 파일을 유지하고 이유를 표시하며 upstream 배포판을 대신 설치하지 않는다. 빌드·draft 절차는 [릴리스 정책](../release-policy.md#배포-위치)을 따른다.
 - 각 upstream의 lockfile·native 빌드 전제조건을 따른다. 이번 Windows 검증은 Bun `1.4.3`으로 omp의 `packages/coding-agent`에서 `bun run build`, Orca에서는 `node config/scripts/run-electron-vite-build.mjs`를 실행했다. omp의 native addon은 해당 upstream `18.11.0` ABI, Orca의 native addon은 Electron `43.7.5` ABI가 필요하다.
 - Windows native 모듈 빌드에는 C++ toolchain과 Python이 필요하다. 긴 checkout/pnpm 경로에서는 MSBuild의 260자 중간 파일 경로 제한을 확인했으므로 짧은 checkout/build 경로를 사용한다. 생성된 `out`은 검증용 번들이며 release installer 검증을 대신하지 않는다.
 - 실행 시나리오·테스트 결과·설치하지 않은 범위는 [작업 보존 설계](../specs/2026-10-16-durable-admission.md#검증)에 기록했다. 구형 세션은 새 POST 규약을 제공하지 않으므로 세 수정본을 함께 반영하고 세션 전환 시점을 조율해야 한다.
@@ -86,6 +89,8 @@ Claude·Codex는 Ojak에 등록된 기존 공식 CLI 로그인과 omp의 원래 
 - broker snapshot의 `credentials` 배열에서 공급자 존재와 OAuth 계정 identity를 따로 읽는다. `ojak-*` 자격 증명의 `identityKey`는 null일 수 있으므로, identity가 없다는 이유로 공급자를 누락하거나 매 sync마다 같은 로그인을 다시 등록하지 않는다. 잘못된 snapshot 형식은 빈 계정 목록으로 처리하지 않고 기존 gateway를 유지한다.
 - 공급자 계정이 어느 인증 소스에도 없고 후보 gateway도 없으면 `401 / UPSTREAM_AUTH_REQUIRED`를 돌려준다. 공식 CLI의 인증 실패·계정 변경·배정 꺼짐·키체인 잠금·파일 접근 오류는 별도 코드와 해결 행동으로 구분한다. 최초 조회 전·gateway 장애·한도 소진을 미로그인으로 단정하지 않는다.
 - 오류 본문은 `{error:{type,message,code?}}` 형식이다. omp의 pi-native 처리기가 메시지만 읽을 수 있어 advisor·judge 경고에 JSON 전체가 노출되지 않는다. 인증·연결 오류는 요청한 omp 화면과 Ojak 연결 화면에 표시한다. OS 알림은 기존 한도 리셋 전 알림만 사용하며 인증 실패마다 중복 알림을 보내지 않는다.
+- JS `JSON.stringify`가 보존하는 단독 UTF-16 surrogate escape는 Rust 문자열로 표현할 수 없다. 최초 파싱 실패 시에만 JSON 문자열 내부의 단독 surrogate를 `U+FFFD`로 치환해 재파싱한다. 정상 문자 쌍·이스케이프된 리터럴 백슬래시·나머지 필드는 보존하며 원본 세션 파일은 수정하지 않는다. 정상 요청에는 추가 순회·복사가 없고 네트워크 재전송도 없다.
+- 복구 뒤에도 JSON 파싱이 실패하면 `BRIDGE_INVALID_JSON`(HTTP 400, `submitted=false`, `retryable=false`)이다. `category`(Eof/Syntax/Data/Io), `line`, `column`, `declaredLength`(없거나 숫자가 아니면 null), `receivedLength`만 제공한다.
 - 종료 화면의 최근 15분 omp 사용 안내와 관리 CLI 세션 보호는 별개다. `PREPARED/STARTING/ACTIVE/SUSPECT/ORPHANED`는 사용 중지를 막고, 종료 확인 전까지 슬롯을 유지한다. UI는 사용 중지 버튼을 비활성화하고 해당 터미널 종료 또는 `앱만 종료`를 안내한다.
 - **모델 설정 점검(0.14.0):** 연결 → omp → `모델 설정 점검`은 `aam omp-bridge check-models`를 명시적으로 실행한다. `omp config get retry.modelFallback|retry.fallbackChains --json`과 `omp models --kind all --json`을 읽어 `{modelFallback,unknownSources}`를 반환한다. 역할 키(사용자 역할 포함)는 모델 id로 검사하지 않고, `provider/*`·`provider/prefix/*`는 같은 공급자의 id 접두어로 검사한다. 누락 모델을 나열하고 자동 fallback이 꺼진 경우에도 시작 경고가 날 수 있음을 안내한다. 대상 fallback 배열·역할에 배정한 모델까지 검증하는 기능은 아니며, 카탈로그가 비거나 조회에 실패하면 `OMP_MODELS_UNAVAILABLE`로 알린다. 기존 5초 상태 폴링에는 모델 조회를 추가하지 않으며 인증·설정·실행 중인 서비스는 변경하지 않는다.
 
@@ -95,6 +100,7 @@ Claude·Codex는 Ojak에 등록된 기존 공식 CLI 로그인과 omp의 원래 
   - 요청: `<ms> <provider>/<model> session=<끝8자> turn=<bool> tools=<n> -> <계정별칭12hex> [reserve-fallback]`
   - 차단(한도 응답을 받아 계정을 막을 때): `<ms> <provider>/<model> session=<끝8자> outcome=blocked account=<별칭> kind=<quota|rate> scope=<모델범위|-> until=<ms>:<provider|estimate>`
   - 거절(모든 후보가 못 받아 429/503으로 끝낼 때): `<ms> <provider>/<model> session=<끝8자> outcome=rejected reset=<ms>:<provider|estimate>|- causes=<별칭>:<코드>[:<until ms>],…`. 코드는 `quota`(관측 소진+공급자 리셋) / `cooldown`(리셋 모르고 Ojak이 건 30분 대기) / `rate`(속도 제한 차단) / `down`(gateway 중단) / `disabled` / `ready`. `reset=-`은 한도가 아닌 이유가 섞여 시각을 말할 수 없다는 뜻이다.
+  - JSON 파싱 거절: `<ms> bridge/json session=- outcome=rejected category=<Eof|Syntax|Data|Io> line=<n> column=<n> declared=<n|-> received=<n>`. 본문·헤더 원문·파서 오류 원문은 기록하지 않는다. 기존 `outcome=` 제외 규칙으로 사용량 집계에서 빠진다.
   - 포화: `<ms> bridge/overload session=- outcome=overload scope=<public|native> class=<connection|model|poll> active=<n> limit=<n> suppressed=<n>`. 같은 종류는 5초에 한 줄만 기록하고 생략한 횟수를 다음 줄에 합친다. 기존 `outcome=` 제외 규칙으로 사용량·한도 차단 집계에 포함하지 않는다.
   - 이메일·조직·토큰·프롬프트는 어느 줄에도 넣지 않는다. 데스크톱 파서는 `outcome=` 칸이 있는 줄을 요청으로 세지 않는다.
 - 사용 현황의 미경유 판정은 observer의 요청별 경로 근거를 사용한다. `bridge.status.sessions`는 계정 고정·프로젝트 표시용이고, 로그와 연결할 폴더가 없다는 이유로 미경유를 확정하지 않는다. 보조 세션 폴더용 `folders` 상태는 제거했다.
