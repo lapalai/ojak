@@ -19,18 +19,28 @@ pub fn inspect(expected: &ProcessIdentity) -> Liveness {
 /// 기록된 identity가 모두 이전 부팅의 것이면 참이다. 재부팅을 넘어 살아남는 프로세스와 자손은 없으므로
 /// 자손 기록이 없는 세션도 종료로 확정할 수 있다. 부팅 ID를 읽지 못하거나 하나라도 현재 부팅이면 거짓이다.
 pub fn all_from_previous_boot(identities: &[&ProcessIdentity]) -> bool {
-    // 부팅 식별자는 macOS `kern.bootsessionuuid`만 검증했다. Windows의 레지스트리 BootId는 재부팅 전후
-    // 동작을 확인하기 전까지 저장만 하고 반환 근거로 쓰지 않는다(docs/specs/2026-09-29-windows-port.md).
-    if !cfg!(target_os = "macos") {
-        return false;
-    }
-    if identities.is_empty() || identities.iter().any(|identity| identity.boot_id.is_empty()) {
-        return false;
-    }
     let Ok(current) = process_identity(std::process::id()) else {
         return false;
     };
-    !current.boot_id.is_empty() && identities.iter().all(|identity| identity.boot_id != current.boot_id)
+    previous_boot(identities, &current.boot_id)
+}
+
+/// macOS는 `kern.bootsessionuuid`(부팅마다 새 UUID), Windows는 `PrefetchParameters\BootId`(부팅마다 증가하는 정수,
+/// `bootid:N`)다. Windows는 실제 기록값이 `bootid:N` 형식이고 현재 값보다 작을 때만 이전 부팅으로 본다.
+/// 읽지 못한 값(`windows-…`)·같은 값·더 큰 값(시계·레지스트리 이상)은 근거가 아니다.
+pub fn previous_boot(identities: &[&ProcessIdentity], current: &str) -> bool {
+    if current.is_empty() || identities.is_empty() {
+        return false;
+    }
+    let counter = |value: &str| value.strip_prefix("bootid:").and_then(|n| n.parse::<u64>().ok());
+    let unverified = |value: &str| value.is_empty() || value.starts_with("windows-") || value.starts_with("bootid:");
+    match counter(current) {
+        Some(now) => identities.iter().all(|identity| counter(&identity.boot_id).is_some_and(|then| then < now)),
+        None if !unverified(current) => {
+            identities.iter().all(|identity| !unverified(&identity.boot_id) && identity.boot_id != current)
+        }
+        None => false,
+    }
 }
 
 pub fn background_exit_confirmed(native: &ProcessIdentity, background: &[ProcessIdentity]) -> bool {
@@ -180,5 +190,24 @@ pub fn is_descendant(child: &ProcessIdentity, ancestor: &ProcessIdentity) -> boo
     #[cfg(not(any(target_os = "macos", windows)))]
     {
         false
+    }
+}
+
+#[cfg(test)]
+mod boot_tests {
+    use super::*;
+    fn id(boot: &str) -> ProcessIdentity { ProcessIdentity { pid: 1, started_at: "1".into(), boot_id: boot.into() } }
+
+    #[test]
+    fn windows_boot_counter_only_counts_strictly_older_verified_boots() {
+        let (old, same, newer, bad) = (id("bootid:19"), id("bootid:21"), id("bootid:22"), id("windows-boot-unverified"));
+        assert!(previous_boot(&[&old, &id("bootid:20")], "bootid:21"));
+        // 같은 부팅·더 큰 값·확인 못 한 값이 하나라도 있으면 근거가 아니다.
+        assert!(!previous_boot(&[&old, &same], "bootid:21"));
+        assert!(!previous_boot(&[&newer], "bootid:21"));
+        assert!(!previous_boot(&[&bad], "bootid:21"));
+        assert!(!previous_boot(&[&old], "windows-boot-unverified"));
+        assert!(!previous_boot(&[], "bootid:21"));
+        assert!(!previous_boot(&[&old], ""));
     }
 }

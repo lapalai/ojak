@@ -788,9 +788,26 @@ fn service_shutdown(paths: &Paths, remove_installation: bool) -> Result<String, 
 fn retire_registered(paths: &Paths, record_path: &Path, record: &mut ServiceRecord, rollback: bool) -> Result<aam_service::supervisor::Fence, ApiError> {
     let mut fence = aam_service::supervisor::engage(paths)?;
     if let Some(process) = connect_fenced(paths, &record.binary_path, &mut fence)? {
-        let permit = process.prepare(paths)?;
-        record.uninstall_permit = Some(permit);
+        let permit = match process.prepare(paths) {
+            Ok(permit) => Some(permit),
+            // 재부팅 규칙이 없던 이전 서비스는 재부팅으로 끝난 세션도 붙잡고 종료를 거절한다. 그 점유가 전부 부팅 ID로
+            // 이전 부팅임이 증명될 때만 서비스를 멈추고, 아래 꺼진 경로가 시작 잠금 아래에서 다시 검증·반환한다.
+            Err(failure) if failure.code == "SESSION_BUSY" && !rollback && aam_service::busy_leases_are_from_previous_boot(paths) => None,
+            Err(failure) => return Err(failure),
+        };
+        record.uninstall_permit = permit.clone();
         save(record_path, record)?;
+        if permit.is_none() {
+            if !process.stop() || running(paths) {
+                return Err(error("SERVICE_STOP_FAILED", "서비스 종료를 확인하지 못했습니다. 설치 기록은 보존했습니다."));
+            }
+            drop(process);
+            record.uninstall_permit = Some(aam_service::prepare_stopped_uninstall(paths)?);
+            save(record_path, record)?;
+            fence.commit_retirement();
+            fence.wait_supervisor_exit(SUPERVISOR_EXIT_WAIT)?;
+            return Ok(fence);
+        }
         let stopped = process.stop();
         if !stopped || running(paths) {
             if process.call(paths, "service.cancelUninstall", json!({ "permit": record.uninstall_permit })).is_ok() {
