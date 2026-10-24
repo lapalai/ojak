@@ -788,20 +788,39 @@ fn service_shutdown(paths: &Paths, remove_installation: bool) -> Result<String, 
 fn retire_registered(paths: &Paths, record_path: &Path, record: &mut ServiceRecord, rollback: bool) -> Result<aam_service::supervisor::Fence, ApiError> {
     let mut fence = aam_service::supervisor::engage(paths)?;
     if let Some(process) = connect_fenced(paths, &record.binary_path, &mut fence)? {
-        let permit = match process.prepare(paths) {
-            Ok(permit) => Some(permit),
-            // 재부팅 규칙이 없던 이전 서비스는 재부팅으로 끝난 세션도 붙잡고 종료를 거절한다. 그 점유가 전부 부팅 ID로
-            // 이전 부팅임이 증명될 때만 서비스를 멈추고, 아래 꺼진 경로가 시작 잠금 아래에서 다시 검증·반환한다.
-            Err(failure) if failure.code == "SESSION_BUSY" && !rollback && aam_service::busy_leases_are_from_previous_boot(paths) => None,
+        let (permit, reboot_proven) = match process.prepare(paths) {
+            Ok(permit) => (permit, false),
+            // 재부팅 규칙이 없던 이전 서비스는 재부팅으로 끝난 세션도 붙잡고 종료를 거절한다. 같은 쓰기 트랜잭션에서
+            // 점유 전부가 부팅 ID로 이전 부팅임이 증명될 때만 신규 배정을 닫는다(실행 중 서비스도 배정마다 이 값을 읽는다).
+            Err(failure) if failure.code == "SESSION_BUSY" && !rollback => {
+                match aam_service::close_admission_if_busy_only_from_previous_boot(paths)? {
+                    Some(permit) => (permit, true),
+                    None => return Err(failure),
+                }
+            }
             Err(failure) => return Err(failure),
         };
-        record.uninstall_permit = permit.clone();
+        record.uninstall_permit = Some(permit);
         save(record_path, record)?;
-        if permit.is_none() {
+        if reboot_proven {
+            // 승인 저장 직전에 배정 검사를 이미 통과한 요청이 있을 수 있다. 배정은 같은 저장소 쓰기 잠금 아래에서만 lease를 만들므로,
+            // 승인을 저장한 뒤 다시 한 번 같은 증명을 거치면 그 사이 생긴 lease도 보인다. 하나라도 있으면 끄지 않고 취소한다.
+            if aam_service::close_admission_if_busy_only_from_previous_boot(paths)?.as_ref() != record.uninstall_permit.as_ref() {
+                if process.call(paths, "service.cancelUninstall", json!({ "permit": record.uninstall_permit })).is_ok() {
+                    record.uninstall_permit = None;
+                    save(record_path, record)?;
+                }
+                return Err(error("SESSION_BUSY", "새 대화가 시작되어 서비스를 멈추지 않았습니다. 대화를 마친 뒤 다시 시도해 주세요."));
+            }
             if !process.stop() || running(paths) {
+                if process.call(paths, "service.cancelUninstall", json!({ "permit": record.uninstall_permit })).is_ok() {
+                    record.uninstall_permit = None;
+                    save(record_path, record)?;
+                }
                 return Err(error("SERVICE_STOP_FAILED", "서비스 종료를 확인하지 못했습니다. 설치 기록은 보존했습니다."));
             }
             drop(process);
+            // 꺼진 상태에서 시작 잠금을 쥐고 같은 규칙으로 재검증·반환한다. 같은 승인 값을 이어 쓴다.
             record.uninstall_permit = Some(aam_service::prepare_stopped_uninstall(paths)?);
             save(record_path, record)?;
             fence.commit_retirement();

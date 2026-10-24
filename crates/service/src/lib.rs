@@ -84,19 +84,31 @@ fn stopped_uninstall<T>(
     Ok(result)
 }
 
-/// 실행 중인 이전 서비스(재부팅 규칙이 없던 판)가 `SESSION_BUSY`로 종료를 거절할 때만 쓴다. 저장소를 읽기 전용으로 열어,
-/// 점유 lease가 하나 이상 있고 그 전부가 자손 기록 없이 이전 부팅에서 시작됐다고 부팅 ID로 증명되는지 본다.
-/// 아무것도 쓰지 않는다. 참이면 호출자가 서비스를 멈춘 뒤 `prepare_stopped_uninstall`이 시작 잠금 아래에서 다시 검증하고 반환한다.
+/// 실행 중인 이전 서비스(재부팅 규칙이 없던 판)가 `SESSION_BUSY`로 종료를 거절할 때만 쓴다.
+/// 한 번의 쓰기 트랜잭션(IMMEDIATE) 안에서, 점유 lease가 하나 이상 있고 그 전부가 자손 기록 없이 이전 부팅에서 시작됐다고
+/// 부팅 ID로 증명되면 종료 승인(`uninstallPermit`)을 저장한다. 실행 중인 이전 서비스도 배정마다 이 값을 읽어 거절하므로,
+/// 검사와 신규 배정 차단이 원자적이다. 증명되지 않으면 아무것도 쓰지 않는다. 승인은 서비스를 멈춘 뒤
+/// `prepare_stopped_uninstall`이 시작 잠금 아래에서 다시 검증하면서 그대로 이어 쓴다. 종료하지 못하면 호출자가 취소한다.
 #[cfg(windows)]
-pub fn busy_leases_are_from_previous_boot(paths: &Paths) -> bool {
-    let Ok(connection) = rusqlite::Connection::open_with_flags(&paths.database, rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY) else { return false };
-    let Ok(records) = leases(&connection) else { return false };
+pub fn close_admission_if_busy_only_from_previous_boot(paths: &Paths) -> Result<Option<String>, ApiError> {
+    let mut connection = rusqlite::Connection::open_with_flags(&paths.database,
+        rusqlite::OpenFlags::SQLITE_OPEN_READ_WRITE | rusqlite::OpenFlags::SQLITE_OPEN_FULL_MUTEX).map_err(db_error)?;
+    connection.busy_timeout(Duration::from_secs(5)).map_err(db_error)?;
+    let version: u32 = connection.query_row("PRAGMA user_version", [], |row| row.get(0)).map_err(db_error)?;
+    if version != 1 { return Ok(None); }
+    let tx = connection.transaction_with_behavior(TransactionBehavior::Immediate).map_err(db_error)?;
+    let records = leases(&tx)?;
     let busy: Vec<_> = records.iter().filter(|record| scheduler::holds_capacity(&record.session.state)).collect();
-    !busy.is_empty() && busy.iter().all(|record| {
+    let proven = !busy.is_empty() && busy.iter().all(|record| {
         record.session.state != "PREPARED"
             && record.session.background_processes.is_none()
             && process::all_from_previous_boot(&record.session.process.iter().chain(record.session.supervisor.iter()).collect::<Vec<_>>())
-    })
+    });
+    if !proven { return Ok(None); }
+    let permit = metadata::<Option<String>>(&tx, "uninstallPermit")?.flatten().unwrap_or_else(new_id);
+    set_metadata(&tx, "uninstallPermit", &Some(&permit))?;
+    tx.commit().map_err(db_error)?;
+    Ok(Some(permit))
 }
 
 /// 서비스가 꺼져 있어도 저장소에 점유 lease가 없음을 증명한 경우에만 종료를 승인한다.
