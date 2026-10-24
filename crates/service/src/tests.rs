@@ -225,7 +225,9 @@ fn unproven_or_mixed_busy_leases_never_close_admission() {
     }
     // 증명된 고아 하나와 실제 진행 중인 대화가 섞이면 닫지 않는다.
     let fixture = Fixture::new();
-    fixture.save(&account_fixture("mixed", now_ms()));
+    let mut account = account_fixture("mixed", now_ms());
+    account.max_concurrency = 2;
+    fixture.save(&account);
     orphan_from_boot(&fixture, "old", "bootid:0", false);
     let live = fixture.service.acquire(request("live"), now_ms()).unwrap();
     assert_eq!(close_admission_if_busy_only_from_previous_boot(&fixture.service.paths).unwrap(), None);
