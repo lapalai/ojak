@@ -179,6 +179,62 @@ fn stopped_uninstall_preserves_every_held_state_even_when_expired() {
 }
 
 #[cfg(windows)]
+fn orphan_from_boot(fixture: &Fixture, id: &str, boot: &str, background: bool) -> String {
+    let now = now_ms();
+    let grant = fixture.service.acquire(request(id), now).unwrap();
+    let store = fixture.service.lock().unwrap();
+    let mut record = lease(&store.connection, &grant.session.id).unwrap();
+    record.session.state = "ORPHANED".into();
+    let identity = aam_protocol::ProcessIdentity { pid: 4242, started_at: "1".into(), boot_id: boot.into() };
+    record.session.process = Some(identity.clone());
+    record.session.supervisor = Some(identity.clone());
+    record.session.background_processes = background.then(|| vec![identity]);
+    save_lease(&store.connection, &record).unwrap();
+    grant.session.id
+}
+
+#[cfg(windows)]
+#[test]
+fn reboot_proven_orphan_closes_admission_atomically_and_is_released_offline() {
+    let fixture = Fixture::new();
+    fixture.save(&account_fixture("old-boot", now_ms()));
+    let id = orphan_from_boot(&fixture, "old", "bootid:0", false);
+    // 같은 트랜잭션에서 증명과 배정 차단: 승인 저장 뒤 들어온 배정은 거절된다(검사 직후 acquire 경합).
+    let permit = close_admission_if_busy_only_from_previous_boot(&fixture.service.paths).unwrap().expect("proven");
+    assert_eq!(fixture.service.acquire(request("racing"), now_ms()).unwrap_err().code, "ADMISSION_DISABLED");
+    // 재호출은 같은 승인을 돌려준다(새 lease가 없음을 재확인하는 경로).
+    assert_eq!(close_admission_if_busy_only_from_previous_boot(&fixture.service.paths).unwrap().as_deref(), Some(permit.as_str()));
+    // 꺼진 상태 재검증이 같은 승인을 이어 쓰며 슬롯을 반환한다.
+    assert_eq!(prepare_stopped_uninstall(&fixture.service.paths).unwrap(), permit);
+    assert_eq!(lease(&fixture.service.lock().unwrap().connection, &id).unwrap().session.state, "EXITED");
+}
+
+#[cfg(windows)]
+#[test]
+fn unproven_or_mixed_busy_leases_never_close_admission() {
+    // 현재 부팅·자손 기록 있음·확인 불가 부팅 값은 각각 증명이 아니다.
+    let current = aam_protocol::process_identity(std::process::id()).unwrap().boot_id;
+    for (boot, background) in [(current.as_str(), false), ("bootid:0", true), ("windows-boot-unverified", false)] {
+        let fixture = Fixture::new();
+        fixture.save(&account_fixture("held", now_ms()));
+        let id = orphan_from_boot(&fixture, "held", boot, background);
+        assert_eq!(close_admission_if_busy_only_from_previous_boot(&fixture.service.paths).unwrap(), None, "{boot} {background}");
+        let store = fixture.service.lock().unwrap();
+        assert_eq!(metadata::<Option<String>>(&store.connection, "uninstallPermit").unwrap().flatten(), None);
+        assert_eq!(lease(&store.connection, &id).unwrap().session.state, "ORPHANED");
+    }
+    // 증명된 고아 하나와 실제 진행 중인 대화가 섞이면 닫지 않는다.
+    let fixture = Fixture::new();
+    let mut account = account_fixture("mixed", now_ms());
+    account.max_concurrency = 2;
+    fixture.save(&account);
+    orphan_from_boot(&fixture, "old", "bootid:0", false);
+    let live = fixture.service.acquire(request("live"), now_ms()).unwrap();
+    assert_eq!(close_admission_if_busy_only_from_previous_boot(&fixture.service.paths).unwrap(), None);
+    fixture.service.finish(abort(&live), true, now_ms()).unwrap();
+}
+
+#[cfg(windows)]
 #[test]
 fn stopped_uninstall_rejects_startup_lock_and_unknown_schema_without_permit() {
     let fixture = Fixture::new();
