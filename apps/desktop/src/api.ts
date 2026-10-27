@@ -35,7 +35,8 @@ export async function native<T>(command: string, args?: Record<string, unknown>)
 }
 
 export const rpc = <T,>(method: string, params: Record<string, unknown> = {}) => native<T>("rpc", { method, params });
-export const chooseDirectory = () => native<string | null>("choose_directory");
+/// `purpose: "profile"`이면 대화상자 제목이 공식 CLI 프로필 폴더 선택으로 바뀐다. 생략하면 AI 작업 폴더 선택이다.
+export const chooseDirectory = (purpose?: "profile") => native<string | null>("choose_directory", { purpose });
 export const hostConnections = () => native<HostConnections>("host_connections");
 export const launchSession = (intent: LaunchIntent) => native<{ opened: boolean }>("launch_session", { intent });
 export interface SettingsPreview {

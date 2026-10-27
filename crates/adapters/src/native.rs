@@ -341,7 +341,7 @@ pub(crate) fn bound_paths(account: &Account) -> Result<(PathBuf, PathBuf), ApiEr
     let profile = account.profile_path.as_deref().ok_or_else(|| ApiError::new("PROFILE_UNBOUND", "이 계정에 공식 프로필이 연결돼 있지 않아요. 공식 CLI에 로그인한 뒤 프로필을 등록해 주세요."))?;
     let canonical = canonical_profile(Path::new(profile))?;
     if canonical != Path::new(profile) {
-        return Err(ApiError::new("PROFILE_BINDING_CHANGED", "등록 이후 프로필 경로가 바뀌었어요. 바로가기로 계정을 바꾸지 않아요. 다시 등록해 주세요."));
+        return Err(ApiError::new("PROFILE_BINDING_CHANGED", "등록 이후 프로필 경로가 바뀌었어요. 바로가기로 계정을 바꾸지 않아요. 폴더를 원래 경로로 되돌리거나, 이 계정의 연결을 끊은 뒤 새 경로를 연결해 주세요."));
     }
     let binary = account
         .binary_path
@@ -359,7 +359,7 @@ fn require_identity(fresh: &Account, expected: &str) -> Result<(), ApiError> {
         ));
     }
     if fresh.identity_key.as_deref() != Some(expected) || !fresh.can_launch {
-        return Err(ApiError::new("IDENTITY_DRIFT", "실제 계정이 등록된 계정과 같지 않아 한도를 반영하지 않았어요. 프로필을 확인하고 다시 등록해 주세요."));
+        return Err(ApiError::new("IDENTITY_DRIFT", "실제 계정이 등록된 계정과 같지 않아 한도를 반영하지 않았어요. 원래 계정으로 '다시 로그인'해 주세요."));
     }
     Ok(())
 }

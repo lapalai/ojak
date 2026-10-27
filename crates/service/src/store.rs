@@ -1,4 +1,4 @@
-use aam_protocol::{Account, ApiError, Notice, Policy, Session, Takeover, ToolStatus};
+use aam_protocol::{Account, ApiError, DismissedProfile, Notice, Policy, Session, Takeover, ToolStatus};
 use rusqlite::{params, Connection, OptionalExtension};
 use serde::{de::DeserializeOwned, Serialize};
 use sha2::{Digest, Sha256};
@@ -81,7 +81,7 @@ impl Store {
                 CREATE TABLE metadata (key TEXT PRIMARY KEY, body TEXT NOT NULL);
                 CREATE TABLE leases (
                     id TEXT PRIMARY KEY,
-                    account_id TEXT NOT NULL REFERENCES accounts(id),
+                    account_id TEXT NOT NULL,
                     request_id TEXT NOT NULL UNIQUE,
                     client_id TEXT NOT NULL,
                     payload_hash TEXT NOT NULL,
@@ -99,6 +99,7 @@ impl Store {
                 )
                 .map_err(db_error)?;
         }
+        drop_lease_account_reference(&connection)?;
         // 계정별 lease 참조 조회(계정 삭제의 외래키·이력 보존 검사)용 색인. 컬럼과 스키마 버전은 그대로다.
         connection
             .execute_batch(
@@ -114,6 +115,41 @@ impl Store {
         }
         Ok(Self { connection })
     }
+}
+
+/// 계정을 끊어도 세션 이력(`leases`)은 남긴다. 이전 판이 만든 `leases.account_id → accounts(id)` 외래키는
+/// 이력이 있는 계정의 삭제를 막으므로, 한 번만 같은 열·색인의 표로 다시 만들어 외래키만 뺀다. 이력 본문은 계정 사본을 함께 들고 있다.
+fn drop_lease_account_reference(connection: &Connection) -> Result<(), ApiError> {
+    let references: i64 = connection
+        .query_row("SELECT COUNT(*) FROM pragma_foreign_key_list('leases')", [], |row| row.get(0))
+        .map_err(db_error)?;
+    if references == 0 {
+        return Ok(());
+    }
+    connection
+        .execute_batch(
+            "BEGIN IMMEDIATE;
+            CREATE TABLE leases_rebuilt (
+                id TEXT PRIMARY KEY,
+                account_id TEXT NOT NULL,
+                request_id TEXT NOT NULL UNIQUE,
+                client_id TEXT NOT NULL,
+                payload_hash TEXT NOT NULL,
+                capability TEXT NOT NULL,
+                policy_revision INTEGER NOT NULL,
+                binding_hash TEXT NOT NULL,
+                account_body TEXT NOT NULL,
+                expires_at INTEGER NOT NULL,
+                heartbeat_at INTEGER NOT NULL,
+                manual INTEGER NOT NULL,
+                body TEXT NOT NULL
+            );
+            INSERT INTO leases_rebuilt SELECT id,account_id,request_id,client_id,payload_hash,capability,policy_revision,binding_hash,account_body,expires_at,heartbeat_at,manual,body FROM leases;
+            DROP TABLE leases;
+            ALTER TABLE leases_rebuilt RENAME TO leases;
+            COMMIT;",
+        )
+        .map_err(db_error)
 }
 
 pub(crate) fn metadata<T: DeserializeOwned>(
@@ -160,6 +196,16 @@ pub(crate) fn policy(connection: &Connection) -> Result<Policy, ApiError> {
 }
 pub(crate) fn takeovers(connection: &Connection) -> Result<Vec<Takeover>, ApiError> {
     Ok(metadata(connection, "takeovers")?.unwrap_or_default())
+}
+/// 사용자가 연결을 끊어 자동 탐색에서 뺀 native 프로필 목록.
+pub(crate) fn dismissed_profiles(connection: &Connection) -> Result<Vec<DismissedProfile>, ApiError> {
+    Ok(metadata(connection, "dismissedProfiles")?.unwrap_or_default())
+}
+pub(crate) fn set_dismissed_profiles(
+    connection: &Connection,
+    records: &[DismissedProfile],
+) -> Result<(), ApiError> {
+    set_metadata(connection, "dismissedProfiles", &records)
 }
 pub(crate) fn set_takeovers(
     connection: &Connection,

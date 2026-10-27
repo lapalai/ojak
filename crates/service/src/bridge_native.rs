@@ -977,7 +977,7 @@ pub(super) fn failure(code: &str) -> (u16, &'static str) {
         "NATIVE_AUTH_UNAVAILABLE" => (503, "Claude 공식 CLI가 인증 갱신 확인에 오류로 응답했어요. 로그인이 거절됐다고 확인된 것은 아니에요. 잠시 뒤 다시 시도해 주세요. 다시 로그인할 필요는 없어요."),
         "NATIVE_REFRESH_UNEXPECTED" => (503, "Claude 공식 CLI의 인증 갱신 응답이 예상한 형식이 아니에요. 공식 CLI 버전을 확인해 주세요."),
         "NATIVE_METADATA_UNAVAILABLE" => (503, "공식 CLI가 계정 정보 조회를 거부했어요. 잠시 뒤 다시 시도해 주세요. 다시 로그인할 필요는 없어요."),
-        "PROFILE_UNVERIFIED" | "PROFILE_UNBOUND" | "PROFILE_BINDING_CHANGED" | "PROFILE_INVALID" => (409, "공식 CLI의 프로필 또는 워크스페이스 연결을 확인하지 못했어요. Ojak → 연결에서 원래 프로필을 확인하고 다시 등록해 주세요."),
+        "PROFILE_UNVERIFIED" | "PROFILE_UNBOUND" | "PROFILE_BINDING_CHANGED" | "PROFILE_INVALID" => (409, "공식 CLI의 프로필 또는 워크스페이스 연결을 확인하지 못했어요. Ojak → 연결에서 원래 프로필 폴더를 확인해 주세요. 폴더를 옮겼다면 원래 경로로 되돌리거나, 이 계정의 연결을 끊은 뒤 새 경로를 연결해 주세요."),
         "PROBE_TIMEOUT" => (503, "공식 CLI 조회가 제한 시간 안에 끝나지 않았어요. 잠시 뒤 다시 시도해 주세요. 다시 로그인할 필요는 없어요."),
         "PROBE_START_FAILED" => (503, "공식 CLI 프로세스를 시작하지 못했어요. 잠시 뒤 다시 시도하고, 계속되면 설치와 실행 권한을 확인해 주세요. 다시 로그인할 필요는 없어요."),
         "PROBE_IO" | "PROBE_CLOSED" | "CLI_INSPECTION_FAILED" => (503, "공식 CLI와의 통신이 중간에 끊겼어요. 잠시 뒤 다시 시도해 주세요. 다시 로그인할 필요는 없어요."),

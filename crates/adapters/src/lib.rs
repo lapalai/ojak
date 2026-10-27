@@ -19,7 +19,7 @@ pub use settings::{
 };
 
 use aam_protocol::{
-    new_id, now_ms, Account, ApiError, IdentityEvidence, LaunchIntent, LaunchPlan, Notice, Paths,
+    new_id, now_ms, Account, ApiError, DismissedProfile, IdentityEvidence, LaunchIntent, LaunchPlan, Notice, Paths,
     QuotaBucket, ToolStatus, NATIVE_DEFAULT_MODEL,
 };
 use native::{blank_account, inspect, profile_env, OMP_GATE};
@@ -170,7 +170,7 @@ fn refresh_bound(old: &Account, binary: Option<&Path>) -> (Account, bool) {
         fresh.binary_path = bound.binary_path.clone();
         if let Some(expected) = old.identity_key.as_ref() {
             if fresh.identity_key.as_ref() != Some(expected) {
-                return Err(ApiError::new("IDENTITY_DRIFT", "이 프로필의 계정이 등록된 계정과 다르거나 로그아웃됐어요. 기존 연결은 바꾸지 않았어요. 공식 로그인 후 다시 등록해 주세요."));
+                return Err(ApiError::new("IDENTITY_DRIFT", "이 프로필의 계정이 등록된 계정과 다르거나 로그아웃됐어요. 기존 연결은 바꾸지 않았어요. 원래 계정으로 '다시 로그인'해 주세요."));
             }
         }
         // 식별자가 없던 기본 프로필도 공식 CLI가 로그인을 확인하면 같은 행에서 연결을 확정한다.
@@ -737,11 +737,38 @@ fn omp_observation(provider: &str, metadata: &Value, existing: &[Account]) -> Ac
 }
 
 
+/// 아직 등록되지 않은 native 프로필 후보: 기본 프로필(`~/.claude`, `~/.codex`)과 Ojak이 만든 관리 프로필.
+/// 이미 등록된 경로와 사용자가 연결을 끊은(`dismissed`) 경로는 뺀다.
+/// 등록되지 않은 폴더의 복구 검사는 명시적 새로고침/빈 카탈로그에서만 하며, 정기 사용량 갱신마다
+/// 이미 대체된 관리 프로필까지 CLI로 재검사하지 않는다. 기본 프로필은 항상 후보다.
+pub fn discovery_candidates(
+    home: &Path,
+    paths: &Paths,
+    existing: &[Account],
+    dismissed: &[DismissedProfile],
+    force: bool,
+) -> Vec<(String, PathBuf)> {
+    let mut candidates = if force || existing.is_empty() { profiles::managed_profiles(paths) } else { Vec::new() };
+    for (tool, folder) in [("claude", ".claude"), ("codex", ".codex")] {
+        if let Ok(profile) = safety::canonical_profile(&home.join(folder)) {
+            candidates.push((tool.to_owned(), profile));
+        }
+    }
+    candidates.retain(|(tool, profile)| {
+        let path = profile.to_str();
+        !existing.iter().any(|account| &account.tool == tool && account.profile_path.as_deref() == path)
+            // 사용자가 연결을 끊은 폴더는 명시적으로 다시 연결하기 전까지 자동 탐색하지 않는다.
+            && !dismissed.iter().any(|entry| &entry.tool == tool && Some(entry.path.as_str()) == path)
+    });
+    candidates
+}
+
 /// 각 native 프로필의 인증→사용량을 이어서 실행하고, 독립 소스 결과는 완료 즉시 반영한다.
 /// CLI 조회는 최대 4개 native worker를 사용하며, 정기 조회는 신선한 관측을 재사용한다.
 pub fn scan(
     paths: &Paths,
     existing: &[Account],
+    dismissed: &[DismissedProfile],
     force: bool,
     inventory: impl FnOnce() -> Result<Option<Vec<Account>>, ApiError> + Send,
     publish: impl FnMut(&Account) -> Result<(), ApiError> + Send,
@@ -753,21 +780,10 @@ pub fn scan(
     let binaries: BTreeMap<_, _> = ["claude", "codex", "omp"].into_iter()
         .filter_map(|tool| process::discover(paths, tool).map(|binary| (tool, binary)))
         .collect();
-    let mut discovered = Vec::new();
-    // 등록되지 않은 폴더의 복구 검사는 명시적 새로고침/빈 카탈로그에서만 한다.
-    // 정기 사용량 갱신마다 이미 대체된 프로필까지 CLI로 재검사하지 않는다.
-    let mut candidates = if force || existing.is_empty() { profiles::managed_profiles(paths) } else { Vec::new() };
     let managed_root = paths.profiles.canonicalize().ok();
-    for (tool, folder) in [("claude", ".claude"), ("codex", ".codex")] {
-        if let Ok(profile) = safety::canonical_profile(&home.join(folder)) {
-            candidates.push((tool.to_owned(), profile));
-        }
-    }
-    for (tool, profile) in candidates {
+    let mut discovered = Vec::new();
+    for (tool, profile) in discovery_candidates(&home, paths, existing, dismissed, force) {
         let Some(binary) = binaries.get(tool.as_str()) else { continue };
-        if existing.iter().any(|account| account.tool == tool && account.profile_path.as_deref() == profile.to_str()) {
-            continue;
-        }
         let managed = profile.parent() == managed_root.as_deref();
         let label = if managed { tool_details(&tool).0.to_owned() } else { format!("{} · 기본 프로필", tool_details(&tool).0) };
         discovered.push((blank_account(&tool, &profile, binary, &label), managed));
@@ -1016,7 +1032,7 @@ fn verify_at(account: &Account, cwd: Option<&Path>) -> Result<IdentityEvidence, 
         )
     })?;
     if fresh.identity_key.as_ref() != Some(expected) || !fresh.can_launch {
-        return Err(ApiError::new("IDENTITY_DRIFT", "실제 계정이 등록된 계정과 같지 않아 실행을 막았어요. 프로필을 확인하고 다시 등록해 주세요."));
+        return Err(ApiError::new("IDENTITY_DRIFT", "실제 계정이 등록된 계정과 같지 않아 실행을 막았어요. 원래 계정으로 '다시 로그인'해 주세요."));
     }
     Ok(IdentityEvidence {
         identity_key: expected.clone(),
@@ -1107,6 +1123,19 @@ pub fn build_launch_plan(account: &Account, intent: &LaunchIntent) -> Result<Lau
     })
 }
 
+/// 선두 `~/`(또는 `~`만)를 사용자 홈으로 풀어 준다. 그 밖의 상대 경로는 그대로 두어 `canonical_profile`이 거절한다.
+fn expand_home(path: &str, home: impl FnOnce() -> Result<PathBuf, ApiError>) -> Result<PathBuf, ApiError> {
+    let rest = if path == "~" {
+        Some("")
+    } else {
+        path.strip_prefix("~/").or_else(|| path.strip_prefix("~\\").filter(|_| cfg!(windows)))
+    };
+    match rest {
+        Some(rest) => Ok(home()?.join(rest)),
+        None => Ok(PathBuf::from(path)),
+    }
+}
+
 pub fn register(
     paths: &Paths,
     tool: &str,
@@ -1115,7 +1144,7 @@ pub fn register(
 ) -> Result<Account, ApiError> {
     known_tool(tool)?;
     validate_label(label)?;
-    let profile = safety::canonical_profile(Path::new(profile_path))?;
+    let profile = safety::canonical_profile(&expand_home(profile_path, user_home)?)?;
     let binary = process::discover(paths, tool).ok_or_else(|| {
         ApiError::new(
             "BINARY_MISSING",
@@ -1187,6 +1216,31 @@ pub fn omp_credential_identity(
         }
     }
     quota::identity_from_metadata(provider, &Value::Object(meta))
+}
+
+#[cfg(test)]
+mod home_expansion_tests {
+    use super::*;
+
+    fn home() -> Result<PathBuf, ApiError> {
+        Ok(PathBuf::from("/home/person"))
+    }
+
+    #[test]
+    fn only_a_leading_tilde_slash_or_bare_tilde_is_expanded() {
+        assert_eq!(expand_home("~", home).unwrap(), PathBuf::from("/home/person"));
+        assert_eq!(expand_home("~/.claude-work", home).unwrap(), PathBuf::from("/home/person/.claude-work"));
+        for untouched in ["/abs/path", "foo/bar", "./x", "~other/x", "a/~/b", "~x"] {
+            assert_eq!(expand_home(untouched, home).unwrap(), PathBuf::from(untouched));
+        }
+    }
+
+    #[test]
+    fn a_missing_home_is_reported_only_when_it_is_needed() {
+        let missing = || Err(ApiError::new("HOME_MISSING", "홈 없음"));
+        assert_eq!(expand_home("~/x", missing).unwrap_err().code, "HOME_MISSING");
+        assert!(expand_home("/abs", missing).is_ok());
+    }
 }
 
 #[cfg(test)]

@@ -5,9 +5,9 @@
 
 ## 진입점
 - `main.rs` — Windows 기본 실행/`--supervise`는 독립 감독 프로세스, `--worker`는 그 자식 서비스다. `--foreground`는 감독 없는 개발 실행이며 macOS의 기존 실행 방식은 유지한다.
-- `server::run` (`server.rs:92`) — `service.lock` 단일 인스턴스(`server.rs:112-117`), peer uid == euid 검사(`server.rs:70-77`), 연결 최대 64개(`server.rs:159`)
-- `Service::dispatch` (`lib.rs:346`) — RPC 분기
-- `Service::start_background` (`lib.rs:1557`) — reconcile 2초 주기, quota refresh 225–375초(지터), 브릿지 시작
+- `server::run` (`server.rs:104`) — `service.lock` 단일 인스턴스(`service_lifetime_lock` `server.rs:90-94`, 호출 `server.rs:126`), peer uid == euid 검사(`aam_protocol::peer_is_self`; Unix는 연결 직후 `server.rs:181`, Windows는 요청 프레임을 읽은 뒤 `server.rs:206`), 연결 최대 64개(`server.rs:184`)
+- `Service::dispatch` (`lib.rs:446`) — RPC 분기
+- `Service::start_background` (`lib.rs:1864`) — reconcile 2초 주기, quota refresh 225–375초(지터), 브릿지 시작
 
 ### Windows 복구와 런타임 진단
 - `supervisor.rs`는 작업자 종료를 확인한 뒤 1초부터 최대 60초까지 지수 간격으로 재시작한다. 연속 실패 8회면 멈추고, 120초 이상 안정적으로 실행한 작업자 뒤에는 실패 횟수를 초기화한다. 응답 지연·준비 시간 초과만으로 작업자를 죽이거나 lease를 반환하지 않는다.
@@ -16,10 +16,10 @@
 - `runtime_health.rs`는 `logs/service-health.log`에 버전·PID·시작·비정상 이전 실행·종료·재시작·메모리 수치만 기록한다. 파일당 256 KiB에서 한 번 회전한다. 패닉은 소스 위치만 남기며 패닉 메시지·오류 원문·토큰·이메일·프롬프트는 남기지 않는다. WER 미니덤프와 대응 PDB 보존 절차는 [기여 안내](../../CONTRIBUTING.md#windows-서비스-충돌-진단--service-crash-diagnostics)를 따른다.
 - Windows commit 여유를 10초마다 관측한다. 여유가 `max(512 MiB, commit 한도 × 2%)` 미만이면 새 모델 요청만 제한하며, 그 기준의 두 배 이상을 3회 연속 관측하면 해제한다. 표본 실패는 회복 연속 횟수를 초기화한다. 표본 부재·마지막 성공 표본 45초 초과·미지원 OS는 `unknown`으로 보고하고 새 요청을 막지 않는다.
 
-## RPC 메서드 (`lib.rs:346-452`)
+## RPC 메서드 (`lib.rs:446-550`)
 `status.read`의 Snapshot은 `serviceVersion`(서비스 실행 파일의 `CARGO_PKG_VERSION`)을 담는다. 앱·`aam`이 자기 버전과 비교해 덮어쓴 앱 뒤에 남은 예전 서비스를 찾는 데 쓴다. 이 필드가 없던 서비스는 응답에 빠져 있고, 받는 쪽은 '알 수 없음'(재시작 필요)으로 본다. `service.prepareUninstall`은 `aam service restart`도 쓰는 lease 검사 창구다.
 `status.read`·`quota.refresh`에 `{"observe": false}`를 주면 omp 프로세스 관측(`discover_sessions`)을 건너뛰고 저장된 상태만 돌려준다(`observedSessions`가 비고 관측 알림도 없다). 관측은 Windows에서 조회 한 번에 수십~수백 ms라, 관측 세션을 쓰지 않는 트레이·회복 감시·팝오버 조회는 이 옵션을 쓴다. 이 매개변수를 모르는 예전 서비스는 무시하고 전체 스냅샷을 돌려준다.
-`status.read`, `quota.refresh`, `service.prepareUninstall`, `service.cancelUninstall`, `service.resumeAdmission`, `route.resolve`, `route.explain`, `takeover.adopt`, `takeover.release`, `lease.validate-child`, `policy.update`, `bridge.status`, `diagnostics.export`, `account.register`, `account.update`, `lease.acquire`, `lease.starting`, `lease.started`, `lease.heartbeat`, `lease.release`, `lease.abort`, `resetCredits.read`, `resetCredits.redeem`. 나머지는 `METHOD_NOT_FOUND`.
+`status.read`, `quota.refresh`, `service.prepareUninstall`, `service.cancelUninstall`, `service.resumeAdmission`, `route.resolve`, `route.explain`, `takeover.adopt`, `takeover.release`, `lease.validate-child`, `policy.update`, `bridge.status`, `diagnostics.export`, `account.register`, `account.remove`, `account.update`, `lease.acquire`, `lease.starting`, `lease.started`, `lease.heartbeat`, `lease.release`, `lease.abort`, `resetCredits.read`, `resetCredits.redeem`. 나머지는 `METHOD_NOT_FOUND`.
 `bridge.status`는 기존 gateway·세션·차단 목록 외에 `connections{totalLimit,public,native,modelQueue}`, `authRefresh{active,waiting,limit}`, `nativeAuth[]`, `nativeErrors`를 돌려준다. 연결 lane은 `active/limit`, `longActive/longLimit`, `rejected`, `listening`, `port`, 모델 대기열은 대기·만료·본문 예약 수를 담는다. `nativeAuth`의 익명 키·실패 코드·실제 단계·소요 시간·회복 횟수로 연결 혼잡과 공식 CLI 인증 작업 실패를 구분한다. 상세 예산·deadline·로그 규약은 [omp-bridge](omp-bridge.md)를 따른다.
 native 인증 요청의 사전검증은 해당 계정 한 행만 읽고, 전체 계정·한도 JSON을 매번 다시 해석하지 않는다. 미확인 인증 상태는 503, 명시적인 로그인 필요는 401, 배정 제외·프로필 연결 변경은 409로 구분하며, 캐시된 자격 증명으로 검증을 건너뛰지 않는다.
 
@@ -31,8 +31,10 @@ native 인증 요청의 사전검증은 해당 계정 한 행만 읽고, 전체 
 - 확정 성공 뒤에만 기존 강제 한도 갱신을 요청한다. lease·사용 중인 세션·다른 모델 한도를 직접 해제하지 않으며, 쿠폰 사용 후 낡은 잔여량은 미확인으로 표시한다.
 
 
-## 저장소 (`store.rs:62-104`)
-SQLite `state.sqlite3`, WAL, `synchronous=FULL`, busy_timeout 5초. 테이블 `accounts`, `metadata`, `leases`. `user_version` 1보다 크면 거부.
+## 저장소 (`store.rs:61-116`)
+SQLite `state.sqlite3`(`crates/protocol/src/lib.rs:107`), WAL·`synchronous=FULL`(`store.rs:75`), busy_timeout 5초(`store.rs:64`). 테이블 `accounts`, `metadata`, `leases`(`store.rs:80-82`). `user_version` 1보다 큰 값은 `SCHEMA_VERSION_UNSUPPORTED`로 거부(`store.rs:69-71`). 마이그레이션 없이 `user_version=1`(`store.rs:97`) 하나를 쓴다. Windows `cancel_stopped_uninstall`(`lib.rs:42`)의 버전 검사는 1과 다른 값에 `SCHEMA_VERSION_UNSUPPORTED`를 반환(`lib.rs:58`).
+- 보조 색인 `leases_account_id`, `leases_capacity_snapshot`, `leases_recent_history`는 `CREATE INDEX IF NOT EXISTS`로 만들어 `user_version`을 올리지 않는다(`store.rs:103-111`).
+- `metadata` 키는 `policy`, `takeovers`, `tools`, `notices`, `lastRefreshAt`, `uninstallPermit`과 `resetQuote:`·`resetRequest:`·`resetGate:` 접두사 기록이다. `accounts.body`·`leases.body`는 Account·Session JSON이고, `leases`는 본문 외에 `account_id`·`request_id`·`client_id`·`payload_hash`·`capability`·`policy_revision`·`binding_hash`·`account_body`·`expires_at`·`heartbeat_at`·`manual` 열을 따로 둔다.
 - 계정 새로고침은 DB 잠금 밖에서 병렬 조회하고 `publish_account`로 완료된 계정부터 짧게 저장한다. 진행 중 `refreshing`은 유지하며, 다른 계정을 stale로 바꾸거나 `lastRefreshAt`을 완료로 기록하지 않는다. 마지막 `apply_scan`에서 전체 조회 결과·안내·시각을 반영한다.
 - 진행 결과를 저장한 값을 다음 병합의 비교 기준으로 써서 새 사용량을 자기 진행 결과와 충돌시키지 않는다. 조회 중 사용자 재등록·identity 변경은 덮지 않으며, 최신 배정 포함 여부·동시 실행 설정·사용자 라벨을 유지한다.
 - `snapshot_sessions`는 SQLite에서 용량 보유 상태 전체와 최근 종료 이력 200개만 고르고 세션 본문만 해석한다. 계정 사본·capability·전체 종료 이력을 읽지 않으며, 스냅샷 가공은 DB 잠금 밖에서 수행한다. 최근 이력·용량 보유 상태에 partial index, lease의 `account_id`에 인덱스를 둔다.
@@ -41,21 +43,28 @@ SQLite `state.sqlite3`, WAL, `synchronous=FULL`, busy_timeout 5초. 테이블 `a
 
 ## Lease 상태기계
 - 용량을 점유하는 상태: `PREPARED`, `STARTING`, `ACTIVE`, `SUSPECT`, `ORPHANED` (`scheduler.rs:11-16`). 종료: `EXITED`, `ABORTED`, `FAILED`.
-- `lease.acquire` → PREPARED. `requestId` 기준 멱등, 같은 id·다른 payload는 `IDEMPOTENCY_CONFLICT` (`lib.rs:853-866`).
-- `lease.starting` → STARTING. generation 불일치 `LEASE_FENCED`, 만료 `LEASE_EXPIRED`, 정책 변경 `POLICY_CONFLICT`, 재입장 검사 실패 `ADMISSION_CHANGED`. evidence는 `preflight-verified`이고 identity_key가 같아야 한다 (`lib.rs:1140-1149`).
+- `lease.acquire` → PREPARED. `requestId` 기준 멱등, 같은 id·다른 payload는 `IDEMPOTENCY_CONFLICT` (`lib.rs:1021`).
+- `lease.starting` → STARTING.
+  - generation 불일치 `LEASE_FENCED`(`lib.rs:1256`), 만료 `LEASE_EXPIRED`(`lib.rs:1282`), 정책 변경 `POLICY_CONFLICT`(`lib.rs:1291`), 재입장 검사 실패 `ADMISSION_CHANGED`(`lib.rs:1333`).
+  - evidence tier는 `preflight-verified`(`lib.rs:1335`), `identity_key`는 계정의 현재 값과 비교(`lib.rs:1336`).
 - `lease.started` → 검증된 자식 프로세스면 ACTIVE, 아니면 SUSPECT.
-- reconcile(`lib.rs:1464-1565`): 타임아웃만으로 슬롯을 풀지 않는다. 불확실하면 SUSPECT/ORPHANED로 남긴다. 자손 기록(`backgroundProcesses`)이 없는 세션은 기록된 process·supervisor가 모두 이전 부팅이면(`process::all_from_previous_boot`) EXITED로 반환한다. 같은 부팅 안에서는 null을 빈 목록으로 보지 않는다. 부팅 기반 반환은 macOS만. Windows는 `lease.started` 때 연 Job 핸들의 활성 프로세스 수 0만 EXITED 근거로 쓴다(`Service::job_finished`, [windows-port](../specs/2026-09-29-windows-port.md)).
-- capability는 UUID 2개 연결, 상수 시간 비교, 불일치 `LEASE_FORBIDDEN` (`lib.rs:201-217`).
-- 환경변수: `AAM_PREPARED_TIMEOUT_MS`(기본 30000), `AAM_SUSPECT_THRESHOLD_MS`(기본 45000) (`lib.rs:242-243`).
+- reconcile(`lib.rs:1736-1863`):
+  - 시간 초과는 슬롯 반환 근거로 쓰지 않음(`lib.rs:1848`). 불확실한 세션은 SUSPECT/ORPHANED로 남긴다(`lib.rs:1823, 1848`).
+  - 자손 기록(`backgroundProcesses`)이 없는 세션의 EXITED 반환 근거는 `process::all_from_previous_boot`의 참 결과(`lib.rs:1808`). 같은 부팅 안에서는 null을 빈 목록으로 보지 않는다.
+  - macOS 이외 빌드에서 `all_from_previous_boot`는 false를 반환(`process.rs:24-26`).
+  - Windows는 `lease.started` 때 연 Job 핸들의 활성 프로세스 수 0을 EXITED 근거로 사용(`Service::job_finished` `lib.rs:1371`, [windows-port](../specs/2026-09-29-windows-port.md)).
+- capability는 UUID 2개 연결, 상수 시간 비교, 불일치 `LEASE_FORBIDDEN` (`lib.rs:295-311`).
+- 환경변수: `AAM_PREPARED_TIMEOUT_MS`(기본 30000), `AAM_SUSPECT_THRESHOLD_MS`(기본 45000) (`lib.rs:338-339`).
 
 ## 배정 (`scheduler.rs`)
-- 동시성은 identity 그룹(같은 provider + identity_key 또는 omp credential pin) 단위로 센다 (`scheduler.rs:181-210`).
+- 동시성은 identity 그룹(같은 provider + identity_key 또는 omp credential pin) 단위로 센다 (`scheduler.rs:170-179,243-262`).
 - `Account.maxConcurrency`는 기본 1이며 `account.update` 또는 사용 현황 → 배정 설정에서 1~32 또는 0(개수 제한 없음)을 지정한다. 0·2 이상은 `supports_shared_profile_concurrency`가 확인한 Claude 계정만 허용하며 미검증 도구는 `ADAPTER_UNVERIFIED`로 거절한다. 같은 identity의 실행 가능한 바인딩 중 양수 제한이 하나라도 있으면 가장 작은 제한을 유지하고, 모두 0이면 개수로 배정을 막지 않는다. 화면은 표시 그룹과 별개로 정확한 identity/pin별 연결을 나눠 변경하며, 기존 값은 사용자가 선택하기 전까지 유지한다. quota·인증·프로젝트·중복 재개 보호와 lease 추적은 그대로다. 근거: Claude 공식 [여러 세션 병렬 실행](https://code.claude.com/docs/en/best-practices#run-multiple-claude-sessions)·[worktrees](https://code.claude.com/docs/en/worktrees).
 - 안전 여유량은 소프트 우선순위다. 하드 제약을 통과한 roomy 후보가 있으면 reserve 후보를 뒤로 보내고(`RESERVE_DEPRIORITIZED`), 없으면 남은 한도를 사용한다(`RESERVE_FALLBACK`). 100% 사용은 계속 `QUOTA_EXHAUSTED`로 제외한다. 명시 계정·프로젝트 pin·재개 제약은 유지하며 공급자 선호 pin보다 roomy 후보가 우선한다.
-- 자동 배정은 신선한 관측(`stale_after_seconds` 기본 900초)과 미래 reset이 필요하다. pinned 실행은 신선도 검사를 건너뛴다 (`scheduler.rs:259-264,319-344`).
+- 자동 배정 신선도 입력: `stale_after_seconds` 초기값 900초(`crates/protocol/src/lib.rs:347`), 비교는 `scheduler.rs:360-363`.
+- 오래된 관측은 `QUOTA_STALE`(`scheduler.rs:389`), 리셋 시각 미확인은 `RESET_UNCONFIRMED`(`scheduler.rs:404`)로 배제 사유가 붙음. pinned 실행은 `manual` 분기라 이 검사 블록을 건너뛴다(`scheduler.rs:382`).
 - `lease.acquire`의 `readiness`는 계정 없음·미확인/빈 한도·오래된 한도에 조회를 시작한다. 배정 가능 여부는 기존 `scheduler::decide_with`를 재사용하며, 실제 선택 가능한 계정이 있으면 다른 공급자의 조회를 기다리지 않는다. 필요한 조회만 최대 20초 기다리고 미확인 상태의 배정발 조회는 마지막 시도부터 15초 간격으로 합친다. 마지막 전체 scan 직후 첫 실행도 한도 복구를 시도할 수 있다.
 - 새 배정의 대기 판단은 용량 보유 세션 본문만 읽는다. 재개는 기존 `normalize_resume`·라우팅으로 원래 계정을 확정하고 그 계정의 한도 회복을 기다린다. 이미 처리한 요청 ID는 새 조회 없이 기존 멱등 결과를 사용한다. 배정 실패 메시지는 계정 정보 없이 제외 코드만 추가하며, `NO_ELIGIBLE_ACCOUNT`와 실행기의 기존 원본 통과 계약은 유지한다.
-- 기본 모델 요청은 모델 전용 버킷이 막지 않고 우선순위만 낮춘다 (`scheduler.rs:26-42,272-298`).
+- 기본 모델 요청은 모델 전용 버킷이 막지 않고 우선순위만 낮춘다 (`scheduler.rs:27-55,312-358`).
 - `quota_summary.rs`가 계정 그룹별 `available/reserve/partial/resting/excluded/login/unknown`을 `Snapshot.quotaSummaries`로 제공한다. 최신 bucket과 실제 bridge 차단을 합치되, 이메일 근거가 여러 workspace에 걸치면 차단을 억지로 붙이지 않는다. 모델별 한도만 있는 공급자도 지원한다. 모델·프로젝트·슬롯이 없는 요약이므로 배정 허용은 별도 scheduler 판단이다.
 - bridge 차단의 `quota` 구분을 요약에 유지한다. 오래된 버킷 때문에 소진된 한도의 이름을 특정하지 못하더라도 실제 사용량 제한을 요청 속도 제한으로 바꾸지 않으며, 공급자가 지정한 차단 시각은 그대로 유지한다.
 - 곧 리셋(`quota_summary::expiring`): 모델 전용·5시간 같은 짧은 한도를 뺀 신선한 공용 한도가 `expiring_window_hours`(기본 48) 안에 리셋되고, 안전 여유량을 뺀 남은 양이 `expiring_min_percent`(기본 30) 이상이면 `quotaSummaries[].expiring`(라벨·리셋 시각·쓸 수 있는 %·시간당 %)을 채운다. 여러 개면 시간당 써야 할 양이 가장 큰 것 하나. `resting`/`unknown` 요약에는 붙이지 않는다.
@@ -64,7 +73,7 @@ SQLite `state.sqlite3`, WAL, `synchronous=FULL`, busy_timeout 5초. 테이블 `a
 - `quotaSummaries`는 매 스냅샷마다 다시 계산한다. 옵트인이 켜져 있고 같은 도구의 구독 한도가 남은 묶음이 없을 때 `resting` 묶음이 `kind: "credits"`/`"extra"`가 되고(`credits.active`/`extraUsage.active`), 옵트인이 꺼져 있으면 `resting`/`available` 그대로 두고 `credits`/`extraUsage` 사실(`active:false`)만 붙여 화면이 중립 안내("크레딧 있음 (꺼짐)")를 보여 준다. 크레딧 `balance`는 숫자로 읽힐 때만 보관하며 화면은 "N개"로 반올림한다. 금액(USD)은 추가 사용량에만 쓴다.
 - 한계(미검증): 이 Mac의 어떤 계정도 `has_credits=true`나 Claude extra usage 켜짐을 관측한 적이 없다. 공식 JSON 스키마(`codex app-server generate-json-schema`의 `CreditsSnapshot`)와 omp `claude.ts` 소스의 필드 형태로 만든 fixture로만 시험했다. Ojak은 자신이 라우팅하는 새 세션·요청만 통제한다. 이미 실행 중인 공식 Codex·Claude Code 세션이 구독 한도 뒤에 과금 경로로 넘어가는 것은 공급자가 정하므로 Ojak이 멈출 수 없다. 쓴 금액도 Ojak은 볼 수 없다.
 
-## 라우팅 (`routes.rs:189-427`)
+## 라우팅 (`routes.rs:191-461`)
 우선순위: takeover → resume/parent(원래 계정 고정, 다르면 `SWITCH_UNSUPPORTED`) → 가장 깊은 폴더 규칙 → 저장소 규칙(git) → 명시 계정/전역. 경로가 바뀌면 `ROUTE_CHANGED`.
 
 ### 다른 계정에서 이어 가기 (Claude Code·Codex)
@@ -80,75 +89,74 @@ SQLite `state.sqlite3`, WAL, `synchronous=FULL`, busy_timeout 5초. 테이블 `a
 - omp 브릿지는 진행 중 대화(sticky)를 유지하고, 새 대화만 고정 계정(`Candidate.pinned`)을 먼저 준다. 진행 중 대화는 프롬프트 캐시를 지키려고 안전 여유량 안쪽이어도 같은 계정에 두고, 소진·차단·장애로 후보에서 빠질 때만 옮긴다. 새 대화는 고정 계정이 소진·차단·여유량 안쪽이면 다른 계정으로 간다.
 - 이전 판의 도구별 `preferredAccounts`는 읽을 때 공급자 키로 옮긴다(`store::policy`).
 
-## 진단 (`diagnostics.rs:47-141`)
+## 진단 (`diagnostics.rs:48-150`)
 `redact:false`는 거부. 허용 필드만 다시 조립하고 계정·세션은 임시 별칭으로 바꾼다.
 
 ## 테스트
-`crates/service/src/tests.rs` + `src/tests/{allocation,routing,takeover}.rs`. 다수가 macOS 전용.
+`crates/service/src/tests.rs` + `src/tests/{allocation,credits,routing,takeover}.rs`. 다수가 macOS 전용.
 
 ## Screen Flow / Lifecycle
 <!-- screen-flows-v3: 2026-09-27, type=web-backend -->
 
 | Stage | 상태 | 근거 |
 |---|---|---|
-| Account.Create | ✅ | RPC account.register lib.rs:405 → Service::register lib.rs:722-836 (label validation 723-731, SESSION_BUSY guard 754-764, supersede/policy rewrite 765-832, save |
-| Account.Read | ✅ | status.read lib.rs:348 → snapshot lib.rs:255-345 (store.rs accounts(), stale-bucket marking in snapshot_with_observations lib.rs:263-290). Callers: apps/desktop |
+| Account.Create | ✅ | RPC account.register lib.rs:514 → Service::register lib.rs:829-944 (label validation 830-838, SESSION_BUSY guard 862-871, supersede/policy rewrite 873-940, save |
+| Account.Read | ✅ | status.read lib.rs:449-450 → snapshot lib.rs:353-445 (store.rs accounts(), stale-bucket marking in snapshot_with_observations lib.rs:386-401). Callers: apps/desktop |
 | Account.Update | ✅ | account.update → update_account (enabled; maxConcurrency 0=제한 없음 또는 1..32; 공유 프로필의 0·2 이상은 검증된 Claude만 허용) |
-| Account.Delete | ⚡ | dispatch has no account.delete/remove RPC (lib.rs:346-453), and no UI/CLI caller exists. Deletion is internal only: register supersede DELETE lib.rs:774 plus po |
-| Policy/ProjectRoute.Create | ✅ | Singleton policy seeded with Policy::default at store.rs:102-104. Routes are created through policy.update lib.rs:402 → update_policy lib.rs:592-594 → routes::v |
-| Policy/ProjectRoute.Read | ✅ | Snapshot.policy (lib.rs:263-345, store.rs policy()). route.resolve/route.explain lib.rs:364-398 → routes::resolve routes.rs:189 and scheduler::decide_with sched |
-| Policy/ProjectRoute.Update | ✅ | update_policy lib.rs:503-607: CAS on expected_revision (POLICY_CONFLICT lib.rs:510-515), per-field validation, revision++ and set_metadata lib.rs:604. UI: apps/ |
-| Policy/ProjectRoute.Delete | ✅ | Route removal is policy.update with a filtered list: apps/desktop/src/AllocationSettings.tsx:140 (routes.filter → save). Policy itself is a non-deletable singleton. Dan |
-| Lease/Session.Create | ✅ | lease.acquire lib.rs:407-442 (stale-quota refresh wait) → acquire lib.rs:837-1016: idempotent by request_id (IDEMPOTENCY_CONFLICT lib.rs:856), admission_allowed |
-| Lease/Session.Read | ✅ | status.read sessions: every capacity-holding lease plus the latest 200 terminal ones (lib.rs:291-300, cap at 298). lease.validate-child lib.rs:401 → managed_ses |
-| Lease/Session.Update | ✅ | lease.starting lib.rs:443 → starting lib.rs:1025-1163 (authorize lib.rs:201-217, generation fence, expiry→ABORTED lib.rs:1081-1082, POLICY_CONFLICT lib.rs:1097, |
-| Lease/Session.Delete | ✅ | lease.release/lease.abort lib.rs:446-447 → finish lib.rs:1259-1338: PREPARED→ABORTED lib.rs:1308-1309, spawn-failed→FAILED lib.rs:1316, foreground-confirmed→EXI |
-| Takeover.Create | ✅ | takeover.adopt lib.rs:399 → adopt_takeover lib.rs:609-664 (checked() requires claude plus UUID lib.rs:95-121, aam_adapters::session_owner proof, rejects already |
-| Takeover.Read | ✅ | Snapshot.takeovers, filtered to not-yet-managed conversations, lib.rs:318-328 and 343. CLI aam takeover list crates/launcher/src/main.rs:428-446. Desktop declar |
-| Takeover.Update | ❌ | dispatch has no takeover.update RPC (lib.rs:346-453). Re-adopting drops the same tool+native record (filter lib.rs:647-655) and pushes a new one (lib.rs:660), s |
-| Takeover.Delete | ✅ | takeover.release lib.rs:400 → release_takeover lib.rs:665-689 (TAKEOVER_NOT_FOUND when nothing was removed, set_takeovers lib.rs:686). Records that are already  |
+| Account.Delete | ✅ | `account.remove {id}` → `remove_account`(lib.rs). claude·codex 행만(omp는 `INVALID_PARAMS`), 용량을 쥔 세션이 있으면 `SESSION_BUSY`, 없는 id는 `ACCOUNT_NOT_FOUND`. 한 Immediate 트랜잭션에서 행 삭제 + `forget_account` + 그 계정에 고정된 `projectRoutes` 삭제(응답 `removedRoutes`) + 정책 revision 증가(바뀐 때만) + 그 계정의 인계 등록·`resetQuote:<id>` 캐시 삭제 + 프로필 `{tool,path}`를 metadata `dismissedProfiles`에 추가. lease 이력은 남긴다(`leases.account_id` 외래키는 `store.rs drop_lease_account_reference`가 한 번 제거). 스캔은 `dismissedProfiles`의 기본·관리 프로필을 후보에서 빼고(`adapters::discovery_candidates`), 같은 경로의 `account.register` 성공이 그 기록을 푼다. CLI `aam account remove --account <ID>`. register supersede의 내부 DELETE는 별도. |
+| Policy/ProjectRoute.Create | ✅ | Singleton policy seeded with Policy::default at store.rs:112-114. Routes are created through policy.update lib.rs:511 → update_policy lib.rs:593-720 → routes::v |
+| Policy/ProjectRoute.Read | ✅ | Snapshot.policy (lib.rs:366-445, store.rs policy()). route.resolve/route.explain lib.rs:473-507 → routes::resolve routes.rs:191 and scheduler::decide_with sched |
+| Policy/ProjectRoute.Update | ✅ | update_policy lib.rs:593-720: CAS on expected_revision (POLICY_CONFLICT lib.rs:600-605), per-field validation, revision++ and set_metadata lib.rs:717. UI: apps/ |
+| Policy/ProjectRoute.Delete | ✅ | Route removal is policy.update with a filtered list: apps/desktop/src/AllocationSettings.tsx:210 (routes.filter → save). Policy itself is a non-deletable singleton. Dan |
+| Lease/Session.Create | ✅ | lease.acquire lib.rs:516-539 (stale-quota refresh wait) → acquire lib.rs:1002-1210: idempotent by request_id (IDEMPOTENCY_CONFLICT lib.rs:1021), admission_allowed |
+| Lease/Session.Read | ✅ | status.read sessions: every capacity-holding lease plus the latest 200 terminal ones (snapshot_sessions(…, 200) lib.rs:378). lease.validate-child lib.rs:510 → managed_ses |
+| Lease/Session.Update | ✅ | lease.starting lib.rs:540 → starting lib.rs:1219-1358 (authorize lib.rs:295-311, generation fence, expiry→ABORTED lib.rs:1275-1276, POLICY_CONFLICT lib.rs:1291, |
+| Lease/Session.Delete | ✅ | lease.release/lease.abort lib.rs:543-544 → finish lib.rs:1479-1577: PREPARED→ABORTED lib.rs:1530-1531, spawn-failed→FAILED lib.rs:1538, foreground-confirmed→EXI |
+| Takeover.Create | ✅ | takeover.adopt lib.rs:508 → adopt_takeover lib.rs:722-777 (checked() requires claude plus UUID lib.rs:158-180, aam_adapters::session_owner proof, rejects already |
+| Takeover.Read | ✅ | Snapshot.takeovers, filtered to not-yet-managed conversations, lib.rs:417-428 and 441. CLI aam takeover list crates/launcher/src/main.rs:614-632. Desktop declar |
+| Takeover.Update | ❌ | dispatch has no takeover.update RPC (lib.rs:446-550). Re-adopting drops the same tool+native record (filter lib.rs:761-768) and pushes a new one (lib.rs:773), s |
+| Takeover.Delete | ✅ | takeover.release lib.rs:509 → release_takeover lib.rs:778-802 (TAKEOVER_NOT_FOUND when nothing was removed, set_takeovers lib.rs:799). Records that are already  |
 
 ```mermaid
 stateDiagram-v2
-  [*] --> PREPARED: lease.acquire (lib.rs:1009)
-  PREPARED --> STARTING: lease.starting (lib.rs:1151)
-  PREPARED --> ABORTED: expiry / release / abort / restart reconcile (lib.rs:224, 1082, 1309, 1505-1512)
-  STARTING --> ACTIVE: lease.started verified (lib.rs:1233)
+  [*] --> PREPARED: lease.acquire (lib.rs:1200)
+  PREPARED --> STARTING: lease.starting (lib.rs:1346)
+  PREPARED --> ABORTED: expiry / release / abort / restart reconcile (lib.rs:318, 1276, 1531, 1795-1800)
+  STARTING --> ACTIVE: lease.started verified (lib.rs:1453)
   STARTING --> SUSPECT: started unverified / heartbeat stale / release unconfirmed
-  STARTING --> FAILED: lease.abort spawn-failed (lib.rs:1316)
+  STARTING --> FAILED: lease.abort spawn-failed (lib.rs:1538)
   SUSPECT --> FAILED: lease.abort spawn-failed, no process
-  SUSPECT --> ACTIVE: lease.started / reconcile alive (lib.rs:1539)
-  ORPHANED --> ACTIVE: lease.started / reconcile alive (lib.rs:1539)
-  ACTIVE --> SUSPECT: child dead + supervisor alive / heartbeat stale (lib.rs:1527, 1541)
-  ACTIVE --> ORPHANED: supervisor dead / background unverified (lib.rs:1323, 1529-1534)
-  SUSPECT --> ORPHANED: child dead + supervisor dead (lib.rs:1529)
-  ORPHANED --> SUSPECT: release unconfirmed, process not alive (lib.rs:1325)
-  ACTIVE --> EXITED: release fg-confirmed / background finished (lib.rs:1319, 1514)
+  SUSPECT --> ACTIVE: lease.started / reconcile alive (lib.rs:1846)
+  ORPHANED --> ACTIVE: lease.started / reconcile alive (lib.rs:1846)
+  ACTIVE --> SUSPECT: child dead + supervisor alive / heartbeat stale (lib.rs:1833, 1847)
+  ACTIVE --> ORPHANED: supervisor dead / background unverified (lib.rs:1545, 1823, 1837)
+  SUSPECT --> ORPHANED: child dead + supervisor dead (lib.rs:1835)
+  ORPHANED --> SUSPECT: release unconfirmed, process not alive (lib.rs:1547)
+  ACTIVE --> EXITED: release fg-confirmed / background finished (lib.rs:1541, 1821)
   SUSPECT --> EXITED: release fg-confirmed / background finished
-  ORPHANED --> EXITED: release fg-confirmed / background finished / all identities from previous boot (lib.rs:1512)
+  ORPHANED --> EXITED: release fg-confirmed / background finished / previous-boot identities (lib.rs:1818)
   ABORTED --> [*]
   FAILED --> [*]
   EXITED --> [*]
-  note right of ORPHANED: holds capacity (scheduler.rs:11-15), never released by timeout
+  note right of ORPHANED: holds capacity (scheduler.rs:11-16), timeout alone is not a release reason (lib.rs:1848)
 ```
 
 | Entity | Create | Read | Update | Delete |
 |---|---|---|---|---|
-| Account | ✅ account.register | ✅ status.read | ✅ account.update (Claude maxConcurrency exposed in AllocationSettings) | ⚡ internal only |
+| Account | ✅ account.register | ✅ status.read | ✅ account.update (Claude maxConcurrency exposed in AllocationSettings) | ✅ account.remove (claude·codex) |
 | Policy/ProjectRoute | ✅ seed + policy.update | ✅ status.read, route.resolve/explain | ✅ policy.update (CAS) | ✅ policy.update filtered list |
 | Lease/Session | ✅ lease.acquire | ✅ status.read, validate-child, diagnostics | ✅ starting/started/heartbeat + reconcile | ✅ release/abort (soft, rows kept) |
 | Takeover | ✅ takeover.adopt (CLI) | ✅ status.read, aam takeover list | ❌ none (adopt = upsert) | ✅ takeover.release (CLI) |
 
 ### 이슈
-- [high→partly fixed: released after reboot] Lease/Session.Delete: A stuck lease has no way out. Reconcile leaves ORPHANED unchanged when child and supervisor are both dead and no background list exists (lib.rs:1528-1529). A STARTING/SUSPECT lease with no registered process and a dead s
-- [high] Account.Create: [INFERENCE, not run] register() supersede runs DELETE FROM accounts WHERE id=?1 (lib.rs:774) without the NOT EXISTS leases guard that apply_scan uses (lib.rs:1427). leases.account_id REFERENCES accounts(id) (store.rs:84)
-- [medium] Lease/Session.Delete: Lease rows are never pruned: store.rs has no DELETE FROM leases, and the snapshot only trims what it displays to 200 terminal leases (lib.rs:298). expire() (lib.rs:221-232), snapshot, acquire, and the 2s reconcile all do
-- [low] Account.Delete: No user-initiated account removal RPC. Disconnected or unobserved identities build up as unverified rows (lib.rs:1435-1443) and are only removed through internal supersede/obsolete paths.
-- [low] Policy/ProjectRoute.Update: projectAllowlist and autoTakeover can be set via policy.update (lib.rs:503-607) but have no UI setter (only declared in apps/desktop/src/types.ts:74,77) and no CLI command.
-- [low] Takeover.Create: Takeover adopt/list/release is CLI-only (crates/launcher/src/main.rs:428-459). The desktop app neither allowlists takeover.* nor renders snapshot.takeovers.
+- [high→partly fixed: released after reboot] Lease/Session.Delete: A stuck lease has no way out. Reconcile leaves ORPHANED unchanged when child and supervisor are both dead and no background list exists (lib.rs:1835-1836). A STARTING/SUSPECT lease with no registered process and a dead s
+- [resolved 0.17.0] Account.Create: `leases.account_id REFERENCES accounts(id)` 외래키는 제거됐다(`store.rs` `drop_lease_account_reference`). 이력이 있는 계정도 supersede·`account.remove`로 지울 수 있고 lease 행은 보존된다.
+- [medium] Lease/Session.Delete: 종료된 lease 행은 보존 정책 없이 쌓인다(`DELETE FROM leases` 문장은 store.rs에 등장하지 않는다). 스냅샷은 최근 종료 200개를 읽고(lib.rs:378), expire()는 `PREPARED`를(lib.rs:315-325), reconcile은 용량 보유 lease를(lib.rs:1739) 읽는다. 그 밖의 경로는 아직 `leases()`로 전체 이력을 읽는다(lib.rs:478, 558, 729, 862, 957, 983, 1037, 1310, 1562).
+- [low] Policy/ProjectRoute.Update: projectAllowlist and autoTakeover can be set via policy.update (lib.rs:593-720). The desktop declares the fields as types (apps/desktop/src/types.ts:79,83) without a setter UI, and no CLI command writes them.
+- [low] Takeover.Create: Takeover adopt/list/release is CLI-only (crates/launcher/src/main.rs:614-648). The desktop app neither allowlists takeover.* nor renders snapshot.takeovers.
 
 ### 다음 할 일
-- [ ] Account: guard the supersede DELETE at lib.rs:774 like apply_scan (NOT EXISTS leases) or re-point historical leases before deleting; add a test for re-login when the old binding has EXITED lease history.
-- [ ] Lease: add retention that prunes terminal leases past N rows or an age limit, and index/filter holds_capacity states so expire/reconcile do not scan all history.
-- [ ] Account: decide whether an explicit account.remove RPC (reusing forget_account lib.rs:191-200) is wanted, and wire it to the UI if so.
+- [x] Account: supersede DELETE가 이력 있는 옛 binding에서 실패하던 원인(lease 외래키)은 0.17.0에서 제거됐다. lease 행은 `account_body` 사본과 함께 남는다.
+- [ ] Lease: add retention that prunes terminal leases past N rows or an age limit. (용량 상태 필터와 색인은 적용됨: expire/reconcile은 전체 이력을 스캔하지 않는다.)
+- [x] Account: `account.remove` RPC가 추가됐고 연결 탭·`aam account remove`에서 쓴다(0.17.0).
 - [ ] UI: expose projectAllowlist and autoTakeover, or document them as CLI/raw-RPC only; add takeover list/release to the desktop if intended.

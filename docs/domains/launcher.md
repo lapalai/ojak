@@ -3,19 +3,20 @@
 ## 개요
 `aam` 바이너리 하나가 clap CLI, argv0 기반 `claude`/`codex` shim, Claude process wrapper를 겸한다. 관리 실행의 lease 수명주기를 돌리고, LaunchAgent·shim·zsh PATH 설치를 맡는다.
 
-## 실행 모드 (`src/main.rs:475-506`)
-1. `--claude-process-wrapper` / `--claude-native-exec` → Claude 자기 재실행 검증 (`lib.rs:688-797`)
+## 실행 모드 (`src/main.rs:789-856`)
+1. `--claude-process-wrapper` / `--claude-native-exec` → Claude 자기 재실행 검증 (`lib.rs:1145-1256`)
 2. argv0이 `claude`/`codex`(Unix symlink) 또는 `--shim claude|codex`(Windows `.cmd` shim) → `inspect_cli` 우회 확인 후 `run_cli`
    - Windows shim은 launcher `.exe` 복사본이었으나, 원본과 이름이 같은 서명 없는 `claude.exe`를 Defender가 `Behavior:Win32/Execution.A!ml`로 격리해 배치 파일로 바꿨다. 설치·업데이트 때 남은 앱 소유 `.exe` 복사본을 지운다. `aam.cmd`는 launcher를 그대로 부르고, `claude.cmd`·`codex.cmd`만 `--shim`을 붙인다. 배치는 OEM 코드 페이지로 읽히므로 사용자 폴더는 `%LOCALAPPDATA%` 등으로 적고, 나머지 경로가 ASCII가 아니면 `SHIM_PATH_UNSUPPORTED`로 멈춘다.
 3. 그 외 → `aam <command>`
+- `main`이 `ApiError`를 받으면 stderr에 `aam: <메시지> (<코드>)`를 쓰고 exit 1로 끝낸다(`main.rs:847-854`). `AAM_HOLD_ON_ERROR`가 설정돼 있으면 종료 전에 Enter 입력을 기다린다. 데스크톱이 Windows에서 새 콘솔 창으로 `aam`을 열 때 이 변수를 넣어(`apps/desktop/src-tauri/src/main.rs:604`) 창이 닫히기 전에 오류를 읽게 한다.
 
-## 명령 (`main.rs:24-78`)
-`status`, `doctor`, `refresh`, `explain --tool`, `run <claude|codex> [-- native args]`, `account {add, login, settings-preview}`, `service {install, uninstall, stop, restart, status}`, `integration {install, uninstall}`, `omp-broker|omp-bridge {status, connect, disconnect}`, `omp-observer {status, install, uninstall}`, `takeover {list, adopt, release}`, `shell {install, uninstall}`.
+## 명령 (`main.rs:30-133`)
+`status`, `doctor`, `refresh`, `explain --tool`, `run <claude|codex> [-- native args]`, `continue [--tool] [--session] [--account] [-- native args]`, `account {add, login, remove, settings-preview}`, `service {install, uninstall, stop, restart, status}`, `integration {install, uninstall, refresh-extensions, extend --tool}`, `omp-broker|omp-bridge {status, connect, disconnect}`, `omp-observer {status, install, uninstall}`, `takeover {list, adopt, release}`, `setup [--status|--check|--with-omp]`, `shell {install, uninstall}`, `deactivate [--dry-run]`. 숨은 명령은 앱이 쓰는 `provider-login`(아래 절)과 Windows 전용 `installer`·`omp-observer write`다.
 `omp-bridge check-models`는 별도의 읽기 전용 JSON 명령이다. 현재 omp 카탈로그와 fallback 시작 키를 대조하고 `{modelFallback,unknownSources}`를 반환한다. 연결이나 서비스 재시작 없이 실행하며, 카탈로그 조회 실패는 오류로 알린다. 검사 범위는 [omp-bridge](omp-bridge.md#연결-흐름)를 따른다.
 
 ## 관리 실행 흐름 (`lib.rs`)
 shim → `route.resolve` → `lease.acquire`(PREPARED) → 실행 계획·identity 재확인(`IDENTITY_MISMATCH`) → `lease.starting` → supervisor로 spawn → `lease.started` → 10초 heartbeat → release/abort.
-- `lease.starting` 응답이 유실돼도 spawn을 재시도하거나 예약을 돌려주지 않는다 (`lib.rs:588-602`).
+- `lease.starting` 응답이 유실돼도 spawn을 재시도하거나 예약을 돌려주지 않는다 (`lib.rs:889-905`).
 - Claude 새 세션에는 `--session-id`를 항상 붙인다.
 - 자기 재실행은 계정의 현재 해석 경로 또는 `AAM_CLAUDE_ROOT_PROGRAM`(세션을 시작한 실행 파일)과 같아야 한다. 세션 도중 `claude install`로 버전이 바뀌어도 기존 세션이 끊기지 않게 하기 위함.
 - 격리 프로필은 실행 직전 `adapters::share_extensions`로 기본 폴더의 확장을 연결한다. Codex(`~/.codex`)는 `skills`·`agents`·`rules`·`plugins`·`prompts`·`AGENTS.md`·`hooks.json`을 연결하고 config.toml에 `plugins`·`marketplaces`·`mcp_servers`·`hooks`·`notify`·`features`만 옮긴다(`shell_environment_policy`·모델·프로젝트 신뢰·`auth.json`은 제외). Claude는 `~/.claude`의 `skills`·`agents`·`commands`·`plugins`·`hooks`·`output-styles`·`CLAUDE.md`를 symlink로 연결하고(이미 링크면 그대로, 내용 있는 폴더는 `backups/<이름>.before-shared-<ms>`로 옮김), settings.json에는 `enabledPlugins`·`extraKnownMarketplaces`·`hooks`·`statusLine`만 복사한다(기본에서 빠지면 프로필에서도 제거). `env`·인증 키·`.claude.json`(로그인·user MCP)은 공유하지 않는다. 합친 설정도 기존 `check_settings`를 거친다. 실패는 경고만 하고 실행은 계속한다. Windows는 symlink 권한 문제로 폴더 연결 없이 설정 키만 옮긴다.
@@ -54,7 +55,7 @@ shim → `route.resolve` → `lease.acquire`(PREPARED) → 실행 계획·identi
 원본으로 그냥 넘기면 공급자가 구독 한도 뒤에 크레딧(Codex)·추가 사용량(Claude, API 요금)을 쓸 수 있다. Ojak의 해당 옵트인(`use_credits_after_limit`/`use_extra_usage_after_limit`)이 꺼져 있는데 원본 CLI가 쓸 기본 프로필 계정에 공급자가 명시한 과금 경로가 있고(크레딧 `available`·`ordinaryUsageAllowed!=true` / 추가 사용량 `enabled`이고 상한 미도달) 구독 한도가 지금도 남았다고 확실하지 않으면(소진·낡은 관측·미확인 포함, 더 묻는 쪽이 안전) `passthrough`가 조용히 넘기지 않는다. Ojak 설정이 꺼져 있고 원본 CLI가 과금될 수 있다는 한국어 안내를 먼저 보이고, 터미널이면 `[y/N]`(기본 N)로 확인, 터미널이 아니면 `SPEND_CONFIRMATION_REQUIRED`로 실행을 거절한다. 거절하면 `SPEND_CONFIRMATION_DECLINED`. 한도가 남았거나 과금 경로가 없거나 관측이 없으면 기존 통과 동작 그대로다. 이 확인은 Ojak이 크레딧으로 배정하지 않겠다는 설정과 안내일 뿐이다. 이미 실행 중인 원본 CLI의 공급자 쪽 과금 전환은 Ojak이 막을 수 없고, 쓴 금액도 볼 수 없다. 안내와 확인 문구에 그 한계를 적는다. Ojak이 크레딧·추가 사용량으로 배정하면 TTY 안내 줄(`announce_chosen_account`)이 "구독 한도를 다 써서 크레딧을 쓰고 있어요"(Claude는 추가 사용량)로 바뀐다.
 
 ## 설치 (`src/install.rs`)
-- `integration.json`(`version: 2`)은 원본 CLI **진입 경로**를 저장한다. 판이 없는 이전 기록의 `prior`/서비스 관측 경로는 다시 고정하지 않는다 (`install.rs:292-320`).
+- `integration.json`(`version: 2`)은 원본 CLI **진입 경로**를 저장한다(레코드 `install.rs:36-43`). 판이 없는 이전 기록의 `prior`/서비스 관측 경로는 다시 고정하지 않는다 (`install.rs:374-377`).
 - shim은 Unix에서 `AAM_HOME/bin/{aam,claude,codex}` → 앱의 `aam` symlink, Windows에서 같은 이름의 `.cmd`다. `aam`은 계정이 없어도 만든다. 사용자 파일이 있으면 `SHIM_CONFLICT`로 멈춘다.
 - LaunchAgent `ai.aam.service`. `aam-service`는 `aam`과 같은 폴더에 있어야 한다.
 - zsh PATH 블록: `shell.rs` (`shell-integration.json`).
@@ -70,6 +71,7 @@ shim → `route.resolve` → `lease.acquire`(PREPARED) → 실행 계획·identi
 - `aam service restart` (`service_version::restart`): 같은 버전이면 아무것도 안 한다. 아니면 `service.prepareUninstall`(stop과 같은 lease 검사: 점유·불확실 lease가 있으면 `SESSION_BUSY`로 멈추고 아무것도 바꾸지 않음)으로 새 배정을 닫고 → macOS `launchctl kickstart -k`(`install::service_kickstart`: 앱이 설치한 기록·plist가 그대로일 때만) / Windows 기존 `service_restart`(안전 종료 + 기록된 실행 파일 시작) → 시작 시각이 바뀐 새 프로세스가 응답하면 `service.resumeAdmission` → 버전이 앱과 같은지 확인한다. 시작 실패 시 배정을 다시 열고 기존 서비스를 둔다. 새 프로세스를 20초 안에 확인하지 못하면 `SERVICE_NOT_READY`, 재시작했는데 버전이 다르면 `SERVICE_VERSION_STALE`. 시간 초과만으로 lease를 풀지 않는다.
 - macOS와 Windows 모두 `ompSupported: true`이며 같은 준비 흐름을 사용한다. 지원 여부와 실제 broker·bridge·observer 연결 완료는 별도 값이다.
 - Windows NSIS는 `installer prepare|prepare-interactive|finish|recover|remove`로 앱 소유 서비스의 활성·불확실 lease를 검사하고, 기존 실행 파일 백업 → 안전 종료 → 새 파일 hash 확인 → 서비스 재시작을 수행한다. 새 설치를 자동으로 서비스 등록하지 않으며, 실패하면 복구 기록을 보존하고 검증된 원본으로 복구한다. `remove`는 서비스를 끄기 전에 `aam deactivate`와 같은 순서로 omp bridge·broker·observer를 푼다. 앱이 만든 HKCU Run `Ojak`(로그인 자동 실행)만 지운다.
+- NSIS 동작의 구현: `main.rs::run_installer`(`:371`)가 잠금을 잡고 `install::installer`를 부르면 Windows에서는 `install_windows.rs::installer`가 `install_update_windows.rs::run`에 넘긴다. `run`의 처리 대상은 `prepare`·`prepare-interactive`·`finish`·`recover`·`remove`다(`install_update_windows.rs:320-486`). 점유 프로그램 동의·종료는 `install_update_blockers_windows.rs`가 맡는다.
 - 0.9.2부터 `prepare`가 `UPDATE_RECOVERY_REQUIRED`를 반환하면 NSIS가 검증된 `recover`를 한 번 실행한 뒤 새 `prepare`로 진행한다. `.onGUIEnd`·`.onInstFailed`는 강제 종료나 무인 설치의 완료를 보장하지 않으므로 다음 설치의 시작 시점에도 복구한다. `committed` 영수증은 완료된 실행 파일의 해시를 확인해 정리만 재개한다. 영수증이 없는 백업은 알려진 파일·현재 파일의 해시가 모두 맞을 때만 지우며, 누락·변조·다른 설치·알 수 없는 파일은 보존한다. legacy 백업이 이미 없어졌어도 현재 원본 해시를 증명하지 못하면 삭제하지 않는다.
 - 0.9.3 복구는 서비스 소유 기록을 daemon 시작 **전에** 확인한다. 영수증에는 서비스 등록 snapshot과 교체 payload 해시를 원본 복구 해시와 별도로 저장하며, 교체 증거는 서비스 시작 전 디스크에 반영한다. 구 영수증에서 등록 기록이 사라졌으면 검증된 원본·shim만 복원하고 임의로 서비스 등록을 만들지 않는다. 소유 snapshot은 있으나 종료 승인이 사라졌다면 확인한 동일 peer에서 새 lease 안전 승인을 받아야 배정을 재개하며, 활성·불확실 lease를 우회하지 않는다.
 - 0.9.2가 잘못 시작한 무기록 daemon은 installer `recover`에서만 처리한다. 현재 SID·설치 경로·원본 두 파일의 복구 증거와 열린 서비스 파일의 hash(원본·기록된 교체 payload·공개 서명 검증된 0.9.2 서비스 중 하나)를 확인하고, 같은 프로세스에 보낸 새 `prepareUninstall`이 안전을 승인한 경우에만 고정 핸들로 종료한다. 원본 통과 실행이나 일반 `service stop`의 무기록 서비스 거절은 유지한다. 다른 설치·확인 불가·변조·활성/불확실 lease는 중지하지 않고 백업을 보존한다.
@@ -101,13 +103,13 @@ shim → `route.resolve` → `lease.acquire`(PREPARED) → 실행 계획·identi
 
 | Stage | 상태 | 근거 |
 |---|---|---|
-| Command | ✅ | entry: crates/launcher/Cargo.toml:10-12 [[bin]] aam → src/main.rs. clap derive Parser `Cli`(main.rs:13-22) + Subcommand `Action` 최상위 12개(main.rs:24-78: status,  |
-| Args | ✅ | clap 인자: run <tool> positional + --model(default NATIVE_DEFAULT_MODEL, main.rs:85) --cwd --account --resume-session, `--` 뒤 native_args(last=true, main.rs:93).  |
-| Output | ⚡ | stdout/stderr 분리는 올바름. 데이터는 stdout으로 print_json pretty(main.rs:204-213) 또는 print_snapshot 사람용 텍스트(main.rs:214-261)로 나가고, 진단은 stderr에 `aam:` 접두사(main.rs:509, lib |
-| Exit-Code | ⚡ | 성공과 --help/--version은 0(main.rs:499-502, 정상 반환). 모든 ApiError는 stderr `aam: msg (CODE)` 후 exit 1(main.rs:508-511). clap 사용법 오류도 INVALID_ARGUMENT로 바꿔 exit 1이 됨(ma |
+| Command | ✅ | entry: crates/launcher/Cargo.toml:14-16 [[bin]] aam → src/main.rs. clap derive Parser `Cli`(main.rs:17-28) + Subcommand `Action` 최상위 17개(main.rs:30-133: status, doctor, refresh, explain, run, continue, account, service, integration, omp-broker, omp-bridge, omp-observer, takeover, provider-login(숨김), setup, shell, deactivate) + Windows 전용 숨은 `installer`. |
+| Args | ✅ | clap 인자: run <tool> positional + --model(default NATIVE_DEFAULT_MODEL, main.rs:140) --cwd --account --resume-session, `--` 뒤 native_args(last=true, main.rs:148). |
+| Output | ⚡ | stdout/stderr 분리는 올바름. 데이터는 stdout으로 print_json pretty(main.rs:276-285) 또는 print_snapshot 사람용 텍스트(main.rs:286-333)로 나가고, 진단은 stderr에 `aam:` 접두사(main.rs:847, lib.rs:809)로 나감. 출력 형식은 명령마다 달라 아래 이슈 참고. |
+| Exit-Code | ⚡ | 성공과 --help/--version은 0(main.rs:832-841, 정상 반환). 모든 ApiError는 stderr `aam: msg (CODE)` 후 exit 1(main.rs:847-854). clap 사용법 오류도 INVALID_ARGUMENT로 바꿔 exit 1이 됨(main.rs:699, 703-734). run·shim으로 띄운 native가 끝나면 Unix `finish_with_status`(supervisor.rs:406-418)는 native 종료 코드로 끝내고, 시그널로 끝났으면 같은 시그널을 자신에게 다시 보낸다(실패하면 128+signal). |
 
 ```
-aam                                    # clap derive (main.rs:13-78) · --help/--version → exit 0
+aam                                    # clap derive (main.rs:17-133) · --help/--version → exit 0
 ├── status [--json]                    # 계정·할당·세션 스냅샷 (text | JSON)
 ├── doctor                             # 서비스 상태 + 도구 설치/격리 (text)
 ├── refresh                            # RPC quota.refresh (JSON)
@@ -115,23 +117,31 @@ aam                                    # clap derive (main.rs:13-78) · --help/-
 │                                      # RPC route.explain, 예약 없음 (JSON)
 ├── run <claude|codex> [--model M] [--cwd P] [--account ID] [--resume-session ID] [-- <native args>]
 │                                      # 관리 실행(lease), passthrough 없음, exit = native 코드 / 128+sig
+├── continue [--tool <T>] [--session ID] [--account ID] [-- <native args>]
+│                                      # 한도 소진 대화를 다른 계정에서 이어 감 (lib.rs continue_elsewhere), exit = native 코드 / 128+sig
 ├── account
 │   ├── add --tool <T> --label <L> --profile <DIR>          # account.register (JSON)
 │   ├── login --tool <T> (--label <L> (--settings-digest D | --fresh-settings) | --account <ID>)
 │   │                                  # 새 프로필 로그인, 또는 기존 프로필 다시 로그인 → 성공 시 등록
+│   ├── remove --account <ID>          # account.remove (text). 공식 로그인·폴더는 그대로, 사용 중 대화가 있으면 거절
 │   └── settings-preview --tool <T>    # (JSON)
 ├── service {install | uninstall | stop | restart | status} # LaunchAgent ai.aam.service (text). restart = 버전이 다른 서비스를 lease 검사 후 안전 재시작
-├── integration {install | uninstall}  # Unix symlink / Windows .cmd shim: aam·claude·codex (text)
+├── integration {install | uninstall | refresh-extensions | extend --tool <T>}  # install/uninstall: Unix symlink / Windows .cmd shim aam·claude·codex (text). refresh-extensions: 설치된 omp 확장 갱신. extend: 연결이 있을 때 새로 실행 가능해진 도구의 shim만 추가
 ├── omp-broker {status [--json] | connect | disconnect}   # connect/disconnect → JSON
 ├── omp-bridge {status [--json] | check-models | connect | disconnect}   # check-models → JSON, connect는 broker 연결 필요
-├── omp-observer {status | install | uninstall}           # 읽기 전용 관측 확장 (text)
+├── omp-observer {status | install | uninstall}           # 읽기 전용 관측 확장 (text). Windows 전용 숨은 `write`가 사용량 기록 서버
 ├── takeover
 │   ├── list                           # 인계 목록 + 후보 (JSON)
 │   ├── adopt <tool> <session>         # takeover.adopt (JSON)
 │   └── release <tool> <session>       # takeover.release (JSON)
-└── shell {install | uninstall}        # zsh 앱 전용 PATH 블록 (text)
+├── provider-login --provider P (--account ID | --label L [--settings-digest D])
+│                                      # 숨김. 앱용 로그인 작업, 상태를 JSON 줄로 출력 (src/provider_login.rs)
+├── setup [--status | --check | --with-omp]               # 누락 설치 + 준비 상태 (JSON, 세 옵션은 서로 배타)
+├── shell {install | uninstall}        # zsh 앱 전용 PATH 블록 (text)
+├── deactivate [--dry-run]             # 연결을 풀어 설치 전으로 복원 (text). 계정·프로필·로그는 유지
+└── installer <action> --directory D [--error-file F]     # Windows 전용 숨김. NSIS가 호출 (install_update_windows.rs)
 
-shim / 숨은 argv 모드 (main.rs:475-496, clap 이전 분기)
+shim / 숨은 argv 모드 (main.rs:806-830, clap 이전 분기)
 ├── aam --claude-process-wrapper <claude-bin> [args…]
 │                                      # CLAUDE_CODE_PROCESS_WRAPPER self-exec → lease.validate-child(1.2s) → exec
 ├── aam --claude-native-exec <program> [args…]
@@ -150,18 +160,18 @@ shim / 숨은 argv 모드 (main.rs:475-496, clap 이전 분기)
 ```
 
 ### 이슈
-- [medium] Exit-Code: aam 자체 오류는 종류에 상관없이 exit 1(main.rs:510)임. clap 사용법 오류도 1(main.rs:504)이라 UNIX 관례의 2(usage)와 sysexits(예: DAEMON_UNAVAILABLE→69 EX_UNAVAILABLE)를 따르지 않음. 스크립트에서 사용법 오류, 데몬 부재, 정책 차단을 구분하려면 stderr 문자열을 파싱해야 함
+- [medium] Exit-Code: aam 자체 오류는 종류에 상관없이 exit 1(main.rs:854)임. clap 사용법 오류도 1(main.rs:699)이라 UNIX 관례의 2(usage)와 sysexits(예: DAEMON_UNAVAILABLE→69 EX_UNAVAILABLE)를 따르지 않음. 스크립트에서 사용법 오류, 데몬 부재, 정책 차단을 구분하려면 stderr 문자열을 파싱해야 함
 - [medium] Exit-Code: run·shim 모드에서 aam이 spawn 전에 거부한 경우(IDENTITY_MISMATCH, AUTH_OVERRIDE_CONFLICT 등 → exit 1)와 native가 1로 끝난 경우의 exit code가 같음. 호스트(Orca/cmux 등)가 wrapper 거부와 native 실패를 구분할 수 없음(env/docker 관례는 125~127 예약)
-- [low] Output: --json 지원이 status/omp-broker status/omp-bridge status에만 있음(main.rs:28,154,161). doctor/service status/integration/shell/omp-observer는 텍스트만, refresh/explain/takeover 등은 JSON만 출력해 형식이 명령마다 다름. --quiet/--verbose 없음
-- [low] Output: hosts.rs:220 host_connections(호스트별 shim 연결 상태·설정 안내)는 데스크톱 Tauri 명령(apps/desktop/src-tauri/src/main.rs:419-424)에서만 호출되고 CLI 서브커맨드가 없음. 그런데 integration install 완료 메시지(install.rs:428)는 이 안내를 앱에서 확인하라고 함. CLI 사용자는 볼 수 없음
-- [low] Args: ServiceAction/IntegrationAction/OmpBrokerAction/OmpBridgeAction/ObserverAction/ShellAction variant에 about/help 문구가 없어(main.rs:140-194) `aam service --help` 등에 액션 설명이 나오지 않음
-- [low] Args: --tool 값과 run <tool>이 clap value_parser 없이 자유 문자열임. run은 intent_checked(lib.rs:87-93)에서 거부하지만 explain·account·takeover는 데몬/어댑터 호출 뒤에야 오류가 남 [INFERENCE: 서버 쪽 검증 여부는 확인 안 함]. help에 허용 값이 나오지 않음
-- [low] Command: clap 명령 트리와 main의 argv 분기를 검증하는 테스트가 없음(테스트는 arguments.rs:448-575, lib.rs:858-1290, install.rs:760, descendants.rs:188-240, omp_*에만 있음). Cli::command().debug_assert()류 검증도 없음. docs/domains/launcher.md 명령 목록에는 run의 --mode
+- [low] Output: --json 지원이 status/omp-broker status/omp-bridge status에만 있음(main.rs:44,221,228). doctor/service status/integration/shell/omp-observer는 텍스트만, refresh/explain/takeover 등은 JSON만 출력해 형식이 명령마다 다름. --quiet/--verbose 없음
+- [low] Output: hosts.rs:244 host_connections(호스트별 shim 연결 상태·설정 안내)는 데스크톱 Tauri 명령(apps/desktop/src-tauri/src/main.rs:1065-1070)에서만 호출되고 CLI 서브커맨드가 없음. 그런데 integration install 완료 메시지(install.rs:504)는 이 안내를 앱에서 확인하라고 함. CLI 사용자는 볼 수 없음
+- [low] Args: ServiceAction Install/Uninstall/Stop/Status, IntegrationAction Install/Uninstall, OmpBrokerAction, ObserverAction, ShellAction variant에는 about/help 문구가 없어(main.rs:197-266) `aam service --help` 등에 이 액션 설명이 나오지 않음. Restart·RefreshExtensions·Extend·CheckModels·Takeover·AccountAction에는 있음
+- [low] Args: --tool 값과 run <tool>이 clap value_parser 없이 자유 문자열임(value_parser 사용 0건). run은 intent_checked(lib.rs:95-101)에서 UNSUPPORTED_TOOL로 거부하지만 explain·account·takeover는 데몬/어댑터 호출 뒤에야 오류가 남 [INFERENCE: 서버 쪽 검증 여부는 확인 안 함]. help에 허용 값이 나오지 않음
+- [low] Command: main.rs의 usage_tests(:859)는 인수 없는 aam·--help·사용법 오류 문구·installer 잠금만 다룸. 테스트 모듈은 arguments.rs:779, install.rs:924, descendants.rs:217, lib.rs:1597·2283, omp_*에 있으나, Cli::command().debug_assert() 호출은 없음(grep 0건). 명령 트리 전체를 검증하는 테스트는 찾지 못함
 
 ### 다음 할 일
 - [ ] Exit-Code: INVALID_ARGUMENT는 exit 2로 바꾸고(메시지 비노출 정책은 유지), DAEMON_UNAVAILABLE/SERVICE_UNHEALTHY는 69, UNSUPPORTED_PLATFORM은 70 등으로 ApiError.code를 sysexits 값에 매핑
 - [ ] Exit-Code: run·shim 모드에서 spawn 전 aam 거부는 별도 코드(예: 125)로 예약해 native 종료 코드와 구분하고, 표를 docs/domains/launcher.md에 기록
 - [ ] Output: doctor/service status/integration/shell/omp-observer에 --json 추가(또는 전역 --json)해 모든 조회 명령이 text와 JSON을 모두 지원하게 함
-- [ ] Output: `aam integration status`(또는 `aam hosts`) 서브커맨드로 hosts::host_connections를 CLI에 노출하고 install.rs:428 안내 문구를 CLI 기준으로 수정
+- [ ] Output: `aam integration status`(또는 `aam hosts`) 서브커맨드로 hosts::host_connections를 CLI에 노출하고 install.rs:504 안내 문구를 CLI 기준으로 수정
 - [ ] Args: 하위 액션 variant에 #[command(about=...)] 추가, --tool/<tool>에 value_parser = [claude, codex] 적용
-- [ ] Command: Cli::command().debug_assert() 테스트를 추가하고 docs/domains/launcher.md 명령 목록에 run 옵션 반영
+- [ ] Command: Cli::command().debug_assert() 테스트를 추가하고 새 명령(continue·setup·deactivate 등)까지 포함하는 명령 트리 검증을 만듦

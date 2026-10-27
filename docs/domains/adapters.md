@@ -4,7 +4,7 @@
 공식 CLI(Claude Code, Codex, omp)를 다루는 라이브러리. 바이너리 탐지, 계정 identity·quota 조회, 등록·로그인·실행 계획, 설정 가져오기 미리보기, 인증 우회 안전 검사, takeover용 세션 소유자 찾기, omp 세션 읽기 전용 관측.
 
 ## 진입점 (`src/lib.rs`)
-`scan`(`:393`), `verify`(`:501`), `build_launch_plan`(`:544`), `register`(`:614`), `enrollment_plan`(`:658`), `inspect_cli`(`:359`). 그 밖에 `observed::discover_sessions`(`observed.rs:138`), `takeover::session_owner`(`takeover.rs:166`), `settings::preview_settings`(`settings.rs:240`).
+`scan`(`:742`), `verify`(`:992`), `build_launch_plan`(`:1035`), `register`(`:1110`), `enrollment_plan`(`:1241`), `inspect_cli`(`:632`). 그 밖에 `observed::discover_sessions`(`observed.rs:141`), `takeover::session_owner`(`takeover.rs:162`), `settings::preview_settings`(`settings.rs:239`). 이 밖의 공개 함수(`native_access_staged`, `omp_inventory`, `same_login`, `relogin_plan`, `copy_conversation`, `share_extensions` 등)와 위치는 아래 트리에 있다.
 
 ## 바이너리 경로 (`src/process.rs`)
 - `discover()`: `integration.json`의 `nativeBinaries`는 `version == 2`일 때만 믿고, 아니면 PATH를 찾는다. 반환값은 **진입 경로**(예: `~/.local/bin/claude` symlink).
@@ -63,37 +63,53 @@
 
 | Stage | 상태 | 근거 |
 |---|---|---|
-| Module | ✅ | crates/adapters/Cargo.toml:2 package aam-adapters (workspace version 0.1.0, Cargo.toml:7), implicit lib target crates/adapters/src/lib.rs. lib.rs:1-14 declares  |
-| Function | ⚡ | 13 pub fns with typed Result<_, ApiError> signatures, but only 4 carry `///` rustdoc: supports_shared_profile_concurrency lib.rs:536-538, discover_sessions obse |
-| Example | 🚧 | No README, no crates/adapters/examples/ or crates/adapters/tests/, no doctests. Usage patterns only via 28 in-crate unit tests (lib.rs:737,756,787; native.rs:23 |
+| Module | ✅ | `crates/adapters/Cargo.toml:2` 패키지 `aam-adapters`, 버전은 `version.workspace`(워크스페이스 버전 0.17.0, `Cargo.toml:7`). 암묵 lib 타깃 `crates/adapters/src/lib.rs`이며 `lib.rs:1-19`가 모듈을 선언하고 공개 항목을 재노출한다. |
+| Function | ⚡ | 재노출된 공개 함수 26개는 모두 `Result<_, ApiError>` 등 타입 있는 시그니처이고, `///` rustdoc은 18개에만 있다. 없는 8개: `verify`(`lib.rs:992`), `build_launch_plan`(`:1035`), `register`(`:1110`), `enrollment_plan`(`:1241`), `native_access`(`access.rs:32`), `preview_settings`(`settings.rs:239`), `prepare_settings_import`(`:332`), `apply_settings_import`(`:336`). |
+| Example | 🚧 | README·`crates/adapters/tests/`·doctest 없음, `crates/adapters/examples/`에 추적되는 파일 없음. 사용 예는 크레이트 안 `#[test]` 87개(`src/*.rs`의 `mod tests` 등)뿐이다. |
 
 ```text
-aam-adapters v0.1.0 (crates/adapters/src/lib.rs)
+aam-adapters v0.17.0 (crates/adapters/src/lib.rs)
 ├── [crate root] lib.rs
-│   ├── scan(paths: &Paths, existing: &[Account], force: bool, inventory: impl FnOnce() -> Result<Option<Vec<Account>>, ApiError> + Send, publish: impl FnMut(&Account) -> Result<(), ApiError> + Send) -> Result<ScanResult, ApiError>  ← service/lib.rs
-│   ├── verify(account: &Account) -> Result<IdentityEvidence, ApiError>  :501  ← launcher/lib.rs:569
-│   ├── build_launch_plan(account: &Account, intent: &LaunchIntent) -> Result<LaunchPlan, ApiError>  :544  ← launcher/lib.rs:511
-│   ├── register(paths: &Paths, tool: &str, label: &str, profile_path: &str) -> Result<Account, ApiError>  :614  ← service/lib.rs:733
-│   ├── enrollment_plan(paths: &Paths, tool: &str, label: &str) -> Result<EnrollmentPlan, ApiError>  :658  ← launcher/lib.rs:810
-│   ├── inspect_cli(paths: &Paths, tool: &str, args: &[OsString]) -> Option<Result<ExitStatus, ApiError>>  :359  ← launcher/main.rs:491
-│   ├── 📝 supports_shared_profile_concurrency(account: &Account) -> bool  :538  ← service/lib.rs:713
-│   ├── struct ScanResult { accounts, tools, notices, merged_observation_ids }  :39
-│   └── struct EnrollmentPlan { program, args, env, profile_path, tool, label }  #[derive(Debug, Clone)]  :47
-├── observed.rs  (pub use lib.rs:4)
-│   ├── 📝 discover_sessions(paths: &Paths, accounts: &[Account]) -> ObservedScan  :138  ← service/lib.rs:261
-│   └── struct ObservedScan { sessions: Vec<ObservedSession>, notices: Vec<Notice> }  #[derive(Default)]  :12
-├── takeover.rs  (pub use lib.rs:10)
-│   ├── 📝 session_owner(accounts: &[Account], tool: &str, native: &str) -> Result<SessionOwner, ApiError>  :166  ← service/lib.rs:632, service/managed_sessions.rs:80
-│   ├── 📝 configured_model(tool: &str, cwd: &Path, profile: Option<&str>) -> Option<(String, String)>  :129  ← service/scheduler.rs:128
-│   ├── 📝 struct SessionOwner { account_id, native_session_id, cwd, evidence }  :16
-│   └── ⚠ claude_session_owner(accounts, native) — pub but not re-exported (crate-internal)  :62
-├── settings.rs  (pub use lib.rs:11-14)
-│   ├── preview_settings(tool: &str) -> Result<SettingsPreview, ApiError>  :240  ← launcher/main.rs:360
-│   ├── prepare_settings_import(tool: &str, digest: &str) -> Result<SettingsImport, ApiError>  :336  ← launcher/lib.rs:808
-│   ├── apply_settings_import(profile: &Path, import: SettingsImport) -> Result<(), ApiError>  :340  ← launcher/lib.rs:812
-│   ├── struct SettingsPreview { tool, source, digest, can_import, changes, omitted, warnings }  Serialize(camelCase)  :14
-│   ├── struct SettingsImport { /* private: filename, content */ }  :30
-│   └── ⚠ struct SettingChange { key, value } — reachable via SettingsPreview.changes, not re-exported  :25
+│   ├── scan(paths: &Paths, existing: &[Account], force: bool, inventory: impl FnOnce() -> Result<Option<Vec<Account>>, ApiError> + Send, publish: impl FnMut(&Account) -> Result<(), ApiError> + Send) -> Result<ScanResult, ApiError>  :742  ← service/lib.rs:1606
+│   ├── verify(account: &Account) -> Result<IdentityEvidence, ApiError>  :992  ← launcher/lib.rs:871
+│   ├── build_launch_plan(account: &Account, intent: &LaunchIntent) -> Result<LaunchPlan, ApiError>  :1035  ← launcher/lib.rs:818
+│   ├── register(paths: &Paths, tool: &str, label: &str, profile_path: &str) -> Result<Account, ApiError>  :1110  ← service/lib.rs:840, launcher/provider_login.rs:407
+│   ├── enrollment_plan(paths: &Paths, tool: &str, label: &str) -> Result<EnrollmentPlan, ApiError>  :1241  ← launcher/lib.rs:1275, launcher/provider_login.rs:365
+│   ├── relogin_plan(paths: &Paths, tool: &str, label: &str, profile: &Path) -> Result<EnrollmentPlan, ApiError>  :1299  ← launcher/lib.rs:1332, launcher/provider_login.rs:361
+│   ├── 📝 inspect_cli(paths: &Paths, tool: &str, args: &[OsString]) -> Option<Result<ExitStatus, ApiError>>  :632  ← launcher/main.rs:825
+│   ├── 📝 supports_shared_profile_concurrency(account: &Account) -> bool  :1029  ← service/lib.rs:820
+│   ├── 📝 check_native_auth_context(tool: &str, profile: &Path, cwd: &Path) -> Result<(), ApiError>  :108  ← launcher/lib.rs:640
+│   ├── 📝 check_subscription_auth_env(tool: &str) -> Result<(), ApiError>  :118  ← service/reset_credits.rs:99
+│   ├── 📝 omp_inventory(snapshot: &Value, existing: &[Account]) -> Result<Vec<Account>, ApiError>  :694  ← service/bridge.rs:1806
+│   ├── 📝 same_login(native: &Account, observed: &Account) -> bool  :1146  ← launcher/provider_login.rs:416
+│   ├── 📝 omp_credential_identity(provider, email, account_id, org_id, project_id) -> Option<String>  :1176  ← launcher/provider_login.rs:616, service/bridge.rs:1835
+│   ├── 📝 copy_conversation(source: &Account, target: &Account, native_id: &str) -> Result<(), ApiError>  :2093  ← launcher/lib.rs:805
+│   ├── 📝 copy_claude_transcript(source, target, native_id) -> Result<(), ApiError>  :1996  ← copy_conversation (lib.rs:2095)
+│   ├── 📝 codex_session_from(account: &Account, cwd: &str, written: &[PathBuf]) -> Option<String>  :2059  ← launcher/lib.rs:997
+│   ├── 📝 share_extensions(account: &Account) -> Result<(), ApiError>  :2082  ← launcher/lib.rs:808
+│   ├── struct ScanResult { accounts, tools, notices, merged_observation_ids }  :46
+│   └── struct EnrollmentPlan { program, args, env, profile_path, tool, label }  #[derive(Debug, Clone)]  :62
+├── access.rs  (pub use lib.rs:2)
+│   ├── native_access(account: &Account, refresh: bool, deadline: Instant) -> Result<NativeAccess, ApiError>  :32  (crate 밖 호출 없음)
+│   ├── 📝 native_access_staged(account, refresh, deadline, stage: &mut dyn FnMut(&'static str)) -> Result<NativeAccess, ApiError>  :37  ← service/bridge_native.rs:287,385
+│   ├── 📝 const STAGES: [&str; 8] (lib.rs 재노출 이름 NATIVE_ACCESS_STAGES)  :21
+│   └── struct NativeAccess { access, expires, account_id }  (Debug·Serialize 없음)  :11
+├── observed.rs  (pub use lib.rs:7)
+│   ├── 📝 discover_sessions(paths: &Paths, accounts: &[Account]) -> ObservedScan  :141  ← service/lib.rs:359
+│   ├── 📝 open_jsonl_writers(pid: u32) -> Vec<PathBuf>  :836  ← launcher/lib.rs:279, launcher/auto_continue.rs:656
+│   └── struct ObservedScan { sessions: Vec<ObservedSession>, notices: Vec<Notice> }  #[derive(Default)]  :15
+├── takeover.rs  (pub use lib.rs:15)
+│   ├── 📝 session_owner(accounts: &[Account], tool: &str, native: &str) -> Result<SessionOwner, ApiError>  :162  ← service/lib.rs:745, service/managed_sessions.rs:80
+│   ├── 📝 configured_model(tool: &str, cwd: &Path, profile: Option<&str>) -> Option<(String, String)>  :125  ← service/scheduler.rs:163
+│   ├── 📝 struct SessionOwner { account_id, native_session_id, cwd, evidence }  :15
+│   └── ⚠ claude_session_owner(accounts, native) — pub but not re-exported (crate-internal)  :58
+├── settings.rs  (pub use lib.rs:16-19)
+│   ├── preview_settings(tool: &str) -> Result<SettingsPreview, ApiError>  :239  ← launcher/main.rs:513
+│   ├── prepare_settings_import(tool: &str, digest: &str) -> Result<SettingsImport, ApiError>  :332  ← launcher/lib.rs:1273, launcher/provider_login.rs:372
+│   ├── apply_settings_import(profile: &Path, import: SettingsImport) -> Result<(), ApiError>  :336  ← launcher/lib.rs:1277, launcher/provider_login.rs:376
+│   ├── struct SettingsPreview { tool, source, digest, can_import, changes, omitted, warnings }  Serialize(camelCase)  :13
+│   ├── struct SettingsImport { /* private: filename, content */ }  :29
+│   └── ⚠ struct SettingChange { key, value } — reachable via SettingsPreview.changes, not re-exported  :24
 └── (crate-private — no public surface)
     ├── native.rs  inspect · inspect_at · parse_claude · parse_codex · claude_identity · profile_env · blank_account · OMP_GATE
     ├── process.rs  discover · executable · search_dirs · base_env · run_json · run_json_slow(omp usage, 50초) · version · Probe{spawn, send, request, output}
@@ -102,22 +118,21 @@ aam-adapters v0.1.0 (crates/adapters/src/lib.rs)
     └── observed_metadata.rs (pub(super))  read_sessions · attribute · WriterFile · SessionMetadata · MAX_FILES
 ```
 
-범례: 📝 = `///` rustdoc 있음 (fn 4/13, type 1/6) · ⚠ = 가시성 이상 · `← caller file:line`
+범례: 📝 = `///` rustdoc 있음 (fn 18/26, type 1/8) · ⚠ = 가시성 이상 · `← caller file:line`
 
 계정 lifecycle 호출 순서: `enrollment_plan` → (사용자 터미널 로그인) → `register` → `scan` (refresh_bound) → `verify` → `build_launch_plan`
 
 ### 이슈
-- [medium] Function: 9/13 pub fns lack `///` rustdoc, including the core account lifecycle entry points scan (lib.rs:393), verify (lib.rs:501), build_launch_plan (lib.rs:544), register (lib.rs:614), enrollment_plan (lib.rs:658) and settings 
-- [low] Function: inspect_cli (lib.rs:358-363) uses a `//` comment instead of `///`, so rustdoc is empty; the Option contract (None = not a bypass command, caller must route through the service) is undocumented.
-- [low] Function: SettingChange (settings.rs:25) is exposed through the pub field SettingsPreview.changes (settings.rs:19) but not re-exported in lib.rs:11-14, so downstream crates cannot name the type.
-- [low] Function: takeover::claude_session_owner (takeover.rs:62) is declared `pub` inside a private module and never re-exported; its only caller is session_owner (takeover.rs:172). The visibility suggests a public API that does not exis
-- [medium] Example: build_launch_plan guard rules (lib.rs:545-588: ACCOUNT_MISMATCH, ACCOUNT_DISABLED, non-claude RESUME_UNVERIFIED, SESSION_MAPPING_INVALID, MODEL_REQUIRED charset/160-byte limit) and validate_label (lib.rs:649-653) have no
-- [low] Example: configured_model precedence (settings.local.json > settings.json > profile settings.json, takeover.rs:134-140) is untested; takeover.rs has no in-crate tests, and session_owner is covered only indirectly by crates/servic
-- [low] Example: No README, examples/ directory, or doctests. The only consumer-facing guide is the prose in docs/domains/adapters.md, which has no code snippets.
+- [medium] Function: 재노출된 공개 함수 26개 중 8개는 `///` 문서 주석을 갖지 않는다. 계정 lifecycle 진입점 `verify`(lib.rs:992), `build_launch_plan`(lib.rs:1035), `register`(lib.rs:1110), `enrollment_plan`(lib.rs:1241)와 `native_access`(access.rs:32), settings 3종(settings.rs:239,332,336)이다.
+- [low] Function: `SettingChange`(settings.rs:24)는 공개 필드 `SettingsPreview.changes`(settings.rs:18)로 노출되지만 lib.rs:16-19에서 재노출하지 않아 다른 크레이트는 타입 이름을 직접 쓰지 못하는 상태다.
+- [low] Function: `takeover::claude_session_owner`(takeover.rs:58)는 비공개 모듈 안의 `pub`이고 재노출되지 않는다. 호출처는 `session_owner`(takeover.rs:168) 한 곳이라 공개 API처럼 보이는 가시성이 실제와 다르다.
+- [medium] Example: `build_launch_plan`의 검사(lib.rs:1036-1080: ACCOUNT_MISMATCH, ACCOUNT_DISABLED, claude·codex 외 RESUME_UNVERIFIED, SESSION_MAPPING_INVALID, MODEL_REQUIRED 문자·160바이트 제한)와 `validate_label`(lib.rs:1231-1239)을 직접 검증하는 테스트를 찾지 못했다.
+- [low] Example: `configured_model` 우선순위(settings.local.json > settings.json > 프로필 settings.json, takeover.rs:130-137)는 시험하지 않는다. takeover.rs의 `#[test]` 개수는 0이다.
+- [low] Example: README·tests 디렉터리·doctest는 확인되지 않는다. examples 폴더는 비어 있다. 소비자용 안내는 이 문서의 서술로 대신하고 코드 예시는 두지 않았다.
 
 ### 다음 할 일
-- [ ] Function: add `///` docs to scan/verify/build_launch_plan/register/enrollment_plan/preview_settings/prepare_settings_import/apply_settings_import listing ApiError codes and side effects (enrollment_plan creates a 0700 profile dir lib.rs:681-699; apply_settings_import is create_new 0600 settings.rs:342-346); change the inspect_cli `//` comment (lib.rs:358) to `///`.
-- [ ] Function: add a crate-level `//!` in lib.rs describing the lifecycle order enrollment_plan → login → register → scan → verify → build_launch_plan.
-- [ ] Function: re-export SettingChange from lib.rs:11-14 (or make it pub(crate)) and downgrade claude_session_owner (takeover.rs:62) to a private fn.
-- [ ] Example: add unit tests for build_launch_plan guard ordering/codes and validate_label boundaries (empty, 120 vs 121 bytes, control characters), plus configured_model precedence using temp .claude dirs.
-- [ ] Example (optional): add a rustdoc example on build_launch_plan/verify, or an examples/launch_plan.rs, showing the Account + LaunchIntent → LaunchPlan flow.
+- [ ] Function: `verify`/`build_launch_plan`/`register`/`enrollment_plan`/`native_access`/`preview_settings`/`prepare_settings_import`/`apply_settings_import`에 `///`로 ApiError 코드와 부수 효과를 적는다 (`enrollment_plan`은 프로필 폴더를 `restrict_dir`로 제한 lib.rs:1253,1268, `apply_settings_import`는 `create_new` + Unix 0600 settings.rs:339-342).
+- [ ] Function: lib.rs에 크레이트 수준 `//!`로 lifecycle 순서 `enrollment_plan` → 로그인 → `register` → `scan` → `verify` → `build_launch_plan`을 적는다.
+- [ ] Function: `SettingChange`를 lib.rs:16-19에서 재노출하거나 `pub(crate)`로 낮추고, `claude_session_owner`(takeover.rs:58)를 비공개 fn으로 내린다.
+- [ ] Example: 단위 테스트 추가 대상은 `build_launch_plan` 검사 순서·코드, `validate_label` 경계(빈 값, 120 vs 121바이트, 제어 문자), 임시 `.claude` 폴더를 쓴 `configured_model` 우선순위다.
+- [ ] Example (선택): `build_launch_plan`/`verify`에 Account + LaunchIntent → LaunchPlan 흐름을 보이는 rustdoc 예제나 `examples/launch_plan.rs`를 둔다.
