@@ -1,6 +1,6 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { compareRows, criticalLimit, groupAlias, loginTarget, meaningfulLabel, overviewOf, quotaRows, quotaTone, watchable, watchedMembers, whenBand, windowKind } from "./overview.ts";
+import { compareRows, criticalLimit, groupAlias, canRelogin, choiceLabel, loginTarget, meaningfulLabel, overviewOf, quotaRows, quotaTone, watchable, watchedMembers, whenBand, windowKind } from "./overview.ts";
 import { quotaReading } from "./limits.ts";
 import type { Account, AccountQuotaSummary, QuotaBucket } from "./types.ts";
 
@@ -167,4 +167,31 @@ test("re-login targets only an official CLI member that asks for sign-in and is 
   assert.equal(loginTarget([omp, needs], () => true)?.id, "c");
   assert.equal(loginTarget([omp, needs], () => false), null);
   assert.equal(loginTarget([omp], () => true), null);
+});
+
+test("re-login also targets a Claude or Codex profile in error state, but never omp or a profile-less account", () => {
+  const drifted = account({ id: "d", canLaunch: false, authStatus: "error", tool: "claude", profilePath: "/p/.claude" });
+  const noProfile = account({ id: "n", canLaunch: false, authStatus: "error", tool: "claude", profilePath: null });
+  const ompError = account({ id: "o", canLaunch: false, authStatus: "error", tool: "omp", profilePath: "/p/omp" });
+  const launchable = account({ id: "l", canLaunch: true, authStatus: "error", tool: "codex", profilePath: "/p/.codex" });
+  assert.equal(loginTarget([ompError, noProfile, launchable, drifted], () => true)?.id, "d");
+  assert.equal(loginTarget([drifted], () => false), null);
+  assert.equal(loginTarget([ompError, noProfile, launchable], () => true), null);
+  assert.equal(canRelogin(drifted), true);
+  assert.equal(canRelogin(ompError), false);
+});
+
+test("same-tool accounts sharing a label stay distinguishable, by email when visible and by position when masked or emailless", () => {
+  const a = account({ id: "a", tool: "claude", label: "Work", email: "a@x.com" });
+  const b = account({ id: "b", tool: "claude", label: "Work", email: "b@x.com" });
+  const c = account({ id: "c", tool: "codex", label: "Work", email: "c@x.com" });
+  const d = account({ id: "d", tool: "claude", label: "Home", email: "d@x.com" });
+  const e = account({ id: "e", tool: "claude", label: "Work", email: null });
+  assert.equal(choiceLabel(a, [a, b, c, d], false), "Work · a@x.com");
+  assert.equal(choiceLabel(b, [a, b, c, d], false), "Work · b@x.com");
+  assert.equal(choiceLabel(c, [a, b, c, d], false), "Work");
+  assert.equal(choiceLabel(d, [a, b, c, d], false), "Home");
+  assert.equal(choiceLabel(a, [a, b], true), "Work #1");
+  assert.equal(choiceLabel(b, [a, b], true), "Work #2");
+  assert.equal(choiceLabel(e, [a, e], false), "Work #2");
 });

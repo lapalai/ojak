@@ -6,16 +6,18 @@ Tauri 2 + React 19/Vite 메뉴바 앱(제품명 Ojak, bundle id `ai.aam.desktop`
 ## 화면 (`src/`)
 | 메뉴 | 파일 |
 |---|---|
-| 사용 현황 | `UsageView.tsx`, `AccountRow.tsx`(계정 목록·앱 내부 상세), `usage-activity.ts`(확인된 실행 집계). 계정 상태가 먼저이며 omp 요청·기간은 접힌 이력 안에 둔다. 계정 선택·유료 사용·배정 설정은 앱 안의 대화상자다. |
+| 사용 현황 | `UsageView.tsx`, `AccountRow.tsx`(계정 목록 `AccountRow`, 앱 내부 상세 `AccountDetails`), `usage-activity.ts`(확인된 실행 집계). 계정 상태가 먼저이며 omp 요청·기간은 접힌 이력 안에 둔다. 계정 선택·유료 사용·배정 설정은 앱 안의 대화상자다. |
 | 세션 | `SessionsView.tsx` |
 | 연결 | `ConnectionsView.tsx` |
 | 토큰·비용 | `TokenUsageView.tsx`, `local-usage.ts`(순수 규칙), 네이티브 `src-tauri/src/local_usage.rs`. 이 PC의 omp·Claude CLI·Codex JSONL을 `AAM_HOME/local-usage.sqlite3`에 증분 색인(숫자·시각·모델·해시 ID만). 처음 읽기는 낮은 우선순위 백그라운드 스레드가 창과 무관하게 끝까지 진행하고, 진행률은 읽은 바이트 기준. 오늘·이번 달·전체에 실제 날짜 범위 표시. 환산액은 API 가격 기준이며 청구액이 아니다. |
 로그인·다시 로그인은 모두 앱이 소유하는 작업이다(`LoginDialog.tsx`의 `LoginPanel`, `login.ts` 순수 규칙). 사용자가 [공식 로그인 열기]를 누르면 `start_provider_login({provider, accountId?, label?, settingsDigest?})`가 작업을 만들고, 화면은 `provider_login_status({id})`를 1초마다 읽어 시작 중→브라우저 대기→계정 확인→한도·omp 반영→성공/실패/취소를 구분해 보인다. 브라우저를 열었다는 사실은 성공이 아니며, 성공(`succeeded`)은 네이티브가 정확한 계정을 확인한 뒤에만 오고 그때에만 스냅샷을 다시 읽는다. 창을 닫아도 작업은 계속된다. 다시 열면 `list_provider_logins`에서 `findLoginJob`이 같은 공급자·대상 계정(`targetAccountId`, 새 계정은 `null`끼리)의 가장 최근 작업을 고른다: ① 진행 중인 작업이 있으면 그것 ② 없으면 끝난 작업 중 가장 최근 것의 결과(성공·실패·취소 그대로, 오래된 성공이 새 실패를 덮지 않고 그 반대도 같다). 그 최신 결과를 이미 화면에서 봤으면(`seenResults`, 앱 프로세스 동안 유지) 새 로그인 화면이며 더 오래된 못 본 결과는 되살리지 않는다. 못 본 결과는 시간 제한 없이 앱이 살아 있는 동안 복원된다. 결과 화면을 한 번 보여 주면 그 작업은 본 것으로 기록되므로, 같은 공급자의 새 계정을 일부러 추가할 때 예전 작업이 막지 않는다. 다른 공급자·다른 대상 계정의 작업은 섞이지 않는다(같은 공급자의 다른 계정 작업이 진행 중이면 시작이 네이티브 `LOGIN_BUSY`로 막힌다). 계정 추가 창(`autoStart`)과 [다시 시도]·[다시 시작]은 이어 붙지 않고 항상 새 작업을 시작한다(같은 대상의 진행 중 작업만 네이티브가 그대로 돌려준다). 취소(`cancel_provider_login`)는 창의 버튼으로만 한다. 진입점: 계정 행·연결 화면의 [다시 로그인](omp 전용 만료 계정 포함), 계정 추가 창의 새 Claude·Codex 로그인(이름·설정 가져오기 확정 뒤 같은 진행 화면), 연결 화면 omp 패널의 xAI·Google 로그인. 오래된 `/login` 안내 모달과 `login_account` 호출은 없다.
-공식 Claude 조회가 미로그인을 반환하면 등록된 identity는 보존한 채 `auth-required`로 갱신하므로 이 버튼을 사용할 수 있다. 같은 identity로 다시 로그인하면 복구되고, 다른 identity로 바뀌면 기존 바인딩을 자동 교체하지 않는다.
-공통: `App.tsx`, `state.ts`(`useSnapshot`, `useBridge`, `useAction`, 공급자 별칭), `api.ts`, `types.ts`, `dialogs.tsx`, `components.tsx`, `i18n.ts`.
+공식 Claude 조회가 미로그인을 반환하면 등록된 identity는 보존한 채 `auth-required`로 갱신하므로 이 버튼을 사용할 수 있다. 프로필 경로가 있는 claude·codex 계정이 `error`(예: `IDENTITY_DRIFT`)여도 버튼을 보인다(`overview.ts` `canRelogin`). 같은 identity로 다시 로그인하면 복구되고, 다른 identity로 바뀌면 기존 바인딩을 자동 교체하지 않는다.
+공통: `App.tsx`, `state.ts`(`useSnapshot`, `useBridge`, `useAction`, `useWindowVisible`, `useCharacters`, 공급자 별칭), `api.ts`, `types.ts`, `dialogs.tsx`, `components.tsx`, `i18n.ts`.
 - `useSnapshot(observe = true)`는 상태 조회·강제 새로고침에 같은 관측 옵션을 전달한다. `Popover.tsx`는 외부 세션을 표시하지 않으므로 `useSnapshot(false)`로 프로세스 관측을 생략하고 저장된 계정·사용량만 읽는다. 본 창은 기존 관측을 유지한다.
 Windows와 macOS 모두 `tauri-plugin-single-instance`를 다른 플러그인보다 먼저 등록한다(앱 ID 기준이라 설치 경로가 다른 사본도 같은 잠금을 쓴다). 두 번째 실행은 기존 `main` 창을 다시 표시·포커스하고 종료하며, 자동 시작 인수로 들어온 중복 실행은 창을 열지 않는다. `relaunch`는 메인 스레드 `restart()`가 종료 이벤트를 건너뛰므로 잠금을 먼저 푼다. macOS는 잠금을 모르는 예전 판 사본(0.16.6 이하, 백업 번들 등)이 떠 있으면 `duplicate_app.rs`가 같은 사용자의 다른 `*.app/Contents/MacOS/ai-account-manager`를 찾아 그 번들을 `open`으로 앞으로 가져오고 새 앱은 끝난다. 다른 사본을 종료하지 않는다. setup 단계의 모달 대화상자는 이벤트 루프 전이라 응답 없이 닫혀 쓰지 않는다. 자동 시작은 창을 띄우지 않고 끝내고, 디버그 빌드는 검사하지 않는다. macOS의 기존 `Reopen` 처리는 유지한다.
 - 사용 현황의 계정 상세 `ResetCreditsPanel.tsx`는 저장된 초기화권 정보만 먼저 읽는다. 사용자가 조회할 때 공급자에서 수량·만료·범위를 확인하며, 별도 확인란 동의 뒤에만 `resetCredits.redeem`을 한 번 호출한다. 닫기·IPC 오류·재열기로 mutation을 재전송하지 않는다. `unknown/unsupported/known(0)`을 구분하고 결과 불명은 읽기 전용 조회로 복구한다. 유료 크레딧과 별개이며 초기화권으로 다른 한도·세션 슬롯을 해제한다고 약속하지 않는다.
+- `ProviderLoginDialog`(`LoginDialog.tsx`)는 `LoginPanel`을 `Modal`에 담은 로그인 대화상자다. 계정 행(`AccountRow.tsx`)과 연결 화면(`ConnectionsView.tsx`)의 로그인 진입점이 연다.
+- `useWindowVisible`(`state.ts`)은 창 가시성을 `ojak://window-visible` 이벤트로 따른다. `useSnapshot`의 3초 조회와 사용 현황·토큰·비용 화면의 주기 조회는 창이 숨겨지면 멈춘다. `useCharacters`는 설정의 "캐릭터 보기"(`ojak.characters`) 값을 읽는다.
 
 ## 글꼴·조판 (`styles.css`)
 - 본문 글꼴은 앱에 넣은 Pretendard Variable(`src/assets/fonts`, SIL OFL 1.1, 약 2 MB)이다. macOS·Windows에서 한글·영문·인도네시아어를 같은 글꼴과 같은 굵기 단계로 그린다. 코드는 `--mono`(SF Mono/Menlo, Windows Cascadia Mono/Consolas).
@@ -63,16 +65,22 @@ Windows와 macOS 모두 `tauri-plugin-single-instance`를 다른 플러그인보
 
 
 ## Tauri 명령 (`src-tauri/src/main.rs`)
-- `rpc` 허용 목록: `status.read`, `quota.refresh`, `route.explain`, `policy.update`, `account.register`, `account.update`. 그 외 `METHOD_DENIED` (`main.rs:35-51`).
-- 관리 작업(`integration_action`, `omp_bridge_action`, `omp_broker_action`, `install_service`, `stop_service` …)은 `run_management`(`main.rs:195`)가 같은 폴더의 `aam`을 `AAM_HOME`과 함께 실행한다.
+- `rpc` 허용 목록: `status.read`, `quota.refresh`, `route.explain`, `policy.update`, `account.register`, `account.update`, `account.remove`, `resetCredits.read`, `resetCredits.redeem`. 그 외 `METHOD_DENIED` (`main.rs:553-566`).
+- 관리 작업(`integration_action`, `omp_bridge_action`, `omp_broker_action`, `install_service`, `stop_service` …)은 `run_management`(`main.rs:828`)가 같은 폴더의 `aam`을 `AAM_HOME`과 함께 실행한다.
 - 앱 시작 시 `refresh_integrations` → `aam integration refresh-extensions`로 현재 설치본이 소유한 기존 omp 확장을 맞춘다. 다른 앱 복사본은 전역 연결을 바꾸지 않으며, 실패는 화면의 `ActionFeedback`으로 안내한다. 인증을 추가하거나 서비스·사용자 대화를 재시작하지 않고 OS 알림도 추가하지 않는다.
 - 연결 → omp의 `모델 설정 점검`은 `omp_bridge_action("check-models")`로 CLI의 현재 카탈로그 검사를 실행한다. 누락된 fallback 시작 모델·자동 fallback 상태·수동 확인 명령을 표시한다. 읽기 전용이고 재점검 시 이전 결과를 지우며, 실패를 정상으로 표시하지 않는다. 한국어·영어·인도네시아어를 지원한다.
-- `bridge_usage`(`main.rs:561`): `logs/bridge.log`를 최대 4 MiB 읽어 5분 단위로 모은다.
+- `bridge_usage`(`main.rs:1267`): `logs/bridge.log`를 최대 4 MiB 읽어 5분 단위로 모은다.
 - `launch_session`: 새 관리 세션을 Terminal에서 연다.
 - `service_version_status` / `service_restart`: 앱만 DMG로 덮어써 서비스가 예전 버전으로 남은 경우를 위한 명령. 상태는 읽기 전용 비교(`aam_launcher::service_version`), 재시작은 사용자가 [서비스 다시 시작]을 눌렀을 때만 `service_version::restart`(lease 검사 → 재시작 → 버전 확인)를 부른다. 화면은 `SetupGuide.tsx`의 `ServiceVersionNotice`(앱 시작·서비스 시작 시각이 바뀔 때 비교)가 대시보드 위에 버튼 하나짜리 안내를 띄운다. 최근 15분 안에 쓴 omp 브릿지 세션이 있으면 `update.warn` 문구로 먼저 경고하고 한 번 더 누르게 한다. 쓰는 중인 관리 세션은 서비스가 `SESSION_BUSY`로 거절하고 화면이 나중에 다시 누르라고 안내한다. 성공 뒤 서비스 버전이 앱과 같은지 다시 읽어 확인하며, 실패하면 기존 서비스를 그대로 두고 현지화한 오류를 보인다. 연결 화면의 서비스 표에도 서비스 버전이 나온다.
 - `updates_status` / `install_update` / `restart_after_update`: 서명 공개키가 자리표시자가 아니면 시작 시·24시간마다 업데이트를 확인한다. 설치 뒤 `/bin/launchctl kickstart -k gui/<uid>/ai.aam.service`로 새 `aam-service`를 적용하고 앱을 재실행한다. RPC 허용 목록은 넓히지 않는다.
+- `setup_install(check?, with_omp?)`: 번들 `aam setup`을 실행한다(`check`면 `--check`, `with_omp`면 `--with-omp`). `settings_preview(tool)`은 `claude`·`codex`가 아니면 `ADAPTER_UNVERIFIED`를 돌려주고, 맞으면 `aam account settings-preview`를 최대 15초 실행한다.
+- `app_info`는 버전·프로토콜·연동 버전·bundle id·플랫폼·`AAM_HOME`과 연락처 설정 여부(`contact`)를 준다. `open_homepage`는 코드에 고정된 저장소 주소를, `contact_author`는 빌드 시 `OJAK_CONTACT_URL`로 넣은 주소를 연다. 이 주소가 `https://`·`mailto:`로 시작하지 않으면 `CONTACT_UNSET`이다.
+- `quit_app(mode)`는 `keep`(앱만 종료)과 `deactivate`(`aam deactivate` 실행, 로그인 자동 실행을 끈 것을 확인한 뒤 종료)를 받는다. `keep`·`deactivate` 외의 값은 `INVALID_ACTION`이다. `deactivate_plan`은 `aam deactivate --dry-run` 결과에 자동 실행 해제 항목을 덧붙인다.
+- 설정 명령: `get_language`/`set_language`, `get_tray_threshold`/`set_tray_threshold`(100 초과는 100으로 낮춤), `get_expiring_notify`/`set_expiring_notify`, `get_autostart`/`set_autostart`, `set_privacy`(터미널 안내의 이메일 가림). 창 명령: `open_dashboard`, `hide_popover`.
+- `AAM_HOME/ui-settings.json`에는 `language`, `trayThreshold`, `expiringNotify`, `expiringNotified`, `autostartChosen`, `privacy`(`masked`/`visible`), `recoveryWatches`가 저장된다(`write_ui_setting`).
+- Windows `open_terminal`은 새 콘솔 창에 `AAM_HOLD_ON_ERROR=1`을 넘기고(`main.rs:604`), `aam`은 이 변수가 있으면 오류를 출력한 뒤 Enter를 기다린다(`crates/launcher/src/main.rs:849`).
 
-## 공급자 별칭 (`state.ts:13-19`)
+## 공급자 별칭 (`state.ts:19-23`)
 `ojak-*`와 이전 `aam-*`를 모두 원래 공급자로 모은다. 연결 화면의 로그인 수는 `ojak-*`만 센다.
 
 ## omp 요청 경로 표시
@@ -90,28 +98,30 @@ Windows와 macOS 모두 `tauri-plugin-single-instance`를 다른 플러그인보
 - `npm run build` → `scripts/build.mjs` (release cargo build → 복사 → `tauri build`, 결과 `target/release/bundle/{macos,dmg}`)
 - `npm run typecheck` → `tsc -b`
 - `src-tauri/binaries/`는 gitignore이며 위 스크립트만 만든다. Tauri crate는 workspace default-members에서 빠져 있다.
+- `OJAK_CONTACT_URL`은 빌드 시점 환경 변수로 `option_env!`가 읽는다(`main.rs:1204`). 예: 저장소 Issues 주소.
+- `scripts/`에는 위 두 개 외에 `bump-version.mjs`(버전 일괄 변경), `verify-signing-key.mjs`(릴리스 전 `TAURI_SIGNING_PRIVATE_KEY`가 `tauri.conf.json`의 `plugins.updater.pubkey`와 짝인지 검증), `prepare-client-forks.mjs`·`package-compatible-omp.mjs`(호환 클라이언트 포크 준비·omp 에셋 패키징, `.github/workflows/release.yml`이 호출), `service-crash-dumps.ps1`(Windows 서비스 크래시 덤프 `Status`/`Enable`/`Disable`), `import-client-native-slots.py`(node-pty 네이티브 슬롯 manifest 생성), 테스트 `install-sh.test.mjs`·`package-compatible-omp.test.mjs`가 있다.
 
 ## Screen Flow / Lifecycle
 <!-- screen-flows-v3: 2026-09-27, type=web-frontend -->
 
 | Stage | 상태 | 근거 |
 |---|---|---|
-| accounts · Create | ✅ | AddAccountDialog: profile mode rpc account.register (apps/desktop/src/dialogs.tsx:36) → service dispatch (crates/service/src/lib.rs:405, register :722); login m |
-| accounts · Read | ✅ | useSnapshot rpc status.read every 3s (state.ts:220,240) → snapshot.accounts rendered in ToolPanel table (ConnectionsView.tsx:75-77), UsageView quota rows (Usage |
-| accounts · Update | ✅ | include/exclude toggle rpc account.update {enabled} (AllocationSettings.tsx:47, service lib.rs:406/690); priority reorder & preferred account via policy.update (PolicyV |
-| accounts · Delete | ❌ | No remove button in desktop src; rpc allowlist lacks any account.remove (src-tauri/src/main.rs:37-44); service dispatch has no removal method (crates/service/sr |
-| sessions · Create | ✅ | SessionsView New session (SessionsView.tsx:29) / same-settings (SessionsView.tsx:59) → LaunchDialog (App.tsx:85) → route.explain preview (dialogs.tsx:106) → lau |
-| sessions · Read | ✅ | Managed sessions from snapshot.sessions (SessionsView.tsx:20) + omp bridge sessions via useBridge (SessionsView.tsx:15-18, state.ts:264); detail inspector dl wi |
-| sessions · Update | 🚧 | Only resume: button gated to tool==='claude' && nativeSessionId && state==='EXITED' (SessionsView.tsx:58) → LaunchDialog with resumeSessionId (App.tsx:37, dialo |
-| sessions · Delete | ❌ | No stop/terminate/dismiss action in SessionsView.tsx; no session.* RPC in allowlist (src-tauri/src/main.rs:37-44). Sessions end only when the terminal process e |
-| policy/project rules · Create | ✅ | ProjectRoutesEditor 'add rule' opens draft form (AllocationSettings.tsx:164) → submit appends route (AllocationSettings.tsx:147-148) → rpc policy.update {projectRoutes} with ex |
-| policy/project rules · Read | ✅ | snapshot.policy rendered: criteria/revision badge (AllocationSettings.tsx:64-72), order list (:77-85), preferred accounts (:89-96), routes table (:136-141); sidebar aut |
-| policy/project rules · Update | ✅ | Edit route (AllocationSettings.tsx:140 → :147); allocationMode select (:68), safetyReserve (:53,69), priority move (:43), preferred (:55-61), sidebar automatic toggle ( |
-| policy/project rules · Delete | ✅ | Remove button filters route and saves via policy.update (AllocationSettings.tsx:140 → save :123-130); preferred account cleared with empty option (AllocationSettings.tsx:93, se |
-| connections · Create | ✅ | Shim install: HostsPanel install (ConnectionsView.tsx:97) → IntegrationDialog → integration_action install (dialogs.tsx:124, main.rs:407-409); Service install:  |
-| connections · Read | ✅ | host_connections on mount (ConnectionsView.tsx:112-113, main.rs:419); omp broker/bridge status (ConnectionsView.tsx:18); service panel startedAt/protocol/notice |
-| connections · Update | ❌ | No edit surface for shim directory, bridge port or broker config; only recheck (ConnectionsView.tsx:52,97) and re-run install (idempotent 'install/start' button |
-| connections · Delete | ✅ | Shim uninstall: HostsPanel (ConnectionsView.tsx:97, disabled when no shims) → IntegrationDialog → integration_action uninstall (dialogs.tsx:124, main.rs:410); s |
+| accounts · Create | ✅ | AddAccountDialog: profile mode rpc account.register (apps/desktop/src/dialogs.tsx:46) → service dispatch (crates/service/src/lib.rs:514, register :829); login m |
+| accounts · Read | ✅ | useSnapshot rpc status.read every 3s (state.ts:274,302) → snapshot.accounts rendered in ToolPanel table (ConnectionsView.tsx:118), UsageView quota rows (Usage |
+| accounts · Update | ✅ | include/exclude toggle rpc account.update {enabled} (AllocationSettings.tsx:90, service lib.rs:515/803); priority reorder & preferred account via policy.update (PolicyV |
+| accounts · Delete | ✅ | 연결 탭 계정 행의 '연결 해제' → 확인 모달 → rpc `account.remove` (ConnectionsView.tsx). 프로필 폴더·로그인 파일은 지우지 않고, 고정된 프로젝트 규칙 삭제 개수(`removedRoutes`)를 알린다. |
+| sessions · Create | ✅ | SessionsView New session (SessionsView.tsx:29) / same-settings (SessionsView.tsx:59) → LaunchDialog (App.tsx:120) → route.explain preview (dialogs.tsx:117) → lau |
+| sessions · Read | ✅ | Managed sessions from snapshot.sessions (SessionsView.tsx:20) + omp bridge sessions via useBridge (SessionsView.tsx:15-18, state.ts:314); detail inspector dl wi |
+| sessions · Update | 🚧 | Only resume: button gated to tool==='claude' && nativeSessionId && state==='EXITED' (SessionsView.tsx:58) → LaunchDialog with resumeSessionId (App.tsx:47, dialo |
+| sessions · Delete | ❌ | No stop/terminate/dismiss action in SessionsView.tsx; no session.* RPC in allowlist (src-tauri/src/main.rs:553-566). Sessions end only when the terminal process e |
+| policy/project rules · Create | ✅ | ProjectRoutesEditor 'add rule' opens draft form (AllocationSettings.tsx:234) → submit appends route (AllocationSettings.tsx:217) → rpc policy.update {projectRoutes} with ex |
+| policy/project rules · Read | ✅ | snapshot.policy rendered in AllocationSettings.tsx: criteria/revision badge, order list, preferred accounts, routes table; sidebar aut |
+| policy/project rules · Update | ✅ | Edit route (AllocationSettings.tsx:210 → save :193); allocationMode select, safetyReserve (saveReserve :94), priority move (move :81), sidebar automatic toggle ( |
+| policy/project rules · Delete | ✅ | Remove button filters route and saves via policy.update (AllocationSettings.tsx:210 → save :193); preferred account cleared with empty option (AllocationSettings.tsx, se |
+| connections · Create | ✅ | Shim install: HostsPanel install (ConnectionsView.tsx:160) → IntegrationDialog → integration_action install (dialogs.tsx:135, main.rs:1036-1038); Service install:  |
+| connections · Read | ✅ | host_connections on mount (ConnectionsView.tsx:175, main.rs:1066); omp broker/bridge status (ConnectionsView.tsx:44); service panel startedAt/protocol/notice |
+| connections · Update | ❌ | No edit surface for shim directory, bridge port or broker config; only recheck (ConnectionsView.tsx:91,160) and re-run install (idempotent 'install/start' button |
+| connections · Delete | ✅ | Shim uninstall: HostsPanel (ConnectionsView.tsx:160, disabled when no shims) → IntegrationDialog → integration_action uninstall (dialogs.tsx:135, main.rs:1039); s |
 
 ```mermaid
 graph TD
@@ -159,16 +169,14 @@ graph TD
 ```
 
 ### 이슈
-- [medium] accounts · Delete: Users cannot remove a registered account from the desktop app (no UI and no service RPC). They can only exclude it (account.update enabled=false, AllocationSettings.tsx:47). Stale accounts pile up in lists and in the Policy sele
-- [medium] sessions · Delete: The app cannot stop a managed session or dismiss an ORPHANED/FAILED one. While occupied>0 the service stop button is disabled (ConnectionsView.tsx:152), so a stuck session also blocks stopping the service.
+- [medium] sessions · Delete: The app cannot stop a managed session or dismiss an ORPHANED/FAILED one. While occupied>0 the service stop button is disabled (ConnectionsView.tsx:216), so a stuck session also blocks stopping the service.
 - [low] sessions · Update: Resume only works for Claude sessions in EXITED state that have a nativeSessionId (SessionsView.tsx:58). Codex sessions have no resume path.
 - [low] accounts · Update: Account labels cannot be renamed.
-- [low] connections · Delete: ompBrokerAction('disconnect') is typed in api.ts:60, but OmpPanel disconnect only calls ompBridgeAction('disconnect') (ConnectionsView.tsx:42). The broker link cannot be removed from the UI.
-- [low] connections · Create: The omp_observer_action Tauri command is registered (src-tauri/src/main.rs:427, :999) but has no frontend caller. It is a dead or backend-only (⚡) surface.
+- [low] connections · Delete: ompBrokerAction('disconnect') is typed in api.ts:78, but OmpPanel disconnect calls ompBridgeAction('disconnect') (ConnectionsView.tsx:80) and makes no broker disconnect call. The broker link cannot be removed from the UI.
+- [low] connections · Create: The omp_observer_action Tauri command is registered (src-tauri/src/main.rs:1074, :2310) but has no frontend caller. It is a dead or backend-only (⚡) surface.
 - [low] connections · Update: There is no way to edit connection settings (shim dir, bridge port, broker config). The only option is reinstalling or reconnecting.
 
 ### 다음 할 일
-- [ ] accounts · Delete: add an account.remove service method that refuses when leases exist and reuses forget_account (lib.rs:191), add it to the rpc allowlist (main.rs:37-44), and put a Remove button with a confirm modal in ToolPanel (ConnectionsView.tsx:77).
 - [ ] sessions · Delete: expose a session stop/dismiss RPC for ORPHANED/FAILED/ACTIVE sessions and add the action to the SessionsView inspector (SessionsView.tsx:57-59).
 - [ ] connections: either wire omp broker disconnect and omp_observer_action into OmpPanel, or remove the unused omp_observer_action handler and the 'disconnect' union member.
 - [ ] sessions · Update: extend resume to Codex once the launcher supports --resume-session for codex.
@@ -182,7 +190,7 @@ graph TD
 - 잔여 색(`limits.ts` `remainingTone`): 사용량 화면과 팝오버가 같은 기준을 쓴다. 공급자·모델과 무관하게 남은 %만 본다. 31% 이상 초록, 30% 이하 주황, 안전 여유분 이하·소진 빨강, 관측 없음 회색. 공급자 색은 이름 옆 점과 사용량 그래프에만 쓰고 잔여 막대에는 쓰지 않는다.
 - 크레딧·추가 사용량 표시(`UsageView.tsx`, `ConnectionsView.tsx`, `Popover.tsx`, `limits.ts`): 서비스가 매 스냅샷마다 다시 계산한 `quotaSummaries[].kind`가 `credits`면 "크레딧 사용 중", `extra`면 "추가 사용량 사용 중"(en Using credits/Using extra usage, id Pakai kredit/Pakai penggunaan tambahan). 크레딧 잔액은 숫자로 읽힐 때만 "크레딧 N개 남음"(반올림, 금액 아님), 추가 사용량은 USD로만 "$12.40 / $50"(상한 없으면 "$12.40 사용"). 옵트인이 꺼져 있는데 관측이 있으면 "크레딧 있음 (꺼짐)"/"추가 사용량 켜짐 (Ojak에서는 꺼짐)" 중립 안내만 보이고 한도가 리셋되면 바로 사라진다. 설정은 사용 현황 → 배정 설정의 스위치 둘(Codex는 '크레딧', Claude는 '추가 사용량 (API 요금)')이고 켜도 한도가 남은 계정이 항상 먼저다. 둘 다 과금될 수 있고 Ojak이 쓴 금액을 막거나 볼 수 없다는 경고를 함께 보인다.
 - 오른쪽 클릭: 상태·대시보드 열기·종료 메뉴. 창을 닫으면 Dock에서 사라지고 메뉴바에만 남는다.
-- 설정(⌘, / Ctrl+,): 언어(시스템/한국어/English/Bahasa Indonesia), 로그인 시 자동 실행, macOS 메뉴바 숫자 기준(Windows에서는 숨김), 리셋 전 사용 알림, 앱 정보. 종료는 "앱만 종료 / Ojak 사용 중지 후 종료" 확인 창을 거친다(`aam deactivate`). 사용 중지는 로그인 자동 실행도 끈다. Windows 문구는 `i18n.ts`의 Windows 덮어쓰기로 LaunchAgent·이 Mac·메뉴바를 트레이·이 PC로 바꾼다.
+- 설정(⌘, / Ctrl+,): 언어(시스템/한국어/English/Bahasa Indonesia), 로그인 시 자동 실행, macOS 메뉴바 숫자 기준(Windows에서는 숨김), 리셋 전 사용 알림, 앱 정보. 종료는 "앱만 종료 / Ojak 사용 중지 후 종료" 확인 창(`QuitDialog`, `dialogs.tsx`)을 거친다(`aam deactivate`). 사용 중지는 로그인 자동 실행도 끈다. Windows 문구는 `i18n.ts`의 Windows 덮어쓰기로 LaunchAgent·이 Mac·메뉴바를 트레이·이 PC로 바꾼다.
 - 리셋 전 사용 알림: 트레이 폴링(5초)이 서비스의 `quotaSummaries[].expiring`을 읽어 `tauri-plugin-notification`으로 시스템 알림을 보낸다(macOS 알림 센터, Windows 토스트). 창이 닫혀 있어도 동작한다. 같은 (계정 묶음 최소 ID, 리셋 시각)은 한 번만 보내며 `ui-settings.json`의 `expiringNotified`에 ID와 시각만 저장하고 지난 리셋은 지운다. 본문에는 이메일 대신 공급자 이름만 쓴다. 설정 `expiringNotify`(기본 켬). 데스크톱 플러그인은 OS 허용 상태를 읽지 못해(항상 Granted) OS에서 막혀 있으면 조용히 표시되지 않는다. 판정 기준과 "곧 리셋 계정 먼저 쓰기"는 사용 현황 → 배정 설정에 있고, 해당 계정 줄에 파란 안내가 붙는다.
 - 호랑이(브랜드 풍자): 앱 안에서는 두 곳에만 나온다. ① 사용 현황 공급자 패널: 배정에 포함된 계정이 모두 `resting`(소진·차단)일 때만 호랑이 저울 띠와 가장 빠른 리셋 시각(`limits.ts` `allResting`). 하나라도 쓸 수 있거나 판정이 불확실하면 띄우지 않는다. ② 설정 → 정보에서 로고를 7번 누르면 호랑이 쌀가게 이스터에그(다시 누르면 돌아감). 앱 문구에는 회사 이름을 쓰지 않는다. 그림은 `src/assets/tiger-shop.webp`(640px)·`tiger-strip.webp`(160px) — `docs/brand/concepts/C-tiger-scale.png`에서 일장기로 읽힐 수 있는 빨간 해를 지우고 줄인 것이다.
 - 첫 실행 준비(`SetupGuide.tsx`): `setup_status`로 서비스·zsh/사용자 PATH·도구별 계정·shim을 보고, 준비가 안 됐으면 창을 띄운다. 맨 위에 한 줄 가치 문장("터미널에서 평소처럼 `claude`·`codex`를 치면 돼요 …")이 먼저 나오고, 세 단계마다 한 줄 이유(`setup.why*`)가 붙는다. [시작하기]는 번들 `aam setup`을 실행해 빠진 단계만 설치한다(서비스 → 첫 탐지 대기 → `integration install` → `shell install`). 실패한 단계 아래에는 `notices`의 이유와 다음 행동을 보여 준다. 계정이 없으면 도구별 로그인 버튼, 끝나면 "준비됐어요"와 **터미널 열기**(위 `OpenTerminal`)를 보여 준다. [나중에]는 이번 창 세션(sessionStorage)에서만 유지하고 사용 현황의 시작하기 카드는 숨기지 않는다. 준비 창에서 상태가 바뀌면(`onChanged`) 카드가 다시 읽는다.

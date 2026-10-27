@@ -1,3 +1,4 @@
+mod account_remove;
 mod allocation;
 mod credits;
 mod routing;

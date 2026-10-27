@@ -6,8 +6,10 @@ omp의 `ojak-*` 모델 요청은 `127.0.0.1:4020` 브릿지로 오고, 브릿지
 Claude·Codex는 Ojak에 등록된 기존 공식 CLI 로그인과 omp의 원래 공급자 로그인 중 하나만 있으면 된다. 같은 공급자·계정·워크스페이스가 양쪽에 있으면 broker를 우선해 중복 gateway를 만들지 않는다. Gemini(Antigravity)·Grok·Z.AI는 omp의 원래 공급자 로그인을 쓴다. 사용자는 원래 로그인 한 번만 하고, Ojak은 `ojak-*` 등록과 계정 배정을 자동 처리한다. 인증이 실제로 폐기됐을 때만 그 인증을 소유한 공식 CLI 또는 omp 공급자에서 다시 로그인한다.
 
 ## 구성
-- 서비스 쪽: `crates/service/src/bridge.rs` — `Bridge::start`(`:370`), `handle`(`:565`), `stream`(`:636`), `choose`(`:205`), `spawn_gateway`(`:934`)
+- 서비스 쪽: `crates/service/src/bridge.rs` — `Bridge::start`(`:693`), `handle_connection`(`:1155`)·`handle_public`(`:1196`), `stream`(`:1370`), `choose`(`:327`), `spawn_gateway`(`:1920`)
+- 연결 예산·모델 대기열·본문 예약: `crates/service/src/bridge_admission.rs`(`Admission`·`Permit`·`BodyReservation`).
 - launcher 쪽: `crates/launcher/src/omp_bridge.rs`(`aam omp-bridge`), `omp_broker.rs`(`aam omp-broker`); Windows 로그인 자동 실행과 감독은 `omp_broker_windows.rs`.
+- 원래 omp 실행 파일: 환경 변수 `OMP_NATIVE_BIN`이 있으면 그 경로를 쓴다(launcher `omp_bridge.rs:107`·`omp_broker.rs:327`, 서비스 `bridge.rs:136`). 없으면 macOS는 `~/.local/bin/omp`, Windows는 `%LOCALAPPDATA%\omp\omp.exe`다.
 - 공식 CLI 인증: `crates/adapters/src/access*.rs`, `crates/service/src/bridge_native.rs`. Claude는 프로필별 macOS 키체인(항목이 없을 때만 `.credentials.json`) 또는 Windows 인증 파일, Codex는 파일 기반 `auth.json`을 읽는다. Codex의 다른 저장소 모드는 오래된 파일로 대체하지 않고 명시적으로 거절한다. 프로필·워크스페이스는 읽기 전후 공식 CLI로 확인한다.
 - 갱신 소유권: Claude의 공식 `/usage` 무추론 명령, Codex app-server의 `account/read {refreshToken:true}`가 원래 저장소와 잠금 규칙으로 갱신한다. Ojak은 refresh token을 복사·저장·재발급하지 않으며 access token과 실제 만료 시각만 메모리에서 중개한다.
 - omp 확장: `integrations/omp/aam-accounts.js` (설치 위치 `${PI_CODING_AGENT_DIR:-~/.omp/agent}/extensions/aam-accounts`)
@@ -53,7 +55,7 @@ Claude·Codex는 Ojak에 등록된 기존 공식 CLI 로그인과 omp의 원래 
 - 첫 structured 시작은 공급자-visible index가 생기기 전에도 workspace tab이 저장될 수 있다. 복구는 실제 tab 소유권으로 판정하고, 아직 공급자 대화를 만들지 않았다면 기존 예약 session/tab을 재사용한다. Orca의 ACP 버전 검사에는 결합된 `18.12.0-ojak.2`만 추가하며 다른 prerelease를 일괄 허용하지 않는다.
 
 ### 수정본 재현과 빌드 범위
-- 현재 소스 후보 버전: Ojak `0.16.2`, omp `18.12.0-ojak.2`, Orca `1.5.0-ojak.3`(upstream `v1.4.227`). 패치와 각 upstream MIT 라이선스는 `integrations/client-forks`에 있다. 이 버전 표는 설치·빌드 검증 완료를 뜻하지 않는다.
+- 현재 소스 후보 버전: Ojak `0.17.0`, omp `18.12.0-ojak.2`, Orca `1.5.0-ojak.3`(upstream `v1.4.227`). 패치와 각 upstream MIT 라이선스는 `integrations/client-forks`에 있다. 이 버전 표는 설치·빌드 검증 완료를 뜻하지 않는다.
 - `node scripts/prepare-client-forks.mjs --check`는 패치 해시만 검사한다. `node scripts/prepare-client-forks.mjs <새 디렉터리>`는 공식 tag를 clone하고 commit 일치·`git apply --check` 후 패치를 적용한다. 빌드·설치·기존 checkout 변경은 하지 않는다.
 - 일반 `omp update`와 시작 시 업데이트 안내는 공개 stable Ojak Release의 `omp-compatible.json`만 사용한다. 동일 릴리스의 두 OS asset 이름·크기·SHA-256과 admission protocol 1을 검사하고 기존 atomic replacement·버전 검증·rollback으로 설치한다. `--check`는 대상 파일을 바꾸지 않고 `--force`도 검증을 생략하지 않는다. `--canary`·누락된 manifest·네트워크 오류는 실행 파일을 유지하고 이유를 표시하며 upstream 배포판을 대신 설치하지 않는다. 빌드·draft 절차는 [릴리스 정책](../release-policy.md#배포-위치)을 따른다.
 - 각 upstream의 lockfile·native 빌드 전제조건을 따른다. 이번 Windows 검증은 Bun `1.4.3`으로 omp의 `packages/coding-agent`에서 `bun run build`, Orca에서는 `node config/scripts/run-electron-vite-build.mjs`를 실행했다. omp의 native addon은 해당 upstream `18.11.0` ABI, Orca의 native addon은 Electron `43.7.5` ABI가 필요하다.
@@ -63,8 +65,8 @@ Claude·Codex는 Ojak에 등록된 기존 공식 CLI 로그인과 omp의 원래 
 
 
 ## 공급자 ID
-- 현재: `ojak-claude`→`anthropic`, `ojak-codex`→`openai-codex`, `ojak-antigravity`→`google-antigravity`, `ojak-grok`→`xai-oauth`, `ojak-zai`→`zai` (`bridge.rs:33-39`)
-- 이전 `aam-*`는 `LEGACY_ALIASES`(`bridge.rs:41-47`)로 요청만 계속 받는다. 이름을 바꾸기 전 떠 있던 omp 세션용.
+- 현재: `ojak-claude`→`anthropic`, `ojak-codex`→`openai-codex`, `ojak-antigravity`→`google-antigravity`, `ojak-grok`→`xai-oauth`, `ojak-zai`→`zai` (`bridge.rs:47-53`)
+- 이전 `aam-*`는 `LEGACY_ALIASES`(`bridge.rs:55-61`)로 요청만 계속 받는다. 이름을 바꾸기 전 떠 있던 omp 세션용.
 - 같은 표가 여러 곳에 있다: `bridge.rs` ALIASES, `aam-accounts.js` PROVIDERS, `aam-observer.js` BRIDGE_PROVIDERS/DIRECT_PROVIDERS, `omp_bridge.rs` OJAK_PROVIDERS/RENAMED, 데스크톱 `state.ts` providerAliases, `ConnectionsView.tsx` bridgeProviderOrder. 하나를 바꾸면 전부 바꾼다.
 
 ## 계정 선택 규칙
@@ -95,7 +97,7 @@ Claude·Codex는 Ojak에 등록된 기존 공식 CLI 로그인과 omp의 원래 
 - **모델 설정 점검(0.14.0):** 연결 → omp → `모델 설정 점검`은 `aam omp-bridge check-models`를 명시적으로 실행한다. `omp config get retry.modelFallback|retry.fallbackChains --json`과 `omp models --kind all --json`을 읽어 `{modelFallback,unknownSources}`를 반환한다. 역할 키(사용자 역할 포함)는 모델 id로 검사하지 않고, `provider/*`·`provider/prefix/*`는 같은 공급자의 id 접두어로 검사한다. 누락 모델을 나열하고 자동 fallback이 꺼진 경우에도 시작 경고가 날 수 있음을 안내한다. 대상 fallback 배열·역할에 배정한 모델까지 검증하는 기능은 아니며, 카탈로그가 비거나 조회에 실패하면 `OMP_MODELS_UNAVAILABLE`로 알린다. 기존 5초 상태 폴링에는 모델 조회를 추가하지 않으며 인증·설정·실행 중인 서비스는 변경하지 않는다.
 
 ## 주의
-- gateway는 상속된 `OMP_*`/`PI_*` 환경을 지우고 전용 `PI_CODING_AGENT_DIR=<AAM_HOME>/bridge/agent`로 띄운다. 안 그러면 사용자 설정이 요청을 다시 브릿지로 돌려 루프가 된다 (`bridge.rs:946-973`).
+- gateway는 상속된 `OMP_*`/`PI_*` 환경을 지우고 전용 `PI_CODING_AGENT_DIR=<AAM_HOME>/bridge/agent`로 띄운다. 안 그러면 사용자 설정이 요청을 다시 브릿지로 돌려 루프가 된다 (`bridge.rs:1943-1956`).
 - `logs/bridge.log` 줄 형식은 데스크톱 사용량 화면이 그대로 파싱한다 (`apps/desktop/src-tauri/src/main.rs`의 `parse_usage_line`). 형식을 바꾸면 그 파서도 고친다. 줄 종류는 요청·차단·거절·포화이며, 사용량은 `->`가 있는 요청 줄만 센다.
   - 요청: `<ms> <provider>/<model> session=<끝8자> turn=<bool> tools=<n> -> <계정별칭12hex> [reserve-fallback]`
   - 차단(한도 응답을 받아 계정을 막을 때): `<ms> <provider>/<model> session=<끝8자> outcome=blocked account=<별칭> kind=<quota|rate> scope=<모델범위|-> until=<ms>:<provider|estimate>`
@@ -104,17 +106,17 @@ Claude·Codex는 Ojak에 등록된 기존 공식 CLI 로그인과 omp의 원래 
   - 포화: `<ms> bridge/overload session=- outcome=overload scope=<public|native> class=<connection|model|poll> active=<n> limit=<n> suppressed=<n>`. 같은 종류는 5초에 한 줄만 기록하고 생략한 횟수를 다음 줄에 합친다. 기존 `outcome=` 제외 규칙으로 사용량·한도 차단 집계에 포함하지 않는다.
   - 이메일·조직·토큰·프롬프트는 어느 줄에도 넣지 않는다. 데스크톱 파서는 `outcome=` 칸이 있는 줄을 요청으로 세지 않는다.
 - 사용 현황의 미경유 판정은 observer의 요청별 경로 근거를 사용한다. `bridge.status.sessions`는 계정 고정·프로젝트 표시용이고, 로그와 연결할 폴더가 없다는 이유로 미경유를 확정하지 않는다. 보조 세션 폴더용 `folders` 상태는 제거했다.
-- `protocol/src/lib.rs:77`, `bridge.rs:104` 주석의 "models.yml `!cat`"은 옛 방식이다. 지금 확장은 `bridge.token` 파일을 직접 읽는다.
+- `protocol/src/lib.rs:126`, `bridge.rs:153` 주석의 "models.yml `!cat`"은 옛 방식이다. 지금 확장은 `bridge.token` 파일을 직접 읽는다.
 
 ## Screen Flow / Lifecycle
 <!-- screen-flows-v3: 2026-09-27, type=web-backend -->
 
 | Stage | 상태 | 근거 |
 |---|---|---|
-| Create | ✅ | [bridge connection ✅] `aam omp-bridge connect` crates/launcher/src/main.rs:414 → omp_bridge.rs:218-257. Requires the broker (BROKER_REQUIRED at :220-222), write |
-| Read | ✅ | [bridge connection ✅] GET /healthz without auth (bridge.rs:571-573). The RPC "bridge.status" (crates/service/src/lib.rs:403) returns Bridge::status (bridge.rs:5 |
+| Create | ✅ | [bridge connection ✅] `aam omp-bridge connect` crates/launcher/src/main.rs:589 → omp_bridge.rs:381-441. Requires the broker (BROKER_REQUIRED at :384-386), write |
+| Read | ✅ | [bridge connection ✅] GET /healthz without auth (bridge.rs:1197-1199). The RPC "bridge.status" (crates/service/src/lib.rs:512) returns Bridge::status (bridge.rs:1050) |
 | Update | ⚡ | [bridge connection ✅] Re-running connect is idempotent and upgrades: if the installed extension is not current, it is uninstalled and reinstalled (omp_bridge.rs |
-| Delete | ⚡ | [bridge connection ✅] `aam omp-bridge disconnect` (main.rs:415 → omp_bridge.rs:259-265) uninstalls the extension, runs scope_ojak_models(false) and writes enabl |
+| Delete | ⚡ | [bridge connection ✅] `aam omp-bridge disconnect` (main.rs:590 → omp_bridge.rs:443-463) uninstalls the extension, runs scope_ojak_models(false) and detach_model_roles, and writes enabl |
 
 ### omp-bridge lifecycle matrix
 
@@ -187,18 +189,17 @@ sequenceDiagram
 ```
 
 ### 이슈
-- [medium] Delete: The ojak-* login cannot be deleted. omp_bridge::disconnect (omp_bridge.rs:259-265) removes the extension but leaves the ojak-* and legacy aam-* credentials in the broker. ConnectionsView (~:31) keeps counting them after 
-- [medium] Update: The bridge token never rotates (bridge.rs:105-115). The stored ojak-* credential expires 10 years out (aam-accounts.js:50, omp_bridge.rs:89). If bridge.token is regenerated (file deleted or AAM_HOME changed), existing lo
-- [medium] Delete: Disconnect reverts enabledModels (scope_ojak_models(false)) but not modelRoles. migrate_model_roles (omp_bridge.rs:160-170) moved roles to ojak-*, and they still point to that provider after the extension is uninstalled.
-- [low] Delete: Gateway has no Drop impl (bridge.rs:273-304; no `impl Drop` in crates/service/src except server.rs:86). If aam-service exits without a disable tick, `omp auth-gateway` children may be orphaned and keep holding 4101-4199.
-- [low] Delete: Sticky sessions only expire: memory keeps them 24h (bridge.rs:429) while pins are effective for 60m. There is no API or UI to release a pin, and the end of an omp session is not observed.
-- [low] Delete: Broker disconnect exists in the CLI (main.rs:393) and Tauri (src-tauri main.rs:448-456), but the desktop only exposes bridge disconnect (ConnectionsView.tsx:41-43), so it is ⚡ for UI users.
-- [low] Read: A stale comment at bridge.rs:104 says omp reads the token via the models.yml `!cat` command. The extension actually reads bridge.token directly (aam-accounts.js:27-33).
-- [low] Create: The provider ID table is duplicated in at least 5 places: bridge.rs:33-47, aam-accounts.js:13-19, omp_bridge.rs:79-87, and state.ts providerAliases/directProviders plus ConnectionsView bridgeProviderOrder. Changes are no
+- [medium] Delete: The ojak-* login cannot be deleted. omp_bridge::disconnect (omp_bridge.rs:443-463) removes the extension but leaves the ojak-* and legacy aam-* credentials in the broker. ConnectionsView (~:31) keeps counting them after 
+- [medium] Update: The bridge token is generated once and reused by ensure_secret (bridge.rs:158), so it has no rotation path. The stored ojak-* credential expires 10 years out (aam-accounts.js:23,500, bridge.rs:63). If bridge.token is regenerated (file deleted or AAM_HOME changed), existing logins keep the old token.
+- [low] Delete: Gateway stops through an explicit `stop()` call (bridge.rs:473) and has no Drop impl. If aam-service exits without a disable tick, `omp auth-gateway` children may be orphaned and keep holding 4101-4199.
+- [low] Delete: Sticky sessions expire by age: memory keeps them 24h (bridge.rs:2064) while pins are effective for 60m (bridge.rs:93). There is no API or UI to release a pin, and the end of an omp session is not observed.
+- [low] Delete: Broker disconnect exists in the CLI (main.rs:568) and Tauri (src-tauri main.rs:1095-1104), but the desktop screen calls broker status and connect, not disconnect (ConnectionsView.tsx:44,67), so it is ⚡ for UI users.
+- [low] Read: A stale comment at bridge.rs:153 says omp reads the token via the models.yml `!cat` command. The extension actually reads bridge.token directly (aam-accounts.js:313-319).
+- [low] Create: The provider ID table is duplicated in at least 5 places: bridge.rs:47-61, aam-accounts.js:15-21, omp_bridge.rs:78-86, aam-observer.js:24-25 BRIDGE_PROVIDERS/DIRECT_PROVIDERS, and state.ts providerAliases plus ConnectionsView bridgeProviderOrder. Changes are no
 
 ### 다음 할 일
 - [ ] Delete (ojak-* login): in omp_bridge::disconnect, remove ojak-* credentials through a broker DELETE endpoint (if the broker offers one), or show a notice that /logout is needed. Decide explicitly how long legacy aam-* credentials are kept.
-- [ ] Delete (modelRoles): on disconnect, revert ojak-* role references to their upstream providers (the reverse of migrate_model_roles).
+- [x] Delete (modelRoles): disconnect now reverts ojak-* role references to their upstream providers through `detach_model_roles` (`omp_bridge.rs:255`), keeping the originals in `omp-model-roles.json`.
 - [ ] Update (token): after token regeneration, re-upload credentials for existing ojak-* logins from the service sync (it currently uploads only missing providers), or shorten `expires` so that refreshToken runs.
 - [ ] Gateway: add Drop for Gateway or a shutdown hook that stops all gateways. At sync time, detect and reclaim orphan gateways by matching the pool-file path.
 - [ ] Sticky: expose a release API or UI for a session. Consider shrinking the 24h in-memory retention to about STICKY_MS.

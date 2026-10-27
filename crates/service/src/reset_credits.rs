@@ -52,6 +52,11 @@ fn gate(connection: &Connection, key: &str) -> Result<Option<Record>, ApiError> 
     let id: Option<String> = metadata(connection, &gate_key(key))?;
     id.map(|id| metadata(connection, &request_key(&id))).transpose().map(Option::flatten)
 }
+/// 계정을 끊을 때 그 계정의 조회 캐시(`resetQuote`)만 지운다. 사용 기록(`resetRequest`·`resetGate`)은 이중 사용 방지 근거라 남긴다.
+pub(crate) fn forget_quote(connection: &Connection, account_id: &str) -> Result<(), ApiError> {
+    connection.execute("DELETE FROM metadata WHERE key=?1", [quote_key(account_id)]).map_err(db_error)?;
+    Ok(())
+}
 fn save(connection: &Connection, record: &Record) -> Result<(), ApiError> {
     set_metadata(connection, &request_key(&record.operation.request_id), record)
 }

@@ -262,6 +262,11 @@ struct AccountUpdate {
 }
 #[derive(Deserialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
+struct AccountRemove {
+    id: String,
+}
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
 struct Explain {
     intent: LaunchIntent,
 }
@@ -318,6 +323,12 @@ fn merge_scan_account(incoming: &mut Account, previous: Option<&Account>, origin
         incoming.reason = Some("등록된 프로필의 identity 변경을 감지했습니다. 활성 세션을 유지하고 새 배정을 차단합니다.".into());
     }
     true
+}
+/// 저장 시점의 해제 기록에 이 프로필이 있는지. 새 행을 만들 때만 쓴다(이미 있는 행은 사용자가 다시 연결한 것이다).
+fn is_dismissed(dismissed: &[DismissedProfile], incoming: &Account) -> bool {
+    incoming.profile_path.as_deref().is_some_and(|path| {
+        dismissed.iter().any(|entry| entry.tool == incoming.tool && entry.path == path)
+    })
 }
 fn config_ms(name: &str, default: i64, min: i64, max: i64) -> i64 {
     std::env::var(name)
@@ -579,6 +590,7 @@ impl Service {
             "bridge.status" => value(bridge::status_or_inactive(self.bridge.get())?),
             "diagnostics.export" => diagnostics::export(self, parse(params)?),
             "account.register" => value(self.register(parse(params)?)?),
+            "account.remove" => self.remove_account(parse(params)?),
             "account.update" => value(self.update_account(parse(params)?)?),
             "lease.acquire" => {
                 let request: Acquire = parse(params)?;
@@ -893,6 +905,69 @@ impl Service {
         tx.commit().map_err(db_error)?;
         Ok(current)
     }
+    /// 사용자가 연결을 끊은 claude·codex 계정 하나를 지운다. 세션 이력(`leases`)과 omp가 보고하는 행은 건드리지 않는다.
+    /// 지운 프로필은 `dismissedProfiles`에 남겨 자동 탐색이 다시 연결하지 않게 하고, 같은 경로의 명시적 등록만 이를 푼다.
+    /// 용량을 쥔 세션(불확실 상태 포함)이 있으면 슬롯을 유지하려고 거절한다.
+    fn remove_account(&self, request: AccountRemove) -> Result<Value, ApiError> {
+        let mut store = self.lock()?;
+        let tx = store
+            .connection
+            .transaction_with_behavior(TransactionBehavior::Immediate)
+            .map_err(db_error)?;
+        let removed = account(&tx, &request.id)?;
+        if !matches!(removed.tool.as_str(), "claude" | "codex") {
+            return Err(ApiError::new(
+                "INVALID_PARAMS",
+                "이 계정은 omp가 보고한 것이라 Ojak에서 연결을 끊을 수 없어요.",
+            ));
+        }
+        expire(&tx, now_ms())?;
+        if leases(&tx)?.iter().any(|record| {
+            record.session.account_id == removed.id && scheduler::holds_capacity(&record.session.state)
+        }) {
+            return Err(ApiError::new(
+                "SESSION_BUSY",
+                "이 계정을 쓰는 대화가 남아 있어 연결을 끊을 수 없어요. 해당 대화를 종료한 뒤 다시 시도해 주세요.",
+            ));
+        }
+        tx.execute("DELETE FROM accounts WHERE id=?1", [&removed.id]).map_err(db_error)?;
+        let mut current_policy = policy(&tx)?;
+        let mut changed = forget_account(&mut current_policy, &removed.id);
+        let routes = current_policy.project_routes.len();
+        current_policy
+            .project_routes
+            .retain(|route| route.account_id.as_ref() != Some(&removed.id));
+        let removed_routes = routes - current_policy.project_routes.len();
+        changed |= removed_routes > 0;
+        if changed {
+            current_policy.revision = current_policy.revision.checked_add(1).ok_or_else(|| {
+                ApiError::new("POLICY_CONFLICT", "설정 버전 범위를 넘었어요.")
+            })?;
+            set_metadata(&tx, "policy", &current_policy)?;
+        }
+        // 지운 계정을 가리키는 인계 등록과 초기화권 조회 캐시는 더 이상 쓸 수 없으므로 함께 정리한다.
+        // 초기화권 사용 기록(resetRequest·resetGate)은 중복 사용 방지 근거라 남긴다.
+        let stored = takeovers(&tx)?;
+        let remaining: Vec<Takeover> = stored
+            .iter()
+            .filter(|record| record.account_id != removed.id)
+            .cloned()
+            .collect();
+        if remaining.len() != stored.len() {
+            set_takeovers(&tx, &remaining)?;
+        }
+        reset_credits::forget_quote(&tx, &removed.id)?;
+        if let Some(path) = removed.profile_path.clone() {
+            let mut dismissed = dismissed_profiles(&tx)?;
+            let entry = DismissedProfile { tool: removed.tool.clone(), path };
+            if !dismissed.contains(&entry) {
+                dismissed.push(entry);
+                set_dismissed_profiles(&tx, &dismissed)?;
+            }
+        }
+        tx.commit().map_err(db_error)?;
+        Ok(serde_json::json!({"id": removed.id, "removedRoutes": removed_routes}))
+    }
     fn register(&self, request: Register) -> Result<Account, ApiError> {
         if request.label.is_empty()
             || request.label.chars().count() > 120
@@ -915,6 +990,7 @@ impl Service {
             .connection
             .transaction_with_behavior(TransactionBehavior::Immediate)
             .map_err(db_error)?;
+        admission_allowed(&tx)?;
         let existing = accounts(&tx)?;
         reject_duplicate_profile(&registered, &existing)?;
         // 같은 프로필의 기존 binding만 갱신합니다. 다른 프로필의 동일 계정은 위에서 거절합니다.
@@ -1006,6 +1082,18 @@ impl Service {
             }
         }
         save_account(&tx, &registered)?;
+        // 같은 프로필을 명시적으로 다시 연결하면 끊어 둔 기록을 푼다.
+        let dismissed = dismissed_profiles(&tx)?;
+        let kept: Vec<DismissedProfile> = dismissed
+            .iter()
+            .filter(|entry| {
+                !(entry.tool == registered.tool && Some(entry.path.as_str()) == registered.profile_path.as_deref())
+            })
+            .cloned()
+            .collect();
+        if kept.len() != dismissed.len() {
+            set_dismissed_profiles(&tx, &kept)?;
+        }
         tx.commit().map_err(db_error)?;
         Ok(registered)
     }
@@ -1665,12 +1753,12 @@ impl Service {
         });
     }
     fn refresh_inner(&self, force: bool) -> Result<(), ApiError> {
-        let mut before = {
+        let (mut before, dismissed) = {
             let store = self.lock()?;
-            accounts(&store.connection)?
+            (accounts(&store.connection)?, dismissed_profiles(&store.connection)?)
         };
         let mut published: Vec<Account> = Vec::new();
-        let scan = aam_adapters::scan(&self.paths, &before, force,
+        let scan = aam_adapters::scan(&self.paths, &before, &dismissed, force,
             || bridge::account_inventory(&before), |incoming| {
             let original = published.iter().find(|account| account.id == incoming.id)
                 .or_else(|| before.iter().find(|account| account.id == incoming.id));
@@ -1702,6 +1790,9 @@ impl Service {
             Err(error) => return Err(error),
         };
         let mut incoming = incoming.clone();
+        if previous.is_none() && is_dismissed(&dismissed_profiles(&tx)?, &incoming) {
+            return Ok(None);
+        }
         if !merge_scan_account(&mut incoming, previous.as_ref(), original) {
             return Ok(None);
         }
@@ -1727,9 +1818,14 @@ impl Service {
             .transaction_with_behavior(TransactionBehavior::Immediate)
             .map_err(db_error)?;
         let current = accounts(&tx)?;
+        // 조회 도중 사용자가 연결을 해제한 프로필은 늦게 도착한 결과로 되살리지 않는다.
+        let dismissed = dismissed_profiles(&tx)?;
         for mut incoming in scan.accounts {
             let previous = current.iter().find(|account| account.id == incoming.id);
             let original = before.iter().find(|account| account.id == incoming.id);
+            if previous.is_none() && is_dismissed(&dismissed, &incoming) {
+                continue;
+            }
             if !merge_scan_account(&mut incoming, previous, original) {
                 continue;
             }
@@ -1967,7 +2063,7 @@ fn reject_duplicate_profile(registered: &Account, existing: &[Account]) -> Resul
     }) {
         return Err(ApiError::new(
             "ACCOUNT_ALREADY_CONNECTED",
-            "이미 연결된 계정입니다. 다른 프로필로 연결해도 한도는 늘어나지 않아요. 기존 계정을 사용하거나 공식 로그인에서 다른 계정을 선택해 주세요.",
+            "이미 연결된 계정입니다. 다른 프로필로 연결해도 한도는 늘어나지 않아요. 새 폴더로 옮기려면 기존 연결을 먼저 끊은 뒤 새 폴더를 연결해 주세요. 그렇지 않으면 기존 계정을 사용하거나 공식 로그인에서 다른 계정을 선택해 주세요.",
         ));
     }
     Ok(())

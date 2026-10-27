@@ -1,13 +1,14 @@
 import { useEffect, useState } from "react";
 import { ArrowUpRight, Cable, Download, RefreshCw, Server } from "lucide-react";
-import { exportDiagnostics, hostConnections, ompBridgeAction, ompBrokerAction, ompModelCheck, stopService, toApiError } from "./api";
+import { exportDiagnostics, hostConnections, rpc, ompBridgeAction, ompBrokerAction, ompModelCheck, stopService, toApiError } from "./api";
 import type { OmpBridgeStatus, OmpBrokerStatus, OmpModelCheck } from "./api";
-import { ActionFeedback, Badge, Busy, Dot, ErrorMessage, Modal } from "./components";
+import { ActionFeedback, Badge, Busy, Dot, ErrorMessage, Modal, Switch } from "./components";
 import { ProviderLoginDialog, loginProviderNames } from "./LoginDialog";
 import { loginProviderOf } from "./login";
 import type { LoginProvider, LoginRequest } from "./login";
 import { absoluteTime, bucketState, canonicalProvider, nextReset, occupiedStates, privacyText, providerNames, relativeTime, toolNames, useAction } from "./state";
 import type { Account, AccountQuotaSummary, ApiError, HostConnections, Snapshot } from "./types";
+import { canRelogin, choiceLabel } from "./overview";
 import { hostNote, t } from "./i18n";
 
 const bridgeProviderOrder = ["anthropic", "openai-codex", "google-antigravity", "xai-oauth", "zai"];
@@ -117,6 +118,9 @@ function accountState(account: Account, staleAfter: number, summary?: AccountQuo
 
 function ToolPanel({ tool, snapshot, masked, online, shimInstalled, onAdd, onReload }: { tool: "claude" | "codex"; snapshot: Snapshot; masked: boolean; online: boolean; shimInstalled: boolean | null; onAdd: (tool: string) => void; onReload: () => Promise<void> }) {
   const [login, setLogin] = useState<LoginRequest | null>(null);
+  const [removing, setRemoving] = useState<Account | null>(null);
+  const rowAction = useAction();
+  const removeAction = useAction();
   const status = snapshot.tools.find(item => item.id === tool);
   const accounts = snapshot.accounts.filter(account => account.tool === tool);
   const launchable = accounts.filter(account => account.canLaunch && account.enabled).length;
@@ -124,17 +128,43 @@ function ToolPanel({ tool, snapshot, masked, online, shimInstalled, onAdd, onRel
     const provider = loginProviderOf(account);
     if (provider) setLogin({ provider, accountId: account.id, accountName: account.email ?? account.label, workspace: account.organization });
   };
+  // 확인 창·결과 문구의 이름. 가림 중이면 이메일 대신 같은 이름끼리 번호로 구분한다.
+  const accountName = (account: Account) => privacyText(choiceLabel(account, accounts, masked), masked);
+  const toggle = (account: Account, enabled: boolean) => {
+    void rowAction.run(async () => { await rpc<Account>("account.update", { id: account.id, enabled }); await onReload(); }, () => enabled ? t("policy.included") : t("policy.excluded"));
+  };
+  const remove = (account: Account) => {
+    void removeAction.run(
+      async () => { const result = await rpc<{ id: string; removedRoutes: number }>("account.remove", { id: account.id }); setRemoving(null); await onReload(); return result; },
+      result => t(result.removedRoutes > 0 ? "account.remove.doneRoutes" : "account.remove.done", { name: accountName(account), count: result.removedRoutes }),
+    );
+  };
   return <div className="panel">
     <header><Dot provider={tool === "claude" ? "anthropic" : "openai"} /><h2>{toolNames[tool]}</h2><Badge tone={launchable ? "good" : status?.installed ? "warning" : "neutral"}>{!status?.installed ? t("tool.notInstalled") : launchable ? t("status.connected") : accounts.length ? t("tool.noLaunchable") : t("tool.noAccounts")}</Badge></header>
     {accounts.length ? <table><tbody>{accounts.map(account => {
       const state = accountState(account, snapshot.policy.staleAfterSeconds, snapshot.quotaSummaries?.find(summary => summary.accountIds.includes(account.id)));
-      const needsLogin = !account.canLaunch && account.authStatus === "auth-required";
+      const needsLogin = canRelogin(account);
       const name = privacyText(account.label, masked);
-      return <tr key={account.id}><td>{account.email ? masked ? t("privacy.emailHidden") : account.email : t("account.noEmail")}</td><td className="muted" title={privacyText(account.reason, masked)}>{name}</td><td className="num"><Badge tone={state.tone}>{state.label}</Badge>{needsLogin && <button type="button" className="button" disabled={!online || !status?.installed} aria-label={t("account.reloginAria", { name })} onClick={() => relogin(account)}>{t("account.relogin")}</button>}</td></tr>;
+      return <tr key={account.id}><td>{account.email ? masked ? t("privacy.emailHidden") : account.email : t("account.noEmail")}</td><td className="muted" title={privacyText(account.reason, masked)}>{name}</td><td className="num"><Badge tone={state.tone}>{state.label}</Badge>{needsLogin && <button type="button" className="button" disabled={!online || !status?.installed} aria-label={t("account.reloginAria", { name })} onClick={() => relogin(account)}>{t("account.relogin")}</button>}<Switch checked={account.enabled} disabled={!online || rowAction.pending} label={t("policy.includeLabel", { name })} onChange={enabled => toggle(account, enabled)} /><button type="button" className="button" disabled={!online || removeAction.pending} aria-label={t("account.remove.aria", { name })} onClick={() => { removeAction.clear(); setRemoving(account); }}>{t("account.remove")}</button></td></tr>;
     })}</tbody></table> : <div className="empty">{t("connect.noAccounts")}</div>}
+    <ActionFeedback error={rowAction.error} message={rowAction.message} />
+    {!removing && <ActionFeedback error={removeAction.error} message={removeAction.message} />}
     {status?.reason && <p className="gate-reason">{privacyText(status.reason, masked)}</p>}
     <div className="row-actions"><span className="hint">{shimInstalled ? <>{t("tool.shimInstalledBefore")}<code>{tool}</code>{t("tool.shimInstalledAfter")}</> : shimInstalled === false ? <>{t("tool.shimMissingBefore")}<code>{tool}</code>{t("tool.shimMissingAfter")}</> : status?.installed ? t("tool.version", { version: status.version || t("common.unknown") }) : t("tool.installFirst")}</span><button type="button" className="button" disabled={!online || !status?.installed} onClick={() => onAdd(tool)}>{t("tool.addAccount")}</button></div>
     {login && <ProviderLoginDialog request={login} accounts={snapshot.accounts} online={online} onReload={onReload} onClose={() => setLogin(null)} />}
+    {removing && <Modal title={t("account.remove.title", { name: accountName(removing) })} subtitle={t("account.remove.subtitle")} onClose={() => setRemoving(null)} busy={removeAction.pending}>
+      <div className="modal-body">
+        <ul className="body-copy">
+          <li>{t("account.remove.forget")}</li>
+          <li>{t("account.remove.files")}</li>
+          <li>{t("account.remove.routes")}</li>
+          <li>{t("account.remove.noAutoAdd")}</li>
+        </ul>
+        <p className="field-help">{t("account.remove.reconnect")}</p>
+        <ActionFeedback error={removeAction.error} message={null} />
+      </div>
+      <div className="modal-footer"><button type="button" onClick={() => setRemoving(null)} disabled={removeAction.pending}>{t("common.cancel")}</button><button type="button" className="danger-button" onClick={() => remove(removing)} disabled={!online || removeAction.pending}>{removeAction.pending ? <Busy /> : t("account.remove.confirm")}</button></div>
+    </Modal>}
   </div>;
 }
 

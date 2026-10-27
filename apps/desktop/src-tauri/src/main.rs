@@ -561,6 +561,7 @@ async fn rpc(method: String, params: Value) -> Result<Value, ApiError> {
         "policy.update",
         "account.register",
         "account.update",
+        "account.remove",
         "resetCredits.read",
         "resetCredits.redeem",
     ]
@@ -806,9 +807,15 @@ mod popover_layout;
 #[cfg(target_os = "macos")]
 mod duplicate_app;
 #[tauri::command]
-async fn choose_directory() -> Option<String> {
+async fn choose_directory(purpose: Option<String>) -> Option<String> {
+    // `purpose`가 "profile"이면 공식 CLI 프로필 폴더를 고르는 대화상자다. 그 밖의 값은 작업 폴더 선택이다.
+    let title = if purpose.as_deref() == Some("profile") {
+        tr("Choose official CLI profile folder", "공식 CLI 프로필 폴더 선택", "Pilih folder profil CLI resmi")
+    } else {
+        tr("Choose AI working folder", "AI 작업 폴더 선택", "Pilih folder kerja AI")
+    };
     rfd::AsyncFileDialog::new()
-        .set_title(tr("Choose AI working folder", "AI 작업 폴더 선택", "Pilih folder kerja AI"))
+        .set_title(title)
         .pick_folder()
         .await
         .map(|f| f.path().to_string_lossy().to_string())

@@ -195,6 +195,11 @@ enum AccountAction {
         #[arg(long)]
         tool: String,
     },
+    #[command(about = "연결한 계정을 끊어요. 공식 로그인과 프로필 폴더는 지우지 않아요. 이 계정을 쓰는 대화가 있으면 거절해요.")]
+    Remove {
+        #[arg(long)]
+        account: String,
+    },
 }
 #[derive(Subcommand)]
 enum ServiceAction {
@@ -514,6 +519,13 @@ fn execute(paths: &Paths, action: Action) -> Result<(), ApiError> {
                 aam_launcher::account_login(paths, &tool, &label, settings_digest.as_deref())?
             };
             supervisor::finish_with_status(status);
+        }
+        Action::Account {
+            action: AccountAction::Remove { account },
+        } => {
+            let value = call(paths, "account.remove", json!({"id": account}))?;
+            let routes = value.get("removedRoutes").and_then(Value::as_u64).unwrap_or(0);
+            println!("계정 연결을 끊었어요. 공식 로그인과 프로필 폴더는 그대로 뒀어요. 함께 지운 프로젝트 고정 규칙: {routes}개");
         }
         Action::Account {
             action: AccountAction::SettingsPreview { tool },

@@ -231,7 +231,25 @@ export function watchedMembers(watched: readonly string[] | null, ids: readonly 
 
 // --- 로그인 -----------------------------------------------------------------
 
-/// 다시 로그인할 수 있는 구성원: 공식 CLI(Claude Code·Codex)가 로그인을 요구하는 계정. omp는 여기서 로그인하지 못한다.
+/// 공식 CLI(Claude Code·Codex) 계정이 앱에서 다시 로그인할 수 있는 상태인지. 로그인 필요, 또는 프로필 폴더가 있는 오류(예: 계정 불일치) 계정이 대상이다.
+/// 다시 로그인은 기존 프로필 폴더를 재사용하고 같은 계정으로 로그인했는지 확인하므로 안전하다. omp는 여기서 로그인하지 못한다.
+export function canRelogin(member: Account): boolean {
+  if (member.canLaunch || (member.tool !== "claude" && member.tool !== "codex")) return false;
+  return member.authStatus === "auth-required" || (member.authStatus === "error" && Boolean(member.profilePath));
+}
+
+/// 다시 로그인할 수 있는 구성원: `canRelogin`이고 해당 공식 CLI가 설치된 계정.
 export function loginTarget(members: readonly Account[], installed: (tool: string) => boolean): Account | null {
-  return members.find(member => !member.canLaunch && member.authStatus === "auth-required" && (member.tool === "claude" || member.tool === "codex") && installed(member.tool)) ?? null;
+  return members.find(member => canRelogin(member) && installed(member.tool)) ?? null;
+}
+
+// --- 선택 목록 이름 ---------------------------------------------------------
+
+/// 선택 목록에 보일 계정 이름. 같은 도구에 같은 이름의 계정이 또 있으면 구분 표시를 붙인다.
+/// 이메일을 보여도 되면 이메일을, 가림 중이거나 이메일이 없으면 목록 순서의 번호(`#2`)를 붙인다.
+export function choiceLabel(account: Pick<Account, "id" | "tool" | "label" | "email">, accounts: readonly Pick<Account, "id" | "tool" | "label">[], masked: boolean): string {
+  const twins = accounts.filter(other => other.tool === account.tool && other.label.trim() === account.label.trim());
+  if (twins.length < 2) return account.label;
+  if (!masked && account.email) return `${account.label} · ${account.email}`;
+  return `${account.label} #${twins.findIndex(other => other.id === account.id) + 1}`;
 }

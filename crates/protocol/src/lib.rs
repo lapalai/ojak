@@ -448,6 +448,14 @@ pub struct Notice {
     pub title: String,
     pub message: String,
 }
+/// 사용자가 연결을 끊은 native 프로필. 자동 탐색이 같은 폴더를 다시 연결하지 않게 서비스가 기억합니다.
+/// `path`는 등록 때 canonicalize한 프로필 경로입니다.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub struct DismissedProfile {
+    pub tool: String,
+    pub path: String,
+}
 /// 외부에서 시작한 대화를 확인된 소유 계정으로 관리 실행에 인계하는 등록입니다.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "camelCase")]
