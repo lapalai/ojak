@@ -92,6 +92,15 @@ npx tauri signer generate -w "$HOME/.tauri/ojak.key"
 
 `Client verification`은 고정된 omp·Orca 수정본을 별도 Mac runner에서 빌드한다. omp 실행 파일의 실제 버전 출력, Orca 전체 Mac 설치 파일(9개 원격 대상 포함), 격리 HOME의 실제 원격 터미널 왕복을 검사한다. 결과는 `verification-only-mac-clients`에만 보관하며 upstream이나 Ojak Release로 게시하지 않는다. 공식 네이티브 입력은 고정 SHA-256과 원본 템플릿 봉인 검증을 모두 통과해야 가져온다. 작업 실행·성공 여부는 각 Actions run의 실제 결과로 확인한다.
 
+## 0.17.0 공개 검증 기록 (2026-10-27)
+
+- **설치 보류 예외(사용자 승인, 2026-10-27):** 사용자가 공개 배포만 요청하고 각 기기의 앱 업데이트는 진행 중인 작업이 끝난 뒤 직접 하기로 했다. 0.10.1 예외와 같은 기준으로, 기존 설치본 교체·서비스 재시작 없이 서명 산출물 추출본을 별도 AAM_HOME에서 실행해 검증했다. 기존 설치본 업그레이드·앱 안 업데이트·실계정 OAuth 갱신은 검증하지 않았다. 이 예외를 이후 릴리스의 일반 게이트로 확대하지 않는다.
+- 태그 `v0.17.0`(annotated)은 PR #50 병합 커밋 `9338b29`에 있다. PR CI는 macOS·Windows 테스트와 Mac 클라이언트 검증을 통과했다. 릴리스 워크플로 run `40454210821`이 draft를 만들었다.
+- draft의 모든 산출물이 `SHA256SUMS`와 일치했다. `Ojak.app.tar.gz`와 `Ojak_0.17.0_x64-setup.exe`의 업데이터 서명은 `tauri.conf.json`의 공개키(`D9AFF69B91D5CB2F`)로 minisign 검증을 통과했다. Windows setup SHA-256은 `1734026a5231f6f61ee666c496e316c21a73509d2bc3ad8486e2e9e5a726293b`다.
+- Mac: `Ojak.app.tar.gz` 추출본의 `aam`·`aam-service`가 0.17.0을 출력했다. 운영 DB의 읽기 전용 사본(lease 554개)을 둔 별도 AAM_HOME에서 서비스를 실행해 `aam service status`(서비스 0.17.0, 앱 0.17.0), `aam status`(계정 23개), `aam account remove`의 `ACCOUNT_NOT_FOUND` 응답을 확인했다. lease 행 수·본문 길이 합계가 같고, `leases` 외래키가 제거됐으며 `integrity_check` ok였다. 설치된 서비스는 계속 실행 중이었다.
+- Windows(`windows-pc`, AMD64): 같은 setup 파일을 Mac에서 전송하고 SHA-256 일치를 확인했다. 설치 프로그램은 실행하지 않고 7-Zip으로 추출했다. `aam.exe`·`aam-service.exe`가 0.17.0을 출력했다. 운영 DB 읽기 전용 사본(lease 32개)을 둔 별도 AAM_HOME에서 서비스를 실행해 `service status`(감독 실행 중, 서비스 0.17.0), `status`(계정 14개), `account remove`의 `ACCOUNT_NOT_FOUND`를 확인했다. lease 행 수·본문 길이 합계가 같고 외래키 제거, `integrity_check` ok였다. 직접 띄운 격리 서비스는 설계대로 `service stop`이 `UNMANAGED_SERVICE`로 거절해, 해당 경로의 프로세스만 종료하고 임시 폴더를 지웠다. 설치된 서비스 PID 25688·25712는 검증 전후 그대로였다.
+- Windows 네이티브 화면, 설치 프로그램 실행, 이전 버전 업그레이드, 앱 안 업데이트는 검증하지 않았다.
+
 ## 0.16.2 호환 omp 업데이트 복구 (2026-10-19)
 
 - Mac의 공식 omp 18.12.2를 백업하고 검증된 18.12.0-ojak.1로 먼저 복구했다. 이어 호환 업데이트를 구현한 새 18.12.0-ojak.2를 빌드해 설치했다. 기존 omp·Orca 프로세스는 종료하지 않았으며 실행 중인 일반판 세션은 저장 후 재시작해야 새 실행본을 사용한다.
