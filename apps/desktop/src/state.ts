@@ -7,6 +7,7 @@ import type { BridgeUsage, OmpBridgeStatus } from "./api";
 import { PROVIDER_ORDER } from "./types";
 import type { Account, ApiError, QuotaBucket, Snapshot } from "./types";
 import { accountLabel, intlLocale, lookup, t } from "./i18n";
+import { subscriptionAccounts } from "./api-credit";
 import { whenBand } from "./overview";
 
 /// 화면에서 쓰는 공급자 이름. 키는 계정 저장소의 provider 값(anthropic/openai/google/xai/other)이다.
@@ -148,7 +149,9 @@ function identityTokens(account: Account): string[] {
   return tokens;
 }
 
-export function groupAccounts(accounts: Account[]): AccountGroup[] {
+/// 구독 계정만 묶는다. API 키 계정(`tool === "api"`)은 구독이 아니라 한도·고정·동시 세션 대상이 아니므로 여기서 걸러, 이 함수를 쓰는 모든 목록에서 빠진다.
+export function groupAccounts(all: Account[]): AccountGroup[] {
+  const accounts = subscriptionAccounts(all);
   const owner = new Map<string, string>();
   const merged = new Map<string, string>();
   const root = (key: string): string => {

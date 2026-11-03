@@ -1,5 +1,5 @@
 diff --git a/docs/site/content/docs/model/agents-sessions.mdx b/docs/site/content/docs/model/agents-sessions.mdx
-index afa049bc..4c58f384 100644
+index afa049bc..7d423d32 100644
 --- a/docs/site/content/docs/model/agents-sessions.mdx
 +++ b/docs/site/content/docs/model/agents-sessions.mdx
 @@ -64,6 +64,56 @@ Orca launches every supported agent with its full-autonomy permission flag pre-a
@@ -14,9 +14,9 @@ index afa049bc..4c58f384 100644
 +Other agents, unmanaged omp configurations, SSH execution, WSL, and reattaching an existing
 +process do not use the client's Ojak gate.
 +
-+This source fork is version `1.5.0-ojak.3` and supports the coupled omp
-+`18.12.0-ojak.2` ACP client explicitly. Other prerelease omp builds remain unsupported;
-+the existing stable-release compatibility rule is unchanged.
++This source fork is version `1.5.0-ojak.3` and supports any coupled Ojak omp fork build
++(`<base>-ojak.<N>`, N of 1 or more, base 17.0.5 or later) as an ACP client. Other prerelease
++omp builds remain unsupported; the existing stable-release compatibility rule is unchanged.
 +
 +During resource pressure or a temporary Ojak service outage, the pane shows a waiting notice.
 +Terminal launch selections and prompts remain in Orca's existing host journal; structured
@@ -60,7 +60,7 @@ index afa049bc..4c58f384 100644
  
  When an agent exits (clean or crash), the tab shows a **Restart** chip. One click rehydrates the same agent with the same working directory. Codex's restart chip also preserves the current account (see [Hot-swap Codex accounts](/docs/agents/codex-hot-swap)).
 diff --git a/package.json b/package.json
-index ae91aafa..79048779 100644
+index ae91aafa..0fb62dbc 100644
 --- a/package.json
 +++ b/package.json
 @@ -1,6 +1,6 @@
@@ -72,18 +72,32 @@ index ae91aafa..79048779 100644
    "homepage": "https://github.com/stablyai/orca",
    "author": "stablyai",
 diff --git a/src/main/acp/acp-launch-specs.ts b/src/main/acp/acp-launch-specs.ts
-index 3f814ada..0e1c9254 100644
+index 3f814ada..8496f467 100644
 --- a/src/main/acp/acp-launch-specs.ts
 +++ b/src/main/acp/acp-launch-specs.ts
-@@ -183,8 +183,9 @@ const OMP_LAUNCH_SPEC: AcpLaunchSpec = {
+@@ -11,7 +11,11 @@ import { openCodeAcpAccountBinding } from '../opencode/opencode-structured-accou
+ import { scrubOpenCodeAcpEnvironment } from '../opencode/opencode-acp-environment'
+ import { openCodeStoredUserMessagesReader } from '../opencode/opencode-acp-stored-messages'
+ import type { AcpStoredUserMessagesReader } from './acp-recovery-history'
+-import { isStableCliVersionFrom, isStableCliVersionOnLine } from '../agent-cli-version-probe'
++import {
++  isOjakForkCliVersionFrom,
++  isStableCliVersionFrom,
++  isStableCliVersionOnLine
++} from '../agent-cli-version-probe'
+ import type { TuiAgent } from '../../shared/tui-agent'
+ import type { AgentSessionModelOption } from '../../shared/agent-session-wire'
+ import type { InitializeResponse } from './generated/acp-protocol.generated'
+@@ -183,8 +187,10 @@ const OMP_LAUNCH_SPEC: AcpLaunchSpec = {
    ),
    // OMP's installers use directories the shared resolver already searches after PATH.
    installDirectories: () => [],
 -  // Stable releases from 17.0.5, the release verified to serve `omp acp`.
 -  supportsVersion: (version) => isStableCliVersionFrom(version, '17.0.5'),
-+  // Stable releases from 17.0.5, plus the coupled Ojak fork whose ACP contract is verified here.
++  // Stable releases from 17.0.5, plus any Ojak fork build (`-ojak.N`) on that base or later. The
++  // marker carries the admission contract, so an omp rebase needs no pin bump here.
 +  supportsVersion: (version) =>
-+    version === '18.12.0-ojak.2' || isStableCliVersionFrom(version, '17.0.5'),
++    isStableCliVersionFrom(version, '17.0.5') || isOjakForkCliVersionFrom(version, '17.0.5'),
    // `omp models --json` lists every model without the `enabledModels` filter a chat applies, so it
    // could offer models a chat refuses; its chats' own listings fill the catalog instead.
    modelDiscovery: {
@@ -187,15 +201,22 @@ index 926a8362..3b158a66 100644
        resumeReading: () => {
          connection.resumeReading()
 diff --git a/src/main/acp/acp-structured-launch-resolution-omp.test.ts b/src/main/acp/acp-structured-launch-resolution-omp.test.ts
-index c432ef13..93fad174 100644
+index c432ef13..cb5e0e08 100644
 --- a/src/main/acp/acp-structured-launch-resolution-omp.test.ts
 +++ b/src/main/acp/acp-structured-launch-resolution-omp.test.ts
-@@ -96,14 +96,14 @@ describe('OMP ACP launch resolution', () => {
+@@ -96,14 +96,21 @@ describe('OMP ACP launch resolution', () => {
      ).rejects.toThrow(/pin PI_CODING_AGENT_DIR/)
    })
  
 -  it.each(['17.0.5', '17.2.12', '18.4.5'])('admits OMP %s', async (version) => {
-+  it.each(['17.0.5', '18.12.0-ojak.2'])('admits OMP %s', async (version) => {
++  it.each([
++    '17.0.5',
++    '17.2.12',
++    '18.4.5',
++    '18.12.0-ojak.2',
++    '18.15.0-ojak.1',
++    '19.0.0-ojak.3+build5'
++  ])('admits OMP %s', async (version) => {
      const launch = resolver(ompRecord(), {
        probeVersion: async (_input, supports) => supports(version)
      })
@@ -203,7 +224,7 @@ index c432ef13..93fad174 100644
    })
  
 -  it.each(['17.0.4', '16.9.0', '18.0.0-beta.1'])(
-+  it.each(['17.0.4', '18.0.0-beta.1', '18.12.0-ojak.3'])(
++  it.each(['17.0.4', '16.9.0', '18.0.0-beta.1', '18.15.0-ojak.0', '18.15.0-rc.1', '16.9.0-ojak.1'])(
      'refuses OMP %s before spawning it, as a host that cannot run the chat',
      async (version) => {
        const launch = resolver(ompRecord(), {
@@ -323,6 +344,61 @@ index d1911c3c..23ef7fc8 100644
          deps: this.deps,
          generation,
          abandoned: () => attempt.signal.aborted,
+diff --git a/src/main/agent-cli-version-probe.test.ts b/src/main/agent-cli-version-probe.test.ts
+index d04480f7..b2b24412 100644
+--- a/src/main/agent-cli-version-probe.test.ts
++++ b/src/main/agent-cli-version-probe.test.ts
+@@ -1,5 +1,6 @@
+ import { beforeEach, describe, expect, it, vi } from 'vitest'
+ import {
++  isOjakForkCliVersionFrom,
+   isStableCliVersionFrom,
+   isStableCliVersionOnLine,
+   probeAgentCliVersion
+@@ -116,3 +117,23 @@ describe('isStableCliVersionFrom', () => {
+     expect(isStableCliVersionFrom(version, '17.0.5')).toBe(supported)
+   })
+ })
++
++describe('isOjakForkCliVersionFrom', () => {
++  it.each([
++    ['18.12.0-ojak.2', true],
++    ['18.15.0-ojak.1', true],
++    ['19.0.0-ojak.7', true],
++    ['18.15.0-ojak.1+build5', true],
++    ['17.0.5-ojak.1', true],
++    ['17.0.4-ojak.1', false],
++    ['18.15.0-ojak.0', false],
++    ['18.15.0-ojak.', false],
++    ['18.15.0-ojak.x', false],
++    ['18.15.0-ojakx.1', false],
++    ['18.15.0-rc.1-ojak.1', false],
++    ['18.15.0', false],
++    ['18.15.0-beta.1', false]
++  ])('%s -> %s', (version, supported) => {
++    expect(isOjakForkCliVersionFrom(version, '17.0.5')).toBe(supported)
++  })
++})
+diff --git a/src/main/agent-cli-version-probe.ts b/src/main/agent-cli-version-probe.ts
+index d4a89c5f..0f036340 100644
+--- a/src/main/agent-cli-version-probe.ts
++++ b/src/main/agent-cli-version-probe.ts
+@@ -69,6 +69,15 @@ export function isStableCliVersionFrom(version: string, floor: string): boolean
+   return !isPrereleaseAppVersion(version) && hasReachedAppVersion(version, floor)
+ }
+ 
++/** The coupled Ojak fork of a CLI: `<base>-ojak.<N>` (optionally `+build`), N >= 1, base at or after
++ *  `floor`. Mirrors the launcher's admission contract (`omp_bridge::client_meets`): the marker, not the
++ *  upstream base, identifies the fork, so a rebase onto a newer base needs no Orca change. Unmarked
++ *  prereleases and `-ojak.0` are refused. */
++export function isOjakForkCliVersionFrom(version: string, floor: string): boolean {
++  const match = /^(\d+\.\d+\.\d+)-ojak\.(\d+)(?:\+[0-9A-Za-z.-]+)?$/.exec(version.trim())
++  return match !== null && Number(match[2]) >= 1 && hasReachedAppVersion(match[1], floor)
++}
++
+ /** A stable release on `major`'s line, at or after `floor`. */
+ export function isStableCliVersionOnLine(
+   version: string,
 diff --git a/src/main/agent-launch/agent-launch-executor.ts b/src/main/agent-launch/agent-launch-executor.ts
 index e153e34b..1362a467 100644
 --- a/src/main/agent-launch/agent-launch-executor.ts

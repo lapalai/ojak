@@ -253,6 +253,48 @@ code { font-family: var(--mono); font-size: .92em; letter-spacing: 0; }
 .paid-rules .rule .t, .modal .allocation-settings .rule .t { grid-area: 1 / 1; }
 .paid-rules .rule .ctl, .modal .allocation-settings .rule .ctl { grid-area: 1 / 2; }
 .paid-rules .rule .d, .modal .allocation-settings .rule .d { grid-area: 2 / 1 / auto / -1; }
+.api-credit-settings { margin: 12px 0 0; display: grid; gap: 8px; }
+.api-credit-limit { display: flex; align-items: center; gap: 8px; font-size: 12px; font-weight: 550; }
+.api-credit-limit input[type="number"] { width: 96px; height: 28px; padding: 3px 8px; }
+.api-credit-guide { margin: 0; padding-left: 16px; }
+.api-credit-guide li + li { margin-top: 4px; }
+.api-credit-status.active { --tone: var(--warning); }
+/* 설명 말풍선: 버튼이라 Tab으로 닿고, 호버·초점에서 보인다. 패널의 overflow에 잘리지 않게 fixed로 그린다. */
+.tip { display: inline-flex; align-items: center; vertical-align: middle; }
+.tip-trigger { min-height: 0; padding: 0; border: 0; background: none; box-shadow: none; color: var(--tertiary); cursor: help; font: inherit; }
+.tip-trigger.icon { width: 18px; height: 18px; min-width: 18px; border-radius: 50%; margin-left: 4px; }
+.tip-trigger.text { border-bottom: 1px dotted var(--tertiary); color: var(--text); font-weight: 560; border-radius: 0; }
+.tip-trigger:hover:not(:disabled), .tip-trigger:focus-visible { color: var(--accent); background: none; }
+.tip-bubble { position: fixed; z-index: 1000; width: max-content; max-width: min(360px, calc(100vw - 16px)); padding: 9px 11px; border: 1px solid var(--strong-line); border-radius: 8px; background: var(--surface); color: var(--text); box-shadow: var(--modal-shadow); font-size: var(--fs-meta); font-weight: 400; line-height: 1.6; text-align: left; white-space: normal; overflow-wrap: anywhere; pointer-events: auto; }
+.tip-bubble[hidden] { display: none; }
+.mode-list { list-style: none; margin: 8px 0 0; padding: 0; display: flex; flex-wrap: wrap; gap: 6px 14px; }
+.mode-list li { display: inline-flex; align-items: center; gap: 6px; font-size: var(--fs-meta); }
+.mode-list li.current .tip-trigger.text { color: var(--accent); border-bottom-color: var(--accent); }
+.api-grant-body { padding: 12px 18px 16px; display: grid; gap: 10px; }
+.api-grant-body .field-help, .api-grant-body .gate-reason { margin: 0; }
+.api-grant > header .aside { display: inline-flex; }
+.grant-facts { margin: 0; padding-left: 16px; display: grid; gap: 4px; color: var(--secondary); font-size: var(--fs-meta); line-height: 1.6; }
+.grant-facts li.warn { color: var(--warning); }
+.grant-form { display: grid; grid-template-columns: repeat(auto-fit, minmax(190px, 1fr)); gap: 10px 14px; align-items: end; }
+.grant-form label { display: grid; gap: 4px; font-size: 12px; font-weight: 550; min-width: 0; }
+.grant-form input[type="number"], .grant-form input[type="datetime-local"] { width: 100%; height: 30px; }
+.grant-input { display: flex; align-items: center; gap: 6px; font-weight: 400; }
+.grant-form .grant-confirm, .grant-form .gate-reason, .grant-form .field-help, .grant-actions { grid-column: 1 / -1; }
+.grant-form .grant-confirm { display: flex; align-items: flex-start; gap: 8px; font-weight: 400; color: var(--secondary); line-height: 1.5; }
+.grant-form .grant-confirm input { margin-top: 1px; }
+.grant-actions { display: flex; gap: 8px; }
+.grant-subtitle { grid-column: 1 / -1; display: flex; align-items: center; gap: 6px; margin: 0; font-size: 13px; font-weight: 650; }
+.billing-form { padding-bottom: 12px; border-bottom: 1px solid var(--line); }
+.billing-form select { width: 100%; }
+.grant-form .grant-expiry { grid-column: 1 / -1; display: flex; flex-wrap: wrap; gap: 6px 18px; margin: 0; padding: 0; border: 0; min-width: 0; }
+.grant-expiry legend { padding: 0; margin-bottom: 4px; font-size: 12px; font-weight: 550; }
+.grant-form .grant-radio { display: flex; align-items: center; gap: 6px; font-weight: 400; }
+.grant-form .grant-estimate { grid-column: 1 / -1; margin: 0; padding: 8px 10px; border: 1px solid var(--line); border-left: 3px solid var(--warning); border-radius: 6px; font-size: var(--fs-meta); line-height: 1.6; color: var(--secondary); }
+.grant-balance.rule { grid-template-columns: minmax(0, 1fr) auto; padding-inline: 0; border-top: 1px solid var(--line); background: none; }
+.grant-balance .t { grid-area: 1 / 1; }
+.grant-balance .ctl { grid-area: 1 / 2; }
+.grant-balance .d { grid-area: 2 / 1 / auto / -1; }
+.api-keys td code { font-size: var(--fs-meta); }
 .modal .allocation-settings > .sub { margin-bottom: 16px; }
 .modal .allocation-settings .rule { padding-inline: 14px; }
 .modal .allocation-settings .order > li > span { min-width: 0; overflow-wrap: anywhere; }

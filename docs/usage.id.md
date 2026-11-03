@@ -29,6 +29,7 @@ aam explain --tool codex
 | `CAPACITY_RESERVED` | Slot masih dipakai sesi lain, atau Ojak belum bisa memastikan sesi itu selesai. |
 | `MODEL_LIMIT_GUARD` | Kuota khusus model sudah habis. Ini peringatan jika CLI yang memilih model; jika model tersebut diminta secara eksplisit, akun bisa tidak dipilih. |
 | `RESERVE_DEPRIORITIZED` / `RESERVE_FALLBACK` | Sisa kuota sudah masuk cadangan pengaman. Ojak mendahulukan akun lain yang memenuhi syarat dan punya lebih banyak kuota, tetapi bisa memakai sisanya jika tidak ada pilihan lain. Ini penjelasan prioritas, bukan larangan mutlak. |
+| `USE_BEFORE_RESET` | Hanya di mode "Pakai sebelum kedaluwarsa". Akun berada di dalam cadangan pengaman, tetapi batas panjang (seperti mingguan) reset dalam jendela "Segera reset" (bawaan 48 jam), sehingga cadangan itu akan hilang saat reset. Sesi baru memakai akun ini lebih dulu, yang reset-nya paling dekat didahulukan. Sesi yang berjalan tidak dipindahkan, jadi Ojak tidak bisa menjamin sisa terakhir terpakai jika tidak ada pekerjaan baru sebelum reset. Akun yang habis, diblokir, belum login, atau di atas 85% batas 5 jam tidak pernah dipilih dengan cara ini. Aturan 5 jam hanya berlaku bila ada batas 5 jam; beberapa paket (Claude Ultra terverifikasi, ChatGPT Pro) tidak punya batas itu dan hanya dinilai dari batas mingguannya. |
 
 ### Melanjutkan percakapan setelah kuota habis
 
@@ -85,7 +86,7 @@ Jika pembaruan dari aplikasi tidak tersedia, unduh DMG atau setup.exe baru dari 
 
 ### Setelah memasang ulang secara manual
 
-- **Mac:** mengganti `Ojak.app` belum tentu mengganti layanan yang sedang berjalan. Buka aplikasi dan gunakan tindakan mulai ulang layanan jika muncul peringatan versi berbeda. Mulai ulang yang aman akan ditolak saat sesi masih aktif atau belum dipastikan selesai, serta memberi peringatan jika omp baru saja digunakan. Dari CLI, gunakan `aam service restart`; periksa hasilnya lewat `aam service status` atau `aam setup --check` (`serviceVersionMismatch`).
+- **Mac:** mengganti `Ojak.app` belum tentu mengganti layanan yang sedang berjalan. Buka aplikasi dan gunakan tindakan mulai ulang layanan jika muncul peringatan versi berbeda. Sebelum memulai ulang, daftar pekerjaan yang akan terputus (respons omp yang sedang jalan, percakapan terminal Claude/Codex) ditampilkan dan dikonfirmasi dulu; kalau tidak ada yang jalan, langsung dimulai ulang. Respons omp terputus, percakapan terminal tetap jalan. Dari CLI, gunakan `aam service restart` (menolak dengan daftar yang sama; tambahkan `--force` untuk lanjut); periksa hasilnya lewat `aam service status` atau `aam setup --check` (`serviceVersionMismatch`).
 - **Windows:** jalankan setup.exe dengan pengguna biasa yang sama. Installer memeriksa sesi, menghentikan layanan milik aplikasi, mengganti dan memverifikasi file, lalu menjalankan layanan kembali jika terdaftar untuk mulai saat login. Tutup Orca dan omp terlebih dahulu.
 
 Khusus pengelola, layanan macOS bisa dimulai ulang langsung dengan `launchctl kickstart -k gui/$(id -u)/ai.aam.service`, dilanjutkan `aam integration install`. Berbeda dari tindakan mulai ulang yang aman, cara ini **tidak memeriksa sesi terkelola terlebih dahulu**.

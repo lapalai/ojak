@@ -4,11 +4,11 @@
     {
       "directory": "oh-my-pi",
       "repository": "https://github.com/can1357/oh-my-pi.git",
-      "tag": "v18.11.0",
-      "revision": "c2cb79e4c227aa4b22c4ccb933ff72fd88bceba4",
-      "version": "18.12.0-ojak.2",
+      "tag": "v18.15.0",
+      "revision": "3fedf8d53267e32a6d7521ce725fdcc4a36fdc67",
+      "version": "18.15.0-ojak.1",
       "admissionContract": 1,
-      "sha256": "efd13049e9a986048904117fd11db724e731e31aa0eb0a79ce4906b9c043dc66"
+      "sha256": "22dd50e09f29b476e5e3ba7ee11af2e9aa348ea90704a583f23b696762f2da7f"
     },
     {
       "directory": "orca",
@@ -16,7 +16,7 @@
       "tag": "v1.4.227",
       "revision": "f51e82c4c26745f6a15e215e4391f533327697e2",
       "version": "1.5.0-ojak.3",
-      "sha256": "662928a631e62693e77079678f5ae9708333021d7c74cc3f08fe0a6880e5e422"
+      "sha256": "3415b0984f0668b802bf502617680b24ef165d576ac29bde3c6894cc88ad62ff"
     }
   ]
 }

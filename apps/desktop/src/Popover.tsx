@@ -7,6 +7,8 @@ import { bucketState, canonicalProvider, groupAccounts, isCurrentGroup, provider
 import { creditCount, limitsOf, remainingTone as tone, tightestOf, usdLimit, usdUsed } from "./limits";
 import type { Limit } from "./limits";
 import type { AccountQuotaSummary, Snapshot } from "./types";
+import { apiCreditNotes } from "./api-credit";
+import type { ApiCreditNote } from "./api-credit";
 import ojakIcon from "./assets/ojak-icon.png";
 import { t, limitLabel } from "./i18n";
 import { UPDATE_CHECK_INTERVAL_MS, updateBadgeVisible } from "./updates";
@@ -39,7 +41,7 @@ function paidBadge(summary: AccountQuotaSummary | undefined): PaidBadge | null {
   if (credits && !credits.active) return { label: t("usage.credits.hint"), title: t("usage.credits.hintTitle") };
   return null;
 }
-interface ProviderCard { provider: string; accounts: AccountLine[]; tightest: number | null; inUse: boolean }
+interface ProviderCard { provider: string; accounts: AccountLine[]; tightest: number | null; inUse: boolean; apiCredit: ApiCreditNote | null }
 
 function buildCards(snapshot: Snapshot, sessions: { provider: string; email: string; model: string; lastUsedAt: number }[], masked: boolean): ProviderCard[] {
   const now = Date.now();
@@ -54,12 +56,18 @@ function buildCards(snapshot: Snapshot, sessions: { provider: string; email: str
     }
     for (const session of snapshot.sessions) if (session.state === "ACTIVE" && ids.has(session.accountId) && session.model !== "native-default") models.add(session.model);
     const limits = limitsOf(group.buckets, [...models], bucket => bucketState(bucket, staleAfter));
-    const card = cards.get(provider) ?? { provider, accounts: [], tightest: null, inUse: false };
+    const card = cards.get(provider) ?? { provider, accounts: [], tightest: null, inUse: false, apiCredit: null };
     const summary = snapshot.quotaSummaries?.find(item => group.members.some(member => item.accountIds.includes(member.id)));
     const line = { key: group.key, name: group.email ?? "", models: [...models], limits, tightest: limits.length ? tightestOf(limits) : null, inUse: models.size > 0, paid: paidBadge(summary) };
     card.accounts.push(line);
     card.inUse ||= line.inUse;
     cards.set(provider, card);
+  }
+  // 등록한 API 키(구독 계정이 아님)가 지금 쓰이거나 상한에 닿았으면 그 공급자 카드(Claude→anthropic, Codex→openai) 아래에 한 줄로 알린다. 금액은 그 공급자 키의 합계이고 다른 공급자의 키는 섞지 않는다.
+  for (const note of apiCreditNotes(snapshot)) {
+    const card = cards.get(note.provider) ?? { provider: note.provider, accounts: [], tightest: null, inUse: false, apiCredit: null };
+    card.apiCredit = note;
+    cards.set(note.provider, card);
   }
   return [...cards.values()]
     .filter(card => FOCUS_PROVIDERS.includes(card.provider) || card.inUse)
@@ -180,6 +188,7 @@ export function Popover() {
           <span className={`pop-big ${tone(card.tightest, reserve)}`}>{card.tightest === null ? "—" : `${Math.round(card.tightest)}%`}<small>{t("popover.left")}</small></span>
         </div>
         {card.accounts.map(line => <Line key={line.key} line={line} reserve={reserve} />)}
+        {card.apiCredit && <div className="pop-paid" title={t(card.apiCredit.reasonKey)}>{card.apiCredit.label}</div>}
       </article>)}
       </>}
     </div></div>

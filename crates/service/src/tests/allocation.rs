@@ -869,3 +869,85 @@ fn resume_waits_for_the_original_accounts_stale_quota_but_keeps_resume_rules() {
     unknown.intent.resume_session_id = Some(uuid::Uuid::new_v4().to_string());
     assert!(fixture.service.planning(&unknown).unwrap().is_none());
 }
+
+/// 같은 실제 계정(같은 workspace)을 본 공식 CLI 행과 예전 omp 관측 행. 공식 행에는 5시간 창이 없다.
+fn ultra_rows(now: i64, old_five: (&str, f64)) -> [Account; 2] {
+    let mut official = account_fixture("official", now);
+    official.identity_key = Some("anthropic|subject:s|workspace:w".into());
+    official.buckets = vec![bucket("7d", None, 30.0, now + 3 * 86_400_000, now)];
+    let mut observed = account_fixture("observed", now);
+    observed.tool = "omp".into();
+    observed.can_launch = false;
+    observed.verification = "observed".into();
+    observed.identity_key = Some("anthropic|subject:s|workspace:w".into());
+    let mut five = bucket("5h", None, old_five.1, now + 3_600_000, now - 600_000);
+    five.status = old_five.0.into();
+    five.label = "Claude 5 Hour · 5시간".into();
+    observed.buckets = vec![five];
+    [official, observed]
+}
+
+#[test]
+fn a_five_hour_window_that_a_newer_observation_no_longer_reports_neither_blocks_nor_blurs_the_account() {
+    let now = now_ms();
+    let policy = Policy::default();
+    // 예전 omp 관측에 소진된 5시간 한도가 남아 있어도, 같은 계정의 신선한 공식 관측에 5시간 창이 없으면 쉬는 계정이 아니다.
+    let rows = ultra_rows(now, ("exhausted", 100.0));
+    let summary = crate::quota_summary::summaries(&rows, &policy, &[], now);
+    assert_eq!(summary.len(), 1);
+    assert_eq!(summary[0].kind, "available", "{:?}", summary[0]);
+    // 낡은(stale) 5시간 한도가 남아 있어도 '미확인'으로 흐려지지 않는다.
+    let rows = ultra_rows(now, ("stale", 20.0));
+    assert_eq!(crate::quota_summary::summaries(&rows, &policy, &[], now)[0].kind, "available");
+    // 정말 관측하지 못한 계정은 그대로다: 새 관측이 없으면(공식 행이 낡음) 낡은 5시간 한도는 미확인으로 남는다.
+    let mut rows = ultra_rows(now, ("stale", 20.0));
+    rows[0].buckets[0].observed_at = now - 2 * 3_600_000;
+    rows[0].buckets[0].status = "stale".into();
+    assert_eq!(crate::quota_summary::summaries(&rows, &policy, &[], now)[0].kind, "unknown");
+    // 새 관측이 5시간 한도를 보고하면 그 한도가 여전히 판정한다.
+    let mut rows = ultra_rows(now, ("exhausted", 100.0));
+    rows[0].buckets.push(bucket("5h", None, 100.0, now + 3_600_000, now));
+    assert_eq!(crate::quota_summary::summaries(&rows, &policy, &[], now)[0].kind, "resting");
+}
+
+/// 신선한 공식 관측이 주간만 읽고 5시간 값은 읽지 못했다면, 예전 행의 소진된 5시간 한도를 "사라진 창"으로 지우면 안 된다(fail-open 금지).
+/// 공식 파서는 이때 값 없는 `unknown` 5시간 버킷을 낸다(`aam_adapters` `unreadable_session_limit_is_kept_as_unknown_not_dropped`).
+/// 그 버킷이 있으면 계정은 계속 쉬는 중이거나 미확인이어야 한다. 그 버킷까지 빠진 예전 파서 결과로는 사용 가능으로 잘못 열렸다.
+#[test]
+fn an_unreadable_five_hour_value_does_not_erase_an_older_exhausted_one() {
+    let now = now_ms();
+    let policy = Policy::default();
+    let mut rows = ultra_rows(now, ("exhausted", 100.0));
+    let mut unread = bucket("5h-official", None, 0.0, now + 3_600_000, now);
+    unread.label = "Claude 5 Hour · 5시간".into();
+    unread.used_percent = None;
+    unread.resets_at = None;
+    unread.status = "unknown".into();
+    rows[0].buckets.push(unread);
+    let summary = crate::quota_summary::summaries(&rows, &policy, &[], now);
+    assert_ne!(summary[0].kind, "available", "{:?}", summary[0]);
+    let bridge_rows: Vec<&[QuotaBucket]> = rows.iter().map(|account| account.buckets.as_slice()).collect();
+    let merged = scheduler::without_vanished_short_windows(&bridge_rows, now, 900_000);
+    assert!(merged.iter().any(|bucket| bucket.status == "exhausted" && scheduler::short_window(bucket)));
+}
+
+#[test]
+fn five_hour_less_accounts_are_ranked_by_their_weekly_limit_without_unknown_short_pressure() {
+    let now = now_ms();
+    let weekly = |id: &str, used: f64| {
+        let mut account = account_fixture(id, now);
+        account.buckets = vec![bucket("7d", None, used, now + 3 * 86_400_000, now)];
+        account
+    };
+    let mut hot = account_fixture("hot", now);
+    hot.buckets = vec![bucket("7d", None, 30.0, now + 3 * 86_400_000, now), bucket("5h", None, 92.0, now + 3_600_000, now)];
+    let ultra = weekly("ultra", 30.0);
+    let policy = Policy::default();
+    // 5시간 한도가 없는 계정은 후보에서 빠지거나 미확인이 되지 않고, 85% 넘게 쓴 5시간 한도 계정보다 앞선다.
+    let decision = scheduler::decide(&[ultra.clone()], &[], &policy, &intent(), now).unwrap();
+    assert_eq!(decision.selected_account_id.as_deref(), Some("ultra"));
+    let decision = scheduler::decide(&[hot.clone(), ultra.clone()], &[], &policy, &intent(), now).unwrap();
+    assert_eq!(decision.selected_account_id.as_deref(), Some("ultra"));
+    let balanced = Policy { allocation_mode: AllocationMode::ExpiryBalanced, ..Policy::default() };
+    assert_eq!(scheduler::decide(&[hot, ultra], &[], &balanced, &intent(), now).unwrap().selected_account_id.as_deref(), Some("ultra"));
+}

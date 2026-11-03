@@ -22,6 +22,7 @@ serde.workspace = true
 serde_json.workspace = true
 libc.workspace = true
 sha2.workspace = true
+reqwest = { version = "0.12", default-features = false, features = ["blocking", "rustls-tls"] }
 toml = "0.8"
 uuid.workspace = true
 clap = { version = "4.5", features = ["derive"] }

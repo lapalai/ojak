@@ -7,6 +7,8 @@ import { ResetCreditsPanel } from "./ResetCreditsPanel";
 import { reloginRequest } from "./login";
 import { fullTime, privacyText, projectName, providerColor, relativeTime, shortTime, toolNames, useAction } from "./state";
 import { limitLabel, t } from "./i18n";
+import { summaryApiProvider } from "./api-credit";
+import { planLabel } from "./plan";
 import { creditCount, quotaReading, usdLimit, usdUsed } from "./limits";
 import { overviewOf, qualifiedLabel, quotaTone, watchable, watchedMembers } from "./overview";
 import type { Overview, UsageRow, When } from "./overview";
@@ -55,6 +57,7 @@ function verdictReason(verdict: Verdict, reserve: number): string | null {
   const label = verdict.label ? limitLabel(verdict.label.split(" · ").pop() ?? verdict.label) : "";
   if (verdict.kind === "credits") return t("usage.reason.credits");
   if (verdict.kind === "extra") return t("usage.reason.extra");
+  if (verdict.kind === "api-credit") return t(summaryApiProvider(verdict) === "openai" ? "usage.reason.openai-api" : "usage.reason.api-credit");
   if (verdict.kind === "resting") return verdict.rate ? t("usage.reason.rate") : label ? t("usage.reason.resting", { label }) : t("usage.reason.restingGeneric");
   if (verdict.kind === "reserve") return t("usage.reason.reserve", { label, reserve });
   if (verdict.kind === "partial") return t("usage.reason.partial", { models: verdict.models.join(", ") });
@@ -232,7 +235,7 @@ export function AccountDetails(props: AccountDetailsProps) {
           <dl className="acc-dl">
             {row.alias && <><dt>{t("usage.detail.name")}</dt><dd>{privacyText(row.alias, masked)}</dd></>}
             <dt>{t("usage.detail.email")}</dt><dd>{accountText(row.account, masked)}</dd>
-            {group && <><dt>{t("usage.detail.tools")}</dt><dd>{group.members.map(member => `${toolNames[member.tool] || member.tool}${member.plan ? ` (${member.plan})` : ""}`).join(", ")}</dd></>}
+            {group && <><dt>{t("usage.detail.tools")}</dt><dd>{group.members.map(member => `${toolNames[member.tool] || member.tool}${member.plan ? ` (${planLabel(member.provider, member.plan)})` : ""}`).join(", ")}</dd></>}
             {sharedProfiles > 1 && <><dt>{t("account.sharedProfiles")}</dt><dd>{t("account.sharedQuota", { count: sharedProfiles })}</dd></>}
           </dl>
           {reason && !ompLogin && <p className="reason">{reason}</p>}

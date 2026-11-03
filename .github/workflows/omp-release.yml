@@ -1,0 +1,273 @@
+# omp ships on its own release channel, separate from the Ojak app.
+#
+# The desktop app updater reads `/releases/latest/download/latest.json`, so an omp-only release must never become
+# `latest`. Both omp updaters (the patched omp's `omp update` and `aam omp-bridge update-omp`) instead read one page of
+# `/releases?per_page=30` and pick the newest published, non-draft, non-prerelease release tagged
+# `omp-vX.Y.Z-ojak.N` whose `omp-compatible-v2.json` version equals the tag version.
+#
+# This file has two jobs, both manual or read-only:
+#   watch  daily (and on demand): reports a newer stable can1357/oh-my-pi release as a GitHub issue, saying whether the
+#          pinned patch still applies. It never edits files, commits, pushes, or builds a release.
+#   build  on demand only: builds omp from the pinned patch on native Mac arm64 and Windows x64, runs the patch's
+#          ojak-update tests, and stages a DRAFT `omp-v<version>` release with `--latest=false`. It never publishes.
+#          An Admin publishes the unchanged draft after the checks in docs/release-policy.md (Ojak >= 0.22.2 first).
+#
+# No pull_request or pull_request_target trigger, so a fork PR cannot reach the token. Jobs refuse other repositories.
+name: omp release
+
+on:
+  schedule:
+    - cron: "23 3 * * *"
+  workflow_dispatch:
+    inputs:
+      action:
+        description: "watch = report a newer upstream omp; build = stage a draft omp-v<pinned version> release"
+        type: choice
+        options:
+          - watch
+          - build
+        default: watch
+
+permissions:
+  contents: read
+
+concurrency:
+  group: omp-release-${{ github.event_name }}-${{ github.ref }}
+  cancel-in-progress: false
+
+jobs:
+  watch:
+    if: github.repository == 'lapalai/ojak' && (github.event_name == 'schedule' || inputs.action == 'watch')
+    permissions:
+      contents: read
+      issues: write
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    env:
+      GH_TOKEN: ${{ github.token }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
+        with:
+          node-version: 22
+
+      - name: Compare the pinned upstream tag with the latest stable release
+        id: compare
+        run: |
+          set -eu
+          pinned=$(node -e 'const m=JSON.parse(require("fs").readFileSync("integrations/client-forks/manifest.json","utf8"));console.log(m.clients.find(c=>c.directory==="oh-my-pi").tag)')
+          # `releases/latest` never returns drafts or prereleases.
+          latest=$(gh api repos/can1357/oh-my-pi/releases/latest --jq .tag_name)
+          printf '%s\n' "$pinned" | grep -Eq '^v[0-9]+\.[0-9]+\.[0-9]+$' || { echo "Pinned tag $pinned is not a stable vX.Y.Z tag."; exit 1; }
+          printf '%s\n' "$latest" | grep -Eq '^v[0-9]+\.[0-9]+\.[0-9]+$' || { echo "Latest upstream tag $latest is not a stable vX.Y.Z tag."; exit 1; }
+          echo "pinned=$pinned latest=$latest"
+          newer=false
+          if [ "$pinned" != "$latest" ] && [ "$(printf '%s\n%s\n' "$pinned" "$latest" | sort -V | tail -n 1)" = "$latest" ]; then newer=true; fi
+          echo "pinned=$pinned" >> "$GITHUB_OUTPUT"
+          echo "latest=$latest" >> "$GITHUB_OUTPUT"
+          echo "newer=$newer" >> "$GITHUB_OUTPUT"
+
+      - name: Check whether the pinned patch applies to the newer tag
+        id: apply
+        if: steps.compare.outputs.newer == 'true'
+        env:
+          LATEST: ${{ steps.compare.outputs.latest }}
+        run: |
+          set -u
+          node scripts/prepare-client-forks.mjs --check
+          # Baseline: the pinned patch must still apply on the pinned base, so a failure below is about the new tag.
+          baseline=ok
+          node scripts/prepare-client-forks.mjs "$RUNNER_TEMP/pinned" > "$RUNNER_TEMP/baseline.log" 2>&1 || baseline=failed
+          result=failed
+          : > "$RUNNER_TEMP/apply.log"
+          if git clone --depth 1 --branch "$LATEST" -- https://github.com/can1357/oh-my-pi.git "$RUNNER_TEMP/upstream" >> "$RUNNER_TEMP/apply.log" 2>&1 \
+            && git -C "$RUNNER_TEMP/upstream" apply --check -- "$GITHUB_WORKSPACE/integrations/client-forks/oh-my-pi.patch" >> "$RUNNER_TEMP/apply.log" 2>&1; then
+            result=clean
+          fi
+          echo "baseline=$baseline" >> "$GITHUB_OUTPUT"
+          echo "result=$result" >> "$GITHUB_OUTPUT"
+          echo "baseline=$baseline result=$result"
+
+      - name: Open or update the issue
+        if: steps.compare.outputs.newer == 'true'
+        env:
+          PINNED: ${{ steps.compare.outputs.pinned }}
+          LATEST: ${{ steps.compare.outputs.latest }}
+          RESULT: ${{ steps.apply.outputs.result }}
+          BASELINE: ${{ steps.apply.outputs.baseline }}
+        run: |
+          set -eu
+          title="omp upstream: oh-my-pi ${LATEST} is available (pinned ${PINNED})"
+          if [ "$RESULT" = "clean" ]; then
+            verdict="The pinned patch (\`integrations/client-forks/oh-my-pi.patch\`) applies cleanly to \`${LATEST}\` (\`git apply --check\`)."
+          else
+            verdict="The pinned patch does **not** apply cleanly to \`${LATEST}\`; it must be rebased by hand."
+          fi
+          {
+            echo "Upstream \`can1357/oh-my-pi\` released stable \`${LATEST}\`; Ojak is pinned to \`${PINNED}\`."
+            echo
+            echo "- Patch on the pinned base: \`${BASELINE}\`"
+            echo "- Patch on \`${LATEST}\`: \`${RESULT}\`"
+            echo
+            echo "$verdict"
+            if [ "$RESULT" != "clean" ] && [ -s "$RUNNER_TEMP/apply.log" ]; then
+              echo
+              echo "<details><summary>git output (last 40 lines)</summary>"
+              echo
+              echo '```'
+              tail -n 40 "$RUNNER_TEMP/apply.log"
+              echo '```'
+              echo "</details>"
+            fi
+            echo
+            echo "Nothing was changed or built. To adopt it: rebase the patch, update \`manifest.json\` (tag, revision, version, sha256), run the patch's \`ojak-update\` tests, then run the \`omp release\` workflow with \`action: build\`."
+            echo
+            echo "Run: ${GITHUB_SERVER_URL}/${GITHUB_REPOSITORY}/actions/runs/${GITHUB_RUN_ID}"
+          } > "$RUNNER_TEMP/issue.md"
+          existing=$(gh issue list --repo "$GITHUB_REPOSITORY" --state open --limit 100 --json number,title | node -e 'const t=process.argv[1];const l=JSON.parse(require("fs").readFileSync(0,"utf8"));const f=l.find(i=>i.title===t);if(f)console.log(f.number)' "$title")
+          if [ -n "$existing" ]; then
+            gh issue edit "$existing" --repo "$GITHUB_REPOSITORY" --body-file "$RUNNER_TEMP/issue.md"
+            echo "Updated issue #$existing"
+          else
+            gh issue create --repo "$GITHUB_REPOSITORY" --title "$title" --body-file "$RUNNER_TEMP/issue.md"
+          fi
+
+  build:
+    if: github.repository == 'lapalai/ojak' && github.event_name == 'workflow_dispatch' && inputs.action == 'build' && github.ref == 'refs/heads/main'
+    permissions:
+      contents: read
+    strategy:
+      fail-fast: true
+      matrix:
+        include:
+          - os: macos-15
+            platform: darwin-arm64
+          - os: windows-latest
+            platform: win32-x64
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 120
+    defaults:
+      run:
+        shell: bash
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
+        with:
+          node-version: 22
+
+      - name: Verify pinned patch checksums and packaging tests
+        run: |
+          set -eu
+          node scripts/prepare-client-forks.mjs --check
+          node --test scripts/package-compatible-omp.test.mjs
+
+      - name: Install checksum-pinned Bun for compatible omp builds
+        run: |
+          set -eu
+          # Pins from oven-sh/bun bun-v1.4.4/SHASUMS256.txt. omp 18.15 requires Bun >= 1.4.4 (packageManager).
+          if [ "$RUNNER_OS" = "Windows" ]; then
+            asset=bun-windows-x64
+            expected=cd2c0fccc78f3ede1f50ca827a15f063eda13d4d150a3d0674f4f6e323d864a5
+          else
+            asset=bun-darwin-aarch64
+            expected=c240d7f0ccb90c263a849fcdb09b7ee62630d921348ed6aafda86b9d577bc510
+          fi
+          curl --fail --location --proto '=https' --proto-redir '=https' --tlsv1.2 --max-time 120 \
+            "https://github.com/oven-sh/bun/releases/download/bun-v1.4.4/${asset}.zip" \
+            --output "$RUNNER_TEMP/bun.zip"
+          EXPECTED_BUN_SHA256="$expected" node --input-type=module <<'JS'
+          import { createHash } from "node:crypto";
+          import { readFileSync } from "node:fs";
+          import { join } from "node:path";
+          const hash = createHash("sha256").update(readFileSync(join(process.env.RUNNER_TEMP, "bun.zip"))).digest("hex");
+          if (hash !== process.env.EXPECTED_BUN_SHA256) throw new Error("Pinned Bun archive checksum mismatch");
+          JS
+          if [ "$RUNNER_OS" = "Windows" ]; then
+            powershell -NoProfile -Command 'Expand-Archive -Path "$env:RUNNER_TEMP/bun.zip" -DestinationPath "$env:RUNNER_TEMP/bun"'
+          else
+            unzip -q "$RUNNER_TEMP/bun.zip" -d "$RUNNER_TEMP/bun"
+          fi
+          echo "$RUNNER_TEMP/bun/$asset" >> "$GITHUB_PATH"
+
+      - name: Prepare pinned compatible client source
+        run: |
+          set -eu
+          # Only oh-my-pi is built here; the Orca checkout from the shared script is unused.
+          node scripts/prepare-client-forks.mjs "$RUNNER_TEMP/compatible-clients"
+
+      - name: Build and execute native compatible omp
+        run: node scripts/package-compatible-omp.mjs build "$RUNNER_TEMP/compatible-clients/oh-my-pi" "$RUNNER_TEMP/omp-${{ matrix.platform }}"
+
+      - name: Run the patch's ojak-update tests
+        working-directory: ${{ runner.temp }}/compatible-clients/oh-my-pi/packages/coding-agent
+        run: bun test test/cli/ojak-update.test.ts
+
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: omp-${{ matrix.platform }}
+          path: ${{ runner.temp }}/omp-${{ matrix.platform }}
+          if-no-files-found: error
+
+  draft:
+    needs: build
+    if: github.repository == 'lapalai/ojak' && github.event_name == 'workflow_dispatch' && inputs.action == 'build' && github.ref == 'refs/heads/main'
+    permissions:
+      contents: write
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    env:
+      GH_TOKEN: ${{ github.token }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
+        with:
+          pattern: omp-*
+          path: ${{ runner.temp }}/dist
+          merge-multiple: true
+
+      - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
+        with:
+          node-version: 22
+
+      - name: Generate the v2 manifest
+        run: |
+          set -eu
+          # Deployed omp 18.12 updaters read only the legacy names and never check the Ojak service version.
+          for old in omp-compatible.json omp-darwin-arm64 omp-windows-x64.exe; do
+            if [ -e "$RUNNER_TEMP/dist/$old" ]; then echo "Refusing legacy omp asset $old."; exit 1; fi
+          done
+          node scripts/package-compatible-omp.mjs manifest "$RUNNER_TEMP/dist"
+          ls -l "$RUNNER_TEMP/dist"
+
+      - name: Stage the draft omp release (never latest, never published)
+        run: |
+          set -eu
+          version=$(node -e 'const m=JSON.parse(require("fs").readFileSync("integrations/client-forks/manifest.json","utf8"));console.log(m.clients.find(c=>c.directory==="oh-my-pi").version)')
+          printf '%s\n' "$version" | grep -Eq '^(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)-ojak\.[1-9][0-9]*$' || { echo "Refusing non X.Y.Z-ojak.N version $version."; exit 1; }
+          tag="omp-v${version}"
+          manifest_version=$(node -e 'console.log(JSON.parse(require("fs").readFileSync(process.argv[1],"utf8")).version)' "$RUNNER_TEMP/dist/omp-compatible-v2.json")
+          [ "$manifest_version" = "$version" ] || { echo "Manifest version $manifest_version does not match $version."; exit 1; }
+          if gh release view "$tag" --repo "$GITHUB_REPOSITORY" > /dev/null 2>&1; then echo "Release $tag already exists; bump the fork revision."; exit 1; fi
+          # The tag must already exist, be annotated (made by an Admin), and point at exactly the commit that was built.
+          # Never create it here: `--verify-tag` below refuses to make one, so a lightweight or reused tag cannot slip in.
+          ref=$(gh api "repos/$GITHUB_REPOSITORY/git/ref/tags/$tag" 2>/dev/null) || { echo "Tag $tag does not exist. An Admin must create the annotated tag on $GITHUB_SHA first."; exit 1; }
+          [ "$(printf '%s' "$ref" | jq -r .object.type)" = "tag" ] || { echo "Tag $tag is lightweight; an annotated tag is required."; exit 1; }
+          peeled=$(gh api "repos/$GITHUB_REPOSITORY/git/tags/$(printf '%s' "$ref" | jq -r .object.sha)" --jq '.object | select(.type=="commit") | .sha')
+          [ "$peeled" = "$GITHUB_SHA" ] || { echo "Tag $tag points at ${peeled:-a non-commit}, not the built commit $GITHUB_SHA."; exit 1; }
+          cd "$RUNNER_TEMP/dist"
+          sha256sum omp-v2-darwin-arm64 omp-v2-windows-x64.exe omp-compatible-v2.json > SHA256SUMS
+          test -s SHA256SUMS
+          gh release create "$tag" --repo "$GITHUB_REPOSITORY" \
+            --draft --latest=false --verify-tag \
+            --title "omp ${version}" \
+            --notes "Ojak-patched omp ${version}. Requires the Ojak service version in omp-compatible-v2.json (minimumOjakService). Published by an Admin only after the checks in docs/release-policy.md; never marked latest." \
+            omp-v2-darwin-arm64 omp-v2-windows-x64.exe omp-compatible-v2.json SHA256SUMS

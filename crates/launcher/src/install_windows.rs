@@ -655,7 +655,12 @@ impl ServiceProcess {
         aam_protocol::call_for_process(paths, method, params, self.pid)
     }
     fn prepare(&self, paths: &Paths) -> Result<String, ApiError> {
-        let prepared = self.call(paths, "service.prepareUninstall", json!({}))?;
+        self.prepare_with(paths, false)
+    }
+    /// `restart`면 서비스를 다시 시작하려는 호출이 사용자 동의를 받았다는 뜻이라, 점유 lease가 있어도 배정만 닫는다
+    /// (이 매개변수를 모르는 예전 서비스는 lease가 있으면 `SESSION_BUSY`로 거절한다).
+    fn prepare_with(&self, paths: &Paths, restart: bool) -> Result<String, ApiError> {
+        let prepared = self.call(paths, "service.prepareUninstall", if restart { json!({ "restart": true }) } else { json!({}) })?;
         let permit = prepared.get("permit").and_then(|value| value.as_str()).filter(|value| !value.is_empty());
         if prepared.get("safe").and_then(|value| value.as_bool()) != Some(true) || permit.is_none() {
             return Err(error("INVALID_UNINSTALL_PERMIT", "활성·불확실 lease의 안전 조건을 확인하지 못해 서비스를 중지하지 않았습니다."));
@@ -765,7 +770,7 @@ fn service_shutdown(paths: &Paths, remove_installation: bool) -> Result<String, 
     if record.owner != OWNER {
         return Err(error("FOREIGN_INSTALL", "앱 소유 서비스 기록이 아니므로 제거하지 않습니다."));
     }
-    let _fence = retire_registered(paths, &record_path, &mut record, false)?;
+    let _fence = retire_registered(paths, &record_path, &mut record, false, false)?;
     if !remove_installation {
         return Ok("신규 배정과 활성·불확실 lease의 안전 조건을 확인한 뒤 관리 서비스를 중지했습니다. 자동 실행 등록과 계정·프로필·로그는 보존했습니다.".into());
     }
@@ -785,22 +790,25 @@ fn service_shutdown(paths: &Paths, remove_installation: bool) -> Result<String, 
 /// 종료를 하고, 감독 프로세스를 끝내기로 확정한다. 서비스가 없을 때도 시작 잠금과 저장소를 직접 확인해 점유 lease가 없을 때만 승인한다.
 /// `rollback`은 파일을 되돌리고 서비스를 다시 시작해 lease를 새로 확인하므로 이 종료 승인을 만들지 않는다.
 /// 거절·실패로 돌아가면 감독 프로세스는 확정하지 않았으므로 관문을 놓는 순간 작업자 감독을 이어 가서 자동 복구가 살아 있다.
-fn retire_registered(paths: &Paths, record_path: &Path, record: &mut ServiceRecord, rollback: bool) -> Result<aam_service::supervisor::Fence, ApiError> {
+fn retire_registered(paths: &Paths, record_path: &Path, record: &mut ServiceRecord, rollback: bool, interrupt: bool) -> Result<aam_service::supervisor::Fence, ApiError> {
     let mut fence = aam_service::supervisor::engage(paths)?;
     if let Some(process) = connect_fenced(paths, &record.binary_path, &mut fence)? {
-        let (permit, reboot_proven) = match process.prepare(paths) {
-            Ok(permit) => (permit, false),
+        let (permit, reboot_proven) = match process.prepare_with(paths, interrupt) {
+            Ok(permit) => (Some(permit), false),
+            // 사용자가 끊김에 동의한 재시작인데 `restart` 매개변수를 모르는 예전 서비스가 거절했다. 배정은 닫지 못한 채 끈다.
+            // lease 기록은 그대로 남고, 새 서비스가 시작할 때 `reconcile(true)`로 이어받는다(풀지 않는다).
+            Err(failure) if failure.code == "SESSION_BUSY" && interrupt => (None, false),
             // 재부팅 규칙이 없던 이전 서비스는 재부팅으로 끝난 세션도 붙잡고 종료를 거절한다. 같은 쓰기 트랜잭션에서
             // 점유 전부가 부팅 ID로 이전 부팅임이 증명될 때만 신규 배정을 닫는다(실행 중 서비스도 배정마다 이 값을 읽는다).
             Err(failure) if failure.code == "SESSION_BUSY" && !rollback => {
                 match aam_service::close_admission_if_busy_only_from_previous_boot(paths)? {
-                    Some(permit) => (permit, true),
+                    Some(permit) => (Some(permit), true),
                     None => return Err(failure),
                 }
             }
             Err(failure) => return Err(failure),
         };
-        record.uninstall_permit = Some(permit);
+        record.uninstall_permit = permit;
         save(record_path, record)?;
         if reboot_proven {
             // 승인 저장 직전에 배정 검사를 이미 통과한 요청이 있을 수 있다. 배정은 같은 저장소 쓰기 잠금 아래에서만 lease를 만들므로,
@@ -853,21 +861,28 @@ pub(super) fn service_stop_for_rollback(paths: &Paths) -> Result<aam_service::su
     if record.owner != OWNER {
         return Err(error("FOREIGN_INSTALL", "앱 소유 서비스 기록이 아니므로 중지하지 않습니다."));
     }
-    retire_registered(paths, &record_path, &mut record, true)
+    retire_registered(paths, &record_path, &mut record, true, false)
 }
 
 
 /// 앱 업데이트 뒤 서비스 교체(macOS `launchctl kickstart -k`에 해당). 앱이 등록한 서비스일 때만 하고,
 /// 등록 기록이 없으면 아무것도 하지 않는다. 종료 확인 뒤 기록된 실행 파일로 다시 시작한다.
-pub fn service_restart(paths: &Paths) -> Result<(), ApiError> {
-    let Some(mut record): Option<ServiceRecord> = read_owned(&paths.home.join("service-install.json"))? else {
+/// `interrupt`는 사용자가 진행 중인 작업이 끊기는 것에 동의했다는 뜻이다. 점유 lease가 있어도 배정만 닫고 서비스를 끝내며,
+/// lease 기록은 지우지도 풀지도 않는다(관리 CLI 프로세스는 서비스의 자식이 아니라 살아남고, 새 서비스가 이어받는다).
+pub fn service_restart(paths: &Paths, interrupt: bool) -> Result<(), ApiError> {
+    let record_path = paths.home.join("service-install.json");
+    let Some(mut record): Option<ServiceRecord> = read_owned(&record_path)? else {
         return Ok(());
     };
     if record.owner != OWNER {
         return Err(error("FOREIGN_INSTALL", "앱 소유 서비스 기록이 아니므로 재시작하지 않습니다."));
     }
     if running(paths) {
-        service_stop(paths)?;
+        if interrupt {
+            let _fence = retire_registered(paths, &record_path, &mut record, false, true)?;
+        } else {
+            service_stop(paths)?;
+        }
     } else if aam_service::supervisor::running(paths) {
         retire_idle_supervisor(paths, &record.binary_path)?;
     }

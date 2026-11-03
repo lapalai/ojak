@@ -1,13 +1,16 @@
 import { useEffect, useState } from "react";
 import { ChevronDown, ChevronUp } from "lucide-react";
 import { chooseDirectory, rpc } from "./api";
-import { ActionFeedback, Busy, Dot, Modal, Switch } from "./components";
+import { ActionFeedback, Busy, Dot, Modal, Switch, Tip } from "./components";
 import { canonicalProvider, groupAccounts, isCurrentGroup, privacyText, projectName, providerNames, toolNames, useAction, useBridge } from "./state";
 import type { AccountGroup } from "./state";
 import { PROVIDER_ORDER } from "./types";
 import type { Account, Policy, ProjectRoute, Snapshot } from "./types";
+import { DEFAULT_API_CREDIT_LIMIT_USD, DEFAULT_OPENAI_API_LIMIT_USD, MAX_API_CREDIT_LIMIT_USD, MAX_OPENAI_API_LIMIT_USD, MIN_OPENAI_API_LIMIT_USD, apiAccounts, apiCreditAmount, apiCreditUsage, paidPolicyPatch } from "./api-credit";
 import { MAX_CONCURRENCY, concurrencyRows, concurrencyUpdateIds, concurrencyValue } from "./allocation";
 import { t } from "./i18n";
+import { ALLOCATION_MODES, MODE_TEXT, allocationModeOf } from "./allocation-mode";
+import { ApiCreditGrantPanel } from "./ApiCreditGrantPanel";
 
 function groupTitle(group: AccountGroup, masked: boolean): string {
   const provider = providerNames[canonicalProvider(group.primary.provider)];
@@ -21,14 +24,27 @@ export function CreditSettings({ snapshot, online, masked, onReload, onClose }: 
   const [base] = useState(policy);
   const [creditsEnabled, setCreditsEnabled] = useState(Boolean(policy.useCreditsAfterLimit));
   const [extraEnabled, setExtraEnabled] = useState(Boolean(policy.useExtraUsageAfterLimit));
+  const [apiEnabled, setApiEnabled] = useState(Boolean(policy.useApiCreditAfterLimit));
+  const baseLimit = base.apiCreditMonthlyLimitUsd ?? DEFAULT_API_CREDIT_LIMIT_USD;
+  const [apiLimit, setApiLimit] = useState(String(baseLimit));
+  const [openaiEnabled, setOpenaiEnabled] = useState(Boolean(policy.useOpenaiApiAfterLimit));
+  const openaiBaseLimit = base.openaiApiMonthlyLimitUsd ?? DEFAULT_OPENAI_API_LIMIT_USD;
+  const [openaiLimit, setOpenaiLimit] = useState(String(openaiBaseLimit));
   const stale = base.revision !== policy.revision;
-  const changed = creditsEnabled !== Boolean(base.useCreditsAfterLimit) || extraEnabled !== Boolean(base.useExtraUsageAfterLimit);
+  const apiLimitValue = Number(apiLimit);
+  const { apiLimitValid, openaiLimitValid, changed, patch } = paidPolicyPatch(base, { credits: creditsEnabled, extra: extraEnabled, apiEnabled, apiLimit, openaiEnabled, openaiLimit });
   const codex = groupAccounts(snapshot.accounts.filter(account => account.tool === "codex"));
+  // 두 공급자의 키와 합계는 섞지 않는다. Claude 항목은 Claude 키만, OpenAI 항목은 OpenAI 키만 본다.
+  const keys = apiAccounts(snapshot.accounts, "anthropic");
+  const openaiKeys = apiAccounts(snapshot.accounts, "openai");
+  const usage = apiCreditUsage(snapshot.accounts, snapshot.generatedAt, snapshot.apiCreditRemoved, "anthropic");
+  const openaiUsage = apiCreditUsage(snapshot.accounts, snapshot.generatedAt, snapshot.openaiApiRemoved, "openai");
+  const valid = apiLimitValid && openaiLimitValid;
   function save() {
-    if (!online || stale || !changed) return;
+    if (!online || stale || !changed || !valid) return;
     void (async () => {
       if (await action.run(async () => {
-        try { return await rpc<Policy>("policy.update", { expectedRevision: base.revision, useCreditsAfterLimit: creditsEnabled, useExtraUsageAfterLimit: extraEnabled }); }
+        try { return await rpc<Policy>("policy.update", { expectedRevision: base.revision, ...patch }); }
         finally { await onReload(); }
       })) onClose();
     })();
@@ -39,6 +55,24 @@ export function CreditSettings({ snapshot, online, masked, onReload, onClose }: 
     <div className="rules paid-rules">
       <div className="rule"><div className="t">{t("policy.credits")}</div><div className="d">{t("policy.creditsDesc")} <strong>{t("policy.creditsWarn")}</strong></div><div className="ctl"><Switch checked={creditsEnabled} disabled={!online || action.pending} label={t("policy.credits")} onChange={setCreditsEnabled} /></div></div>
       <div className="rule"><div className="t">{t("policy.extraUsage")}</div><div className="d">{t("policy.extraUsageDesc")} <strong>{t("policy.extraUsageWarn")}</strong></div><div className="ctl"><Switch checked={extraEnabled} disabled={!online || action.pending} label={t("policy.extraUsage")} onChange={setExtraEnabled} /></div></div>
+      <div className="rule"><div className="t">{t("policy.apiCredit")}</div><div className="d">{t("policy.apiCreditDesc")} <strong>{t("policy.apiCreditWarn")}</strong></div><div className="ctl"><Switch checked={apiEnabled} disabled={!online || action.pending || (keys.length === 0 && !apiEnabled)} label={t("policy.apiCredit")} onChange={setApiEnabled} /></div></div>
+    </div>
+    <div className="api-credit-settings">
+      <label className="api-credit-limit">{t("policy.apiCreditLimit")} <input type="number" min={1} max={MAX_API_CREDIT_LIMIT_USD} step={1} value={apiLimit} aria-label={t("policy.apiCreditLimitAria")} aria-invalid={!apiLimitValid} disabled={!online || action.pending} onChange={event => setApiLimit(event.target.value)} />USD</label>
+      {!apiLimitValid && <p className="gate-reason" role="alert">{t("policy.apiCreditLimitInvalid")}</p>}
+      {keys.length === 0 ? <p className="field-help">{t("policy.apiCreditNoKey")}</p> : <p className="field-help">{t("policy.apiCreditUsage", { amount: apiCreditAmount(usage.usedUsd, apiLimitValid ? apiLimitValue : baseLimit) })}</p>}
+      {usage.unmeteredRequests > 0 && <p className="gate-reason" role="status">{t("policy.apiCreditUnmetered", { count: usage.unmeteredRequests })}</p>}
+      <ul className="field-help api-credit-guide"><li>{t("policy.apiCreditGuideCredit")}</li><li>{t("policy.apiCreditGuideReload")}</li><li>{t("policy.apiCreditGuideCap")}</li></ul>
+    </div>
+    <div className="rules paid-rules">
+      <div className="rule"><div className="t">{t("policy.openaiApi")}</div><div className="d">{t("policy.openaiApiDesc")} <strong>{t("policy.openaiApiWarn")}</strong></div><div className="ctl"><Switch checked={openaiEnabled} disabled={!online || action.pending || (openaiKeys.length === 0 && !openaiEnabled)} label={t("policy.openaiApi")} onChange={setOpenaiEnabled} /></div></div>
+    </div>
+    <div className="api-credit-settings">
+      <label className="api-credit-limit">{t("policy.openaiApiLimit")} <input type="number" min={MIN_OPENAI_API_LIMIT_USD} max={MAX_OPENAI_API_LIMIT_USD} step={1} value={openaiLimit} aria-label={t("policy.openaiApiLimitAria")} aria-invalid={!openaiLimitValid} disabled={!online || action.pending} onChange={event => setOpenaiLimit(event.target.value)} />USD</label>
+      {!openaiLimitValid && <p className="gate-reason" role="alert">{t("policy.openaiApiLimitInvalid")}</p>}
+      {openaiKeys.length === 0 ? <p className="field-help">{t("policy.openaiApiNoKey")}</p> : <p className="field-help">{t("policy.openaiApiUsage", { amount: apiCreditAmount(openaiUsage.usedUsd, openaiLimitValid ? Number(openaiLimit) : openaiBaseLimit) })}</p>}
+      {openaiUsage.unmeteredRequests > 0 && <p className="gate-reason" role="status">{t("policy.openaiApiUnmetered", { count: openaiUsage.unmeteredRequests })}</p>}
+      <ul className="field-help api-credit-guide"><li>{t("policy.openaiApiGuideBilling")}</li><li>{t("policy.openaiApiGuideReload")}</li><li>{t("policy.openaiApiGuideCap")}</li></ul>
     </div>
     {codex.map(group => {
       const credits = group.members.map(account => account.credits).filter(credit => credit != null).sort((a, b) => b.observedAt - a.observedAt)[0];
@@ -49,7 +83,7 @@ export function CreditSettings({ snapshot, online, masked, onReload, onClose }: 
     {stale && <p className="gate-reason" role="status">{t("routes.form.stale")}</p>}
     <ActionFeedback error={action.error} message={action.message} />
     </div>
-    <div className="modal-footer"><button type="button" disabled={action.pending} onClick={onClose}>{t("common.cancel")}</button><button type="submit" className="primary" disabled={!online || action.pending || stale || !changed}>{action.pending ? <Busy /> : t("usage.dashboard.apply")}</button></div>
+    <div className="modal-footer"><button type="button" disabled={action.pending} onClick={onClose}>{t("common.cancel")}</button><button type="submit" className="primary" disabled={!online || action.pending || stale || !changed || !valid}>{action.pending ? <Busy /> : t("usage.dashboard.apply")}</button></div>
     </form>
   </Modal>;
 }
@@ -72,7 +106,7 @@ export function AllocationSettings({ snapshot, online, masked, onReload }: { sna
   const priority = policy.accountPriority ?? [];
   const rank = (group: AccountGroup) => Math.min(...group.members.map(member => { const index = priority.indexOf(member.id); return index === -1 ? Infinity : index; }));
   const ordered = [...groups].sort((a, b) => rank(a) - rank(b) || PROVIDER_ORDER.indexOf(canonicalProvider(a.primary.provider)) - PROVIDER_ORDER.indexOf(canonicalProvider(b.primary.provider)) || (a.email ?? "").localeCompare(b.email ?? ""));
-  const mode = policy.allocationMode ?? "smart";
+  const mode = allocationModeOf(policy.allocationMode);
   const reserveValid = reserve.trim() !== "" && Number.isFinite(Number(reserve)) && Number(reserve) >= 0 && Number(reserve) <= 100;
 
   async function update(patch: Record<string, unknown>) {
@@ -83,7 +117,7 @@ export function AllocationSettings({ snapshot, online, masked, onReload }: { sna
     if (target < 0 || target >= ordered.length) return;
     const next = [...ordered];
     [next[index], next[target]] = [next[target], next[index]];
-    void action.run(() => update({ accountPriority: next.flatMap(group => group.members.map(member => member.id)) }), () => t("policy.orderSaved") + (mode === "priority" ? t("policy.orderSaved.priority") : t("policy.orderSaved.smart")));
+    void action.run(() => update({ accountPriority: next.flatMap(group => group.members.map(member => member.id)) }), () => t("policy.orderSaved") + t(MODE_TEXT[mode].saved));
   }
   function toggle(group: AccountGroup, enabled: boolean) {
     void action.run(async () => {
@@ -125,18 +159,21 @@ export function AllocationSettings({ snapshot, online, masked, onReload }: { sna
     <div className="panel">
       <header><h2>{t("policy.criteria")}</h2></header>
       <div className="rules">
-        <div className="rule"><div className="t">{t("policy.mode")}</div><div className="d">{mode === "smart" ? t("policy.mode.smartDesc") : t("policy.mode.priorityDesc")}</div><div className="ctl"><select aria-label={t("policy.mode")} value={mode} disabled={!online || action.pending} onChange={event => { const allocationMode = event.target.value === "priority" ? "priority" : "smart"; void action.run(() => update({ allocationMode }), () => allocationMode === "priority" ? t("policy.mode.setPriority") : t("policy.mode.setSmart")); }}><option value="smart">{t("policy.mode.smart")}</option><option value="priority">{t("policy.mode.priority")}</option></select></div></div>
-        <div className="rule"><div className="t">{t("policy.reserve")}</div><div className="d">{t("policy.reserveDesc")}</div><form className="ctl" onSubmit={event => { event.preventDefault(); saveReserve(); }}><input type="number" min={0} max={100} step={0.5} value={reserve} aria-label={t("policy.reserveAria")} disabled={!online || action.pending} onChange={event => setReserve(event.target.value)} onBlur={saveReserve} />%</form></div>
-        <div className="rule"><div className="t">{t("policy.expiring")}</div><div className="d">{t("policy.expiringDesc")}</div><form className="ctl expiring-ctl" onSubmit={event => { event.preventDefault(); saveExpiring(); }}>
+        <div className="rule"><div className="t">{t("policy.mode")}</div><div className="d">{t(MODE_TEXT[mode].desc)}
+          <ul className="mode-list" aria-label={t("policy.mode.listAria")}>{ALLOCATION_MODES.map(value => <li key={value} className={value === mode ? "current" : undefined}><Tip tip={t(MODE_TEXT[value].tip)} className="mode-tip">{t(MODE_TEXT[value].label)}</Tip>{value === mode && <span className="tag accent">{t("policy.mode.current")}</span>}</li>)}</ul></div>
+          <div className="ctl"><select aria-label={t("policy.mode")} value={mode} disabled={!online || action.pending} onChange={event => { const allocationMode = allocationModeOf(event.target.value); if (allocationMode === mode) return; void action.run(() => update({ allocationMode }), () => t(MODE_TEXT[allocationMode].set)); }}>{ALLOCATION_MODES.map(value => <option key={value} value={value}>{t(MODE_TEXT[value].label)}</option>)}</select></div></div>
+        <div className="rule"><div className="t">{t("policy.reserve")} <Tip tip={t("policy.reserveTip")} label={t("policy.tipLabel", { name: t("policy.reserve") })} /></div><div className="d">{t("policy.reserveDesc")}</div><form className="ctl" onSubmit={event => { event.preventDefault(); saveReserve(); }}><input type="number" min={0} max={100} step={0.5} value={reserve} aria-label={t("policy.reserveAria")} disabled={!online || action.pending} onChange={event => setReserve(event.target.value)} onBlur={saveReserve} />%</form></div>
+        <div className="rule"><div className="t">{t("policy.expiring")} <Tip tip={t("policy.expiringTip")} label={t("policy.tipLabel", { name: t("policy.expiring") })} /></div><div className="d">{t("policy.expiringDesc")}</div><form className="ctl expiring-ctl" onSubmit={event => { event.preventDefault(); saveExpiring(); }}>
           <label>{t("policy.expiringWindow")} <input type="number" min={1} max={168} step={1} value={windowHours} aria-label={t("policy.expiringWindowAria")} disabled={!online || action.pending} onChange={event => setWindowHours(event.target.value)} onBlur={saveExpiring} />{t("policy.hoursUnit")}</label>
           <label>{t("policy.expiringMin")} <input type="number" min={1} max={100} step={5} value={minPercent} aria-label={t("policy.expiringMinAria")} disabled={!online || action.pending} onChange={event => setMinPercent(event.target.value)} onBlur={saveExpiring} />%</label>
         </form></div>
-        <div className="rule"><div className="t">{t("policy.expiringBoost")}</div><div className="d">{mode === "smart" ? t("policy.expiringBoostDesc") : t("policy.expiringBoostPriority")}</div><div className="ctl"><Switch checked={policy.expiringBoost ?? false} disabled={!online || action.pending} label={t("policy.expiringBoost")} onChange={expiringBoost => { void action.run(() => update({ expiringBoost }), () => expiringBoost ? t("policy.expiringBoostOn") : t("policy.expiringBoostOff")); }} /></div></div>
-        <div className="rule"><div className="t">{t("policy.pinning")}</div><div className="d">{t("policy.pinningDesc")}</div><div className="ctl"><span className="tag">{t("policy.fixed")}</span></div></div>
-        <div className="rule"><div className="t">{t("policy.exhausted")}</div><div className="d">{t("policy.exhaustedDesc")}</div><div className="ctl"><span className="tag">{t("policy.fixed")}</span></div></div>
-        <div className="rule"><div className="t">{t("policy.stale")}</div><div className="d">{t("policy.staleDesc", { minutes: Math.round(policy.staleAfterSeconds / 60) })}</div><div className="ctl"><span className="tag">{t("policy.fixed")}</span></div></div>
+        <div className="rule"><div className="t">{t("policy.expiringBoost")}</div><div className="d">{t(MODE_TEXT[mode].boost)}</div><div className="ctl"><Switch checked={policy.expiringBoost ?? false} disabled={!online || action.pending} label={t("policy.expiringBoost")} onChange={expiringBoost => { void action.run(() => update({ expiringBoost }), () => expiringBoost ? t("policy.expiringBoostOn") : t("policy.expiringBoostOff")); }} /></div></div>
+        <div className="rule"><div className="t">{t("policy.pinning")} <Tip tip={t("policy.pinningTip")} label={t("policy.tipLabel", { name: t("policy.pinning") })} /></div><div className="d">{t("policy.pinningDesc")}</div><div className="ctl"><span className="tag">{t("policy.fixed")}</span></div></div>
+        <div className="rule"><div className="t">{t("policy.exhausted")} <Tip tip={t("policy.exhaustedTip")} label={t("policy.tipLabel", { name: t("policy.exhausted") })} /></div><div className="d">{t("policy.exhaustedDesc")}</div><div className="ctl"><span className="tag">{t("policy.fixed")}</span></div></div>
+        <div className="rule"><div className="t">{t("policy.stale")} <Tip tip={t("policy.staleTip")} label={t("policy.tipLabel", { name: t("policy.stale") })} /></div><div className="d">{t("policy.staleDesc", { minutes: Math.round(policy.staleAfterSeconds / 60) })}</div><div className="ctl"><span className="tag">{t("policy.fixed")}</span></div></div>
       </div>
     </div>
+    <ApiCreditGrantPanel snapshot={snapshot} online={online} masked={masked} update={update} />
     <div className="panel">
       <header><h2>{t("policy.orderTitle")}</h2><span className="aside">{t("policy.orderAside")}</span></header>
       {ordered.length ? <ul className="order">{ordered.map((group, index) => {
@@ -148,7 +185,7 @@ export function AllocationSettings({ snapshot, online, masked, onReload }: { sna
           <Switch checked={enabled} disabled={!online || action.pending} label={t("policy.includeLabel", { name: groupTitle(group, masked) })} onChange={next => toggle(group, next)} />
         </li>;
       })}</ul> : <div className="empty">{t("policy.noAccounts")}</div>}
-      <div className="row-actions"><span className="hint">{mode === "priority" ? t("policy.orderHint.priority") : t("policy.orderHint.smart")}</span></div>
+      <div className="row-actions"><span className="hint">{t(MODE_TEXT[mode].order)}</span></div>
     </div>
     {parallel.length > 0 && <div className="panel">
       <header><h2>{t("policy.concurrency")}</h2><span className="aside">{t("policy.concurrencyHint")}</span></header>

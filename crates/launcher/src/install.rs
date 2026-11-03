@@ -663,7 +663,7 @@ pub fn service_install(paths: &Paths) -> Result<String, ApiError> {
                 save(&record_path, &previous)?;
                 let mut message = String::from("같은 관리 서비스가 이미 실행 중이고, 새 배정을 다시 열었어요.");
                 if crate::service_version::read_report(paths).is_ok_and(|report| report.mismatch) {
-                    message.push_str(" 실행 중인 서비스 버전이 앱과 달라요. 쓰는 중인 세션이 없을 때 `aam service restart`로 다시 시작해 주세요.");
+                    message.push_str(" 실행 중인 서비스 버전이 앱과 달라요. `aam service restart`로 다시 시작해 주세요. 쓰는 작업이 있으면 끊길 목록을 보여 주고 먼저 확인해요.");
                 }
                 return Ok(message);
             }

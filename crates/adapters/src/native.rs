@@ -75,6 +75,36 @@ fn apply_identity(account: &mut Account, identity: Option<String>, profile: &Pat
     }
 }
 
+/// 공식 `claude auth status --json`의 `subscriptionType`은 Max와 Ultra를 모두 `max`로 보고한다(2.1.316 실측: Ultra 계정이 `max`).
+/// 사람이 읽는 플랜 이름은 공식 CLI가 로그인 프로필에서 받아 `.claude.json`의 `oauthAccount.planDisplayName`에 저장한다.
+/// 이 값(비밀이 아닌 두 필드만)을 읽어 `max`를 Max/Ultra로 구분한다. 이 프로필에 표시 이름이 아직 없으면(프로필을 받기 전)
+/// 같은 파일의 `organizationRateLimitTier`가 `default_claude_max_20x`일 때만 Ultra로 본다(이 Mac의 관리 프로필 중 값이 있는 5곳이 모두 이 값이고,
+/// Anthropic은 2026-10-30에 Max 20x를 Ultra로 개명했다). 그 밖에는 원래 값을 그대로 둔다. 읽지 못하면 원래 값이다.
+fn claude_plan(reported: Option<String>, profile: &Path) -> Option<String> {
+    use std::io::Read;
+    if reported.as_deref() != Some("max") {
+        return reported;
+    }
+    let home = crate::user_home().ok();
+    let home_default = std::env::var_os("CLAUDE_CONFIG_DIR").is_none()
+        && home.as_ref().and_then(|home| home.join(".claude").canonicalize().ok()).as_deref() == Some(profile);
+    let path = match (&home, home_default) {
+        (Some(home), true) => home.join(".claude.json"),
+        _ => profile.join(".claude.json"),
+    };
+    let mut raw = String::new();
+    let read = std::fs::File::open(path).and_then(|file| file.take(8 * 1024 * 1024).read_to_string(&mut raw));
+    let Some(account) = read.ok().and_then(|_| serde_json::from_str::<Value>(&raw).ok()).and_then(|value| value.get("oauthAccount").cloned()) else {
+        return reported;
+    };
+    let named = text(&account, "planDisplayName").filter(|name| name.len() <= 32 && name.chars().all(|c| c.is_ascii_alphanumeric() || c == ' '));
+    // 표시 이름이 그냥 Max이면 원래 값(`max`)을 그대로 둔다. 같은 플랜의 표기가 `Max`/`max`로 갈라져 플랜별 공정 순서가 쪼개지지 않게 한다.
+    named
+        .filter(|name| !name.eq_ignore_ascii_case("max"))
+        .or_else(|| (text(&account, "organizationRateLimitTier").as_deref() == Some("default_claude_max_20x")).then(|| "Ultra".to_owned()))
+        .or(reported)
+}
+
 pub(crate) fn parse_claude(
     value: &Value,
     mut account: Account,
@@ -107,7 +137,7 @@ pub(crate) fn parse_claude(
     account.auth_status = "authenticated".into();
     account.email = text(value, "email");
     account.organization = text(value, "orgName").or_else(|| text(value, "orgId"));
-    account.plan = text(value, "subscriptionType");
+    account.plan = claude_plan(text(value, "subscriptionType"), profile);
     apply_identity(&mut account, claude_identity(value), profile);
     Ok(account)
 }
@@ -643,3 +673,47 @@ done"#,
     }
 }
 
+
+#[cfg(test)]
+mod plan_tests {
+    use super::*;
+
+    fn profile_with(oauth: Option<Value>) -> PathBuf {
+        let root = std::env::temp_dir().join(format!("aam-claude-plan-{}", aam_protocol::new_id()));
+        std::fs::create_dir_all(&root).unwrap();
+        let root = root.canonicalize().unwrap();
+        if let Some(oauth) = oauth {
+            std::fs::write(root.join(".claude.json"), json!({"oauthAccount": oauth}).to_string()).unwrap();
+        }
+        root
+    }
+    fn plan_of(profile: &Path, subscription: &str) -> Option<String> {
+        let value = json!({"loggedIn":true,"authMethod":"claude.ai","apiProvider":"firstParty","email":"person@invalid.test","orgId":"workspace-a","subscriptionType":subscription});
+        let account = blank_account("claude", profile, Path::new("/sanitized/claude"), "계정");
+        parse_claude(&value, account, profile).unwrap().plan
+    }
+
+    #[test]
+    fn official_max_report_is_split_into_max_and_ultra_from_the_cli_profile_files() {
+        // 공식 CLI 2.1.316은 Ultra 계정도 subscriptionType `max`로 보고한다. 표시 이름 `Ultra`를 같은 프로필의 .claude.json에서 읽는다.
+        let ultra = profile_with(Some(json!({"planDisplayName":"Ultra","organizationRateLimitTier":"default_claude_max_20x"})));
+        assert_eq!(plan_of(&ultra, "max").as_deref(), Some("Ultra"));
+        // 표시 이름이 아직 없던 프로필은 20x 등급(공식 CLI가 Ultra와 같은 값으로 쓰는)만으로 Ultra다.
+        let tier_only = profile_with(Some(json!({"organizationRateLimitTier":"default_claude_max_20x"})));
+        assert_eq!(plan_of(&tier_only, "max").as_deref(), Some("Ultra"));
+        // 5x(Max)는 원래 값 그대로 둔다. 표시 이름 `Max`로 `max`가 `Max`로 갈라지지 않는다.
+        let max = profile_with(Some(json!({"planDisplayName":"Max","organizationRateLimitTier":"default_claude_max_5x"})));
+        assert_eq!(plan_of(&max, "max").as_deref(), Some("max"));
+        // 파일이 없거나 읽을 수 없으면 확인되지 않은 값을 만들지 않고 보고된 값을 둔다.
+        let missing = profile_with(None);
+        assert_eq!(plan_of(&missing, "max").as_deref(), Some("max"));
+        // `max`가 아닌 플랜은 .claude.json이 뭐라 하든 건드리지 않는다.
+        assert_eq!(plan_of(&ultra, "pro").as_deref(), Some("pro"));
+        // 이상한 표시 이름은 쓰지 않는다.
+        let hostile = profile_with(Some(json!({"planDisplayName":"Ultra\n<script>"})));
+        assert_eq!(plan_of(&hostile, "max").as_deref(), Some("max"));
+        for profile in [ultra, tier_only, max, missing, hostile] {
+            std::fs::remove_dir_all(profile).unwrap();
+        }
+    }
+}

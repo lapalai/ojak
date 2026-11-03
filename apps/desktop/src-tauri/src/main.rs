@@ -341,7 +341,7 @@ fn run_launchctl(args: &[&str]) -> Result<(), ApiError> {
 
 #[cfg(windows)]
 fn kickstart_managed_service_sync() -> Result<(), ApiError> {
-    aam_launcher::install::service_restart(&paths()?)
+    aam_launcher::install::service_restart(&paths()?, false)
 }
 
 #[cfg(unix)]
@@ -443,12 +443,22 @@ async fn service_version_status() -> Result<aam_launcher::service_version::Versi
         .map_err(|_| ApiError::new("INTERNAL_ERROR", "서비스 버전 확인 중 오류가 발생했습니다"))?
 }
 
-/// 사용자가 [서비스 다시 시작]을 눌렀을 때만 부른다. 새 배정을 닫고 쓰는 중인 세션이 없을 때만 다시 시작하며,
+/// 서비스를 다시 시작하면 끊길 작업의 개수(관리 CLI 대화·omp 응답). 읽기 전용이며 계정·경로·프롬프트는 담지 않는다.
+#[tauri::command]
+async fn service_busy_preview() -> Result<aam_launcher::service_version::BusyReport, ApiError> {
+    let paths = paths()?;
+    tauri::async_runtime::spawn_blocking(move || aam_launcher::service_version::busy_preview(&paths))
+        .await
+        .map_err(|_| ApiError::new("INTERNAL_ERROR", "서비스 상태 확인 중 오류가 발생했습니다"))?
+}
+
+/// 사용자가 [서비스 다시 시작]을 눌렀을 때만 부른다. `force`가 거짓이면 끊길 작업이 있을 때 아무것도 바꾸지 않고
+/// `status: "busy"`와 그 작업을 돌려준다. `force`는 화면이 목록을 보여 주고 사용자가 확인한 뒤에만 참이다.
 /// 끝나면 서비스 버전이 앱과 같은지 확인한다. 실패하면 오류 코드를 그대로 돌려주고 기존 서비스는 그대로 둔다.
 #[tauri::command]
-async fn service_restart() -> Result<String, ApiError> {
+async fn service_restart(force: bool) -> Result<aam_launcher::service_version::RestartReport, ApiError> {
     let paths = paths()?;
-    tauri::async_runtime::spawn_blocking(move || aam_launcher::service_version::restart(&paths))
+    tauri::async_runtime::spawn_blocking(move || aam_launcher::service_version::restart(&paths, force))
         .await
         .map_err(|_| ApiError::new("INTERNAL_ERROR", "서비스 재시작 처리 중 오류가 발생했습니다"))?
 }
@@ -560,6 +570,7 @@ async fn rpc(method: String, params: Value) -> Result<Value, ApiError> {
         "route.explain",
         "policy.update",
         "account.register",
+        "account.apiKeyAdd",
         "account.update",
         "account.remove",
         "resetCredits.read",
@@ -1133,8 +1144,9 @@ const USAGE_BIN_MS: i64 = 5 * 60_000;
 /// bridge.log는 서비스가 4MB에서 순환시키므로 그보다 많이 읽을 일이 없다.
 const USAGE_READ_LIMIT: u64 = 4 * 1024 * 1024;
 
-/// bridge.log 한 줄(`<ms> <provider>/<model> session=<id> turn=<bool> tools=<n> -> <accountKey>`).
-/// 계정 칸은 identity sha256의 앞 12 hex다. 예전에 남은 `provider|email:…|org:…` 줄도 읽는다.
+/// bridge.log 한 줄(`<ms> <provider>/<model> session=<id> turn=<bool> tools=<n> -> <accountKey> [reserve-fallback] [api-credit]`).
+/// 계정 칸은 identity sha256의 앞 12 hex다(API 크레딧 키 계정은 `apikey:<12hex>` identity의 해시). 계정 칸 뒤의 `reserve-fallback`·`api-credit` 표식은
+/// 읽지 않고 건너뛴다(계정 칸에서 읽기를 멈추므로 표식이 늘어도 줄이 버려지지 않는다). 예전에 남은 `provider|email:…|org:…` 줄도 읽는다.
 /// (시각, 공급자, 모델, 계정 토큰, 세션, 대화 요청 여부). 형식이 다른 줄은 건너뛴다.
 /// 서비스의 `outcome=rejected|blocked`(JSON 파싱 거절 포함)는 요청으로 세지 않는다(`->` 줄만 사용량이다).
 fn parse_usage_line(line: &str) -> Option<(i64, &str, &str, &str, &str, bool)> {
@@ -1382,6 +1394,25 @@ mod tests {
         let log = format!("{now} openai-codex/gpt-6-astra session=a turn=true tools=1 -> 4e92316d5e86{now} openai-codex/gpt-6-astra session=b turn=true tools=1 -> 4e92316d5e86\n");
         let value = usage_from_text(&log, now, 15, &std::collections::HashMap::new());
         assert!(value["buckets"].as_array().unwrap().is_empty());
+    }
+
+    #[test]
+    fn api_credit_marker_after_the_account_column_keeps_the_line_countable() {
+        let now = 1_000_000_000;
+        let key = "0123456789ab";
+        let log = format!(
+            "{} anthropic/claude-opus-5-5 session=aaaaaaaa turn=true tools=2 -> {key} api-credit\n\
+             {} anthropic/claude-opus-5-5 session=bbbbbbbb turn=true tools=2 -> {key} reserve-fallback api-credit\n",
+            now - 60_000, now - 30_000
+        );
+        for line in log.lines() {
+            let (_, provider, model, account, _, turn) = parse_usage_line(line).unwrap();
+            assert_eq!((provider, model, account, turn), ("anthropic", "claude-opus-5-5", key, true));
+        }
+        let value = usage_from_text(&log, now, 15, &std::collections::HashMap::new());
+        let buckets = value["buckets"].as_array().unwrap();
+        assert_eq!(buckets.len(), 1);
+        assert_eq!(buckets[0]["total"], 2);
     }
 
     #[test]
@@ -2372,6 +2403,7 @@ fn main() {
             install_update,
             restart_after_update,
             service_version_status,
+            service_busy_preview,
             service_restart
         ])
         .setup(|app| {

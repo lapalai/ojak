@@ -160,6 +160,22 @@ pub(crate) fn check_env(tool: &str) -> Result<(), ApiError> {
     Ok(())
 }
 
+/// API 키(월 API 크레딧) 경로의 환경 검사. 공급자의 인증 재정의 규칙을 그대로 쓴다: Claude는 `ANTHROPIC_*`·`CLAUDE_*` 키·토큰·base URL·
+/// `CLAUDE_CODE_USE_*`, OpenAI(Codex)는 `OPENAI_*`·`CODEX_*`·`CHATGPT_*` 키·토큰·base URL·endpoint·설정·공급자 변수(`OPENAI_API_KEY`·`CODEX_API_KEY` 포함),
+/// 두 쪽 모두 코드 주입 변수(`NODE_OPTIONS` 등)를 막는다. 등록 키를 다른 곳으로 보낼 수 있는 이 경로에서는 cmux `NODE_OPTIONS` 예외도 두지 않는다.
+/// 충돌이 있으면 고치지 않고 `AUTH_OVERRIDE_CONFLICT`로 멈춘다. 변수 이름만 알리고 값은 출력하지 않는다.
+pub fn check_api_credit_env<I, K, V>(provider: crate::api_credit::ApiProvider, vars: I) -> Result<(), ApiError>
+where
+    I: IntoIterator<Item = (K, V)>,
+    K: AsRef<std::ffi::OsStr>,
+    V: AsRef<std::ffi::OsStr>,
+{
+    for (key, value) in vars {
+        reject_auth_env(provider.tool(), &key.as_ref().to_string_lossy(), &value.as_ref().to_string_lossy())?;
+    }
+    Ok(())
+}
+
 pub(crate) fn check_inherited_profile(tool: &str, selected: &Path) -> Result<(), ApiError> {
     let Some(key) = profile_var(tool) else {
         return Ok(());
@@ -303,6 +319,10 @@ fn claude_config(path: &Path) -> Result<(), ApiError> {
 }
 
 fn codex_config(path: &Path) -> Result<(), ApiError> {
+    codex_config_for(path, false)
+}
+
+fn codex_config_for(path: &Path, api_key: bool) -> Result<(), ApiError> {
     let Some(text) = config_text(path)? else {
         return Ok(());
     };
@@ -334,12 +354,17 @@ fn codex_config(path: &Path) -> Result<(), ApiError> {
     {
         return Err(config_conflict(path, "model_provider"));
     }
+    // 로그인 방식이 키와 어긋나면 Codex가 저장된 로그인을 지우고 끝낸다(공식 문서). 그래서 API 키 실행에서는 `chatgpt` 강제나 워크스페이스 강제를 고치지 않고 멈춘다.
+    let expected_login = if api_key { "api" } else { "chatgpt" };
     if table
         .get("forced_login_method")
         .and_then(toml::Value::as_str)
-        .is_some_and(|v| v != "chatgpt")
+        .is_some_and(|v| v != expected_login)
     {
         return Err(config_conflict(path, "forced_login_method"));
+    }
+    if api_key && table.contains_key("forced_chatgpt_workspace_id") {
+        return Err(config_conflict(path, "forced_chatgpt_workspace_id"));
     }
     if table
         .get("cli_auth_credentials_store")
@@ -394,6 +419,23 @@ pub(crate) fn check_settings(tool: &str, profile: &Path, cwd: &Path) -> Result<(
     Ok(())
 }
 
+/// OpenAI API 키로 `codex exec`·`codex review`를 실행하기 전의 설정 검사. 구독 검사(`check_settings("codex")`)와 같은 파일을 보되 API 키 모드 규칙을 쓴다.
+/// 환경변수는 호출자가 `check_api_credit_env`로 먼저 본다.
+pub(crate) fn check_codex_api_settings(profile: &Path, cwd: &Path) -> Result<(), ApiError> {
+    codex_config_for(&profile.join("config.toml"), true)?;
+    for path in [
+        "/etc/codex/managed_config.toml",
+        "/etc/codex/requirements.toml",
+        "/Library/Application Support/Codex/managed_config.toml",
+    ] {
+        codex_config_for(Path::new(path), true)?;
+    }
+    for parent in cwd.ancestors() {
+        codex_config_for(&parent.join(".codex/config.toml"), true)?;
+    }
+    Ok(())
+}
+
 pub(crate) fn canonical_profile(path: &Path) -> Result<PathBuf, ApiError> {
     if !path.is_absolute() {
         return Err(ApiError::new(
@@ -419,6 +461,7 @@ pub(crate) fn canonical_profile(path: &Path) -> Result<PathBuf, ApiError> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::api_credit::ApiProvider;
     #[test]
     fn disabled_cloud_flag_does_not_select_paid_backend() {
         assert!(!auth_env("claude", "CLAUDE_CODE_USE_BEDROCK", "0"));
@@ -429,6 +472,68 @@ mod tests {
             "OPENAI_BASE_URL",
             "https://example.invalid"
         ));
+    }
+
+    #[test]
+    fn api_credit_env_stops_on_every_endpoint_or_auth_override_and_hides_values() {
+        for (name, value) in [
+            ("ANTHROPIC_BASE_URL", "http://attacker.invalid"),
+            ("ANTHROPIC_AUTH_TOKEN", "secret-token-value"),
+            ("ANTHROPIC_API_KEY", "sk-ant-api03-secret"),
+            ("ANTHROPIC_CUSTOM_HEADERS", "x: secret"),
+            ("CLAUDE_CODE_USE_BEDROCK", "1"),
+            ("CLAUDE_CODE_USE_VERTEX", "true"),
+            ("CLAUDE_CODE_USE_FOUNDRY", "1"),
+            ("NODE_OPTIONS", "--require /tmp/x.js"),
+            ("DYLD_INSERT_LIBRARIES", "/tmp/x.dylib"),
+        ] {
+            let error = check_api_credit_env(ApiProvider::Anthropic, [("PATH", "/usr/bin"), (name, value)]).unwrap_err();
+            assert_eq!(error.code, "AUTH_OVERRIDE_CONFLICT", "{name}");
+            assert!(error.message.contains(name), "{name}: {}", error.message);
+            assert!(!error.message.contains(value), "{name} leaked its value");
+        }
+        // 비활성 값·출력 길이·프록시·CA는 키 전송 대상을 바꾸지 않으므로 통과한다.
+        assert!(check_api_credit_env(ApiProvider::Anthropic, [
+            ("CLAUDE_CODE_USE_BEDROCK", "0"),
+            ("CLAUDE_CODE_MAX_OUTPUT_TOKENS", "8000"),
+            ("HTTPS_PROXY", "http://proxy.local:8080"),
+            ("NODE_EXTRA_CA_CERTS", "/tmp/ca.pem"),
+            ("ANTHROPIC_BASE_URL", ""),
+        ])
+        .is_ok());
+    }
+
+    /// OpenAI 키 경로는 `OPENAI_*`·`CODEX_*`·`CHATGPT_*` 인증·endpoint 재정의에서 고치지 않고 멈추고, 값은 출력하지 않는다.
+    /// 사용자 환경의 `OPENAI_API_KEY`·`CODEX_API_KEY`는 이 키로 덮어쓰지 않는다. Claude 변수는 이 경로를 막지 않는다.
+    #[test]
+    fn openai_api_env_stops_on_codex_auth_overrides_and_hides_values() {
+        for (name, value) in [
+            ("OPENAI_API_KEY", "sk-proj-secret-value"),
+            ("CODEX_API_KEY", "sk-proj-other-secret"),
+            ("OPENAI_BASE_URL", "http://attacker.invalid"),
+            ("OPENAI_ENDPOINT", "http://attacker.invalid"),
+            ("CODEX_ACCESS_TOKEN", "secret-access-token"),
+            ("CHATGPT_BASE_URL", "http://attacker.invalid"),
+            ("OPENAI_ORG_ID_CONFIG", "x"),
+            ("NODE_OPTIONS", "--require /tmp/x.js"),
+            ("LD_PRELOAD", "/tmp/x.so"),
+        ] {
+            let error = check_api_credit_env(ApiProvider::OpenAi, [("PATH", "/usr/bin"), (name, value)]).unwrap_err();
+            assert_eq!(error.code, "AUTH_OVERRIDE_CONFLICT", "{name}");
+            assert!(error.message.contains(name), "{name}: {}", error.message);
+            assert!(!error.message.contains(value), "{name} leaked its value");
+        }
+        // 프록시·CA·프로필 위치(CODEX_HOME)·빈 값은 키 전송 대상을 바꾸지 않는다. Claude 변수는 Codex 경로와 무관하다.
+        assert!(check_api_credit_env(ApiProvider::OpenAi, [
+            ("HTTPS_PROXY", "http://proxy.local:8080"),
+            ("NODE_EXTRA_CA_CERTS", "/tmp/ca.pem"),
+            ("CODEX_HOME", "/Users/me/.codex"),
+            ("OPENAI_BASE_URL", ""),
+            ("ANTHROPIC_API_KEY", "sk-ant-api03-unrelated"),
+        ])
+        .is_ok());
+        // Claude 경로는 OpenAI 변수에 막히지 않는다.
+        assert!(check_api_credit_env(ApiProvider::Anthropic, [("OPENAI_API_KEY", "sk-proj-unrelated")]).is_ok());
     }
 
     #[test]

@@ -1,5 +1,6 @@
 //! Current quota facts, not an admission promise: model/project/capacity checks remain in the scheduler.
-use aam_protocol::{Account, AccountQuotaSummary, CreditsSummary, ExpiringQuota, ExtraUsageSummary, Policy, QuotaBucket};
+use aam_adapters::api_credit::ApiProvider;
+use aam_protocol::{Account, AccountQuotaSummary, ApiCreditSummary, CreditsSummary, ExpiringQuota, ExtraUsageSummary, Policy, QuotaBucket};
 use crate::bridge::BlockStatus;
 use std::collections::{BTreeMap, BTreeSet};
 
@@ -135,16 +136,50 @@ fn credits_of(members: &[&Account], policy: &Policy, now: i64) -> Option<Credits
         .map(|credits| CreditsSummary { active: false, unlimited: credits.unlimited, balance: credits.balance.clone() })
 }
 
+/// API 키(월 API 크레딧) 묶음의 표시 사실. 구독 한도와 무관하게 키 상태와 이번 달 추정 사용액만 본다.
+/// `used_usd`는 이 키의 사용액, 상한 도달은 같은 공급자로 등록한 **모든 키의 합계**(`total`)와 그 공급자의 상한으로 본다(배정 검사와 같은 기준). 다른 공급자의 키는 섞지 않는다.
+/// `unmetered_any`는 같은 공급자 전체(지운 키 포함)에 이번 달 금액을 읽지 못한 요청이 있는지다. OpenAI 키는 이때 더는 쓰지 않으므로 상한에 닿은 것처럼 쉬는 상태로 보인다.
+/// "지금 배정 중"(`api-credit`)인지는 구독 묶음 전체를 본 뒤에 `summaries`가 정한다.
+fn api_credit_of(members: &[&Account], provider: ApiProvider, policy: &Policy, now: i64, total: f64, unmetered_any: bool, mut result: AccountQuotaSummary) -> AccountQuotaSummary {
+    let limit_usd = match provider {
+        ApiProvider::Anthropic => policy.api_credit_monthly_limit_usd,
+        ApiProvider::OpenAi => policy.openai_api_monthly_limit_usd,
+    };
+    let used: f64 = members.iter().map(|a| crate::scheduler::api_credit_used(a, now)).sum();
+    let stopped = provider == ApiProvider::OpenAi && unmetered_any;
+    let limit_reached = !(total < limit_usd) || stopped;
+    let period = aam_adapters::api_credit::period_start(now);
+    let unmetered = stopped || members.iter().any(|a| a.api_credit.as_ref().is_some_and(|state| state.period_start == period && state.unmetered_requests > 0));
+    result.api_credit = Some(ApiCreditSummary { provider: provider.id().into(), active: false, used_usd: used, limit_usd, limit_reached, unmetered });
+    let usable = members.iter().any(|a| a.enabled && a.auth_status == "authenticated");
+    result.kind = if !usable { "excluded" } else if limit_reached { "resting" } else { "available" }.into();
+    result
+}
+
 /// 구독 한도가 남아 새 작업을 받을 수 있어 보이는 묶음인지.
 fn has_subscription_left(summary: &AccountQuotaSummary) -> bool {
     matches!(summary.kind.as_str(), "available" | "reserve" | "partial")
 }
 
-/// 스냅샷마다 새로 계산한다. 크레딧 사용 상태를 저장하지 않으므로 한도가 리셋되거나 관측이 오래되면 배지가 곧 사라진다.
+/// 지운 API 키의 이번 달 사용액을 0으로 본 `summaries_with`. 서비스 경로는 원장 값을 넘기는 `summaries_with`를 쓴다.
+#[cfg(test)]
 pub(crate) fn summaries(accounts: &[Account], policy: &Policy, blocks: &[BlockStatus], now: i64) -> Vec<AccountQuotaSummary> {
+    summaries_with(accounts, policy, blocks, now, &crate::scheduler::ApiLedger::default())
+}
+
+/// 스냅샷마다 새로 계산한다. 크레딧 사용 상태를 저장하지 않으므로 한도가 리셋되거나 관측이 오래되면 배지가 곧 사라진다.
+/// `ledger.removed_usd`는 연결을 해제한 API 키의 이번 달 사용액(원장)이다. 월 상한 합계에만 더하고 묶음 표시에는 섞지 않는다.
+/// 확인해 둔 API 크레딧 허용 기간이 있으면 그 기간이 진행 중일 때만 `api-credit`(지금 배정 중)으로 표시한다.
+pub(crate) fn summaries_with(accounts: &[Account], policy: &Policy, blocks: &[BlockStatus], now: i64, ledger: &crate::scheduler::ApiLedger) -> Vec<AccountQuotaSummary> {
     let groups = groups(accounts);
+    let totals = |provider: ApiProvider| crate::scheduler::api_total_used(accounts, provider, ledger.removed(provider), now);
     let mut results: Vec<AccountQuotaSummary> = groups.iter().map(|members| {
-        let mut result = AccountQuotaSummary { account_ids: members.iter().map(|a| a.id.clone()).collect(), kind: "unknown".into(), until: None, models: vec![], label: None, rate: false, expiring: None, credits: None, extra_usage: None };
+        let mut result = AccountQuotaSummary { account_ids: members.iter().map(|a| a.id.clone()).collect(), kind: "unknown".into(), until: None, models: vec![], label: None, rate: false, expiring: None, credits: None, extra_usage: None, api_credit: None };
+        if members.iter().all(|a| a.tool == aam_adapters::api_credit::API_TOOL) {
+            let provider = members.first().and_then(|a| ApiProvider::of(&a.provider)).unwrap_or(ApiProvider::Anthropic);
+            let removed_unmetered = if provider == ApiProvider::OpenAi { ledger.openai_removed_unmetered } else { 0 };
+            return api_credit_of(members, provider, policy, now, totals(provider), crate::scheduler::api_unmetered(accounts, provider, removed_unmetered, now), result);
+        }
         result.credits = credits_of(members, policy, now);
         result.extra_usage = extra_usage_of(members, policy, now);
         if members.iter().all(|a| !a.enabled) { result.kind = "excluded".into(); return result; }
@@ -158,14 +193,15 @@ pub(crate) fn summaries(accounts: &[Account], policy: &Policy, blocks: &[BlockSt
             });
         if needs_login && !other_identity { result.kind = "login".into(); return result; }
         // The newest observation wins for the same upstream bucket; different buckets remain independent.
+        // A 5-hour limit that a newer fresh observation of the same account no longer reports (verified Claude Ultra, ChatGPT Pro, plan change) is gone, not stale.
+        let freshness = policy.stale_after_seconds.saturating_mul(1000).min(i64::MAX as u64) as i64;
+        let rows: Vec<&[QuotaBucket]> = members.iter().map(|account| account.buckets.as_slice()).collect();
         let mut buckets: BTreeMap<&str, &QuotaBucket> = BTreeMap::new();
-        for account in members {
-            for bucket in &account.buckets {
-                let entry = buckets.entry(&bucket.id).or_insert(bucket);
-                if bucket.observed_at > entry.observed_at
-                    || (bucket.observed_at == entry.observed_at && state(entry, policy, now) == "unknown" && state(bucket, policy, now) != "unknown") {
-                    *entry = bucket;
-                }
+        for bucket in crate::scheduler::without_vanished_short_windows(&rows, now, freshness) {
+            let entry = buckets.entry(&bucket.id).or_insert(bucket);
+            if bucket.observed_at > entry.observed_at
+                || (bucket.observed_at == entry.observed_at && state(entry, policy, now) == "unknown" && state(bucket, policy, now) != "unknown") {
+                *entry = bucket;
             }
         }
         let mut known = false;
@@ -226,13 +262,37 @@ pub(crate) fn summaries(accounts: &[Account], policy: &Policy, blocks: &[BlockSt
         }
     }
     // Claude 추가 사용량은 Codex 크레딧과 단위(USD)·의미가 달라 따로 계산한다. 상한에 닿은 묶음은 쓸 수 없으므로 켜지 않는다.
-    let claude_left = groups.iter().zip(&results).any(|(members, summary)| members.iter().any(|a| a.provider == "anthropic") && has_subscription_left(summary));
+    let claude_left = groups.iter().zip(&results).any(|(members, summary)| members.iter().any(|a| a.provider == "anthropic" && a.tool != aam_adapters::api_credit::API_TOOL) && has_subscription_left(summary));
     if policy.use_extra_usage_after_limit && !claude_left {
         for summary in &mut results {
             if summary.kind == "resting" && !summary.rate {
                 if let Some(extra) = summary.extra_usage.as_mut().filter(|extra| !extra.limit_reached) {
                     extra.active = true;
                     summary.kind = "extra".into();
+                }
+            }
+        }
+    }
+    // 공급자마다 따로 켠다: 그 공급자의 구독 묶음(사용자가 제외하지 않은 것)이 하나 이상 있고 모두 한도 소진으로 쉬는 중이며, 그 공급자의 옵트인이 켜졌을 때만이다.
+    // Claude는 허용 기간이 진행 중일 때만 열린다(허용 기간은 Claude 전용). OpenAI는 허용 기간·선제 사용이 없다.
+    for provider in [ApiProvider::Anthropic, ApiProvider::OpenAi] {
+        let (opted_in, left) = match provider {
+            ApiProvider::Anthropic => (policy.use_api_credit_after_limit && crate::scheduler::grant_allows_fallback(policy, ledger, now).is_ok(), claude_left),
+            ApiProvider::OpenAi => (policy.use_openai_api_after_limit, codex_left),
+        };
+        let subscription: Vec<&AccountQuotaSummary> = groups.iter().zip(&results)
+            .filter(|(members, _)| members.iter().any(|a| a.tool != aam_adapters::api_credit::API_TOOL && a.provider == provider.id()))
+            .filter(|(_, summary)| summary.kind != "excluded")
+            .map(|(_, summary)| summary)
+            .collect();
+        let spent = !subscription.is_empty() && subscription.iter().all(|summary| summary.kind == "resting" && !summary.rate);
+        if opted_in && !left && spent {
+            for (members, summary) in groups.iter().zip(&mut results) {
+                if summary.kind == "available" && members.iter().all(|a| provider.owns(a)) {
+                    if let Some(api) = summary.api_credit.as_mut() {
+                        api.active = true;
+                        summary.kind = "api-credit".into();
+                    }
                 }
             }
         }

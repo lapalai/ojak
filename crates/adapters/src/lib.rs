@@ -1,3 +1,4 @@
+pub mod api_credit;
 mod access;
 pub use access::{native_access, native_access_staged, NativeAccess, STAGES as NATIVE_ACCESS_STAGES};
 mod native;
@@ -118,6 +119,28 @@ pub fn check_native_auth_context(tool: &str, profile: &Path, cwd: &Path) -> Resu
 pub fn check_subscription_auth_env(tool: &str) -> Result<(), ApiError> {
     known_tool(tool)?;
     safety::check_env(tool)
+}
+
+/// API 키 경로의 인증 재정의 검사(`safety::check_api_credit_env`). 기본은 현재 프로세스 환경이다.
+pub fn check_api_credit_env(provider: api_credit::ApiProvider) -> Result<(), ApiError> {
+    safety::check_api_credit_env(provider, std::env::vars_os())
+}
+pub use safety::check_api_credit_env as check_api_credit_env_in;
+
+/// API 키로 공식 CLI를 실행하기 전의 상속 설정 검사(환경변수는 `check_api_credit_env`가 따로 본다). 고치거나 우회하지 않고 `AUTH_OVERRIDE_CONFLICT` 등으로 멈춘다.
+/// Claude는 구독 실행과 같은 설정 규칙, Codex는 API 키 모드 규칙(`forced_login_method = "chatgpt"`·워크스페이스 강제도 충돌)과 상속된 `CODEX_HOME` 확인이다.
+/// 어느 쪽도 `~/.codex/auth.json` 같은 저장된 로그인은 읽거나 바꾸지 않는다.
+pub fn check_api_credit_context(provider: api_credit::ApiProvider, profile: &Path, cwd: &Path) -> Result<(), ApiError> {
+    match provider {
+        api_credit::ApiProvider::Anthropic => check_native_auth_context("claude", profile, cwd),
+        api_credit::ApiProvider::OpenAi => {
+            safety::check_codex_api_settings(profile, cwd)?;
+            match profile.canonicalize() {
+                Ok(canonical) => safety::check_inherited_profile("codex", &canonical),
+                Err(_) => safety::check_inherited_profile("codex", profile),
+            }
+        }
+    }
 }
 
 fn failed_inspection(mut account: Account, error: ApiError, elapsed_ms: u64) -> Account {
@@ -1083,16 +1106,7 @@ pub fn build_launch_plan(account: &Account, intent: &LaunchIntent) -> Result<Lau
             "native 대화 ID가 유효한 UUID가 아닙니다.",
         ));
     }
-    if !intent
-        .model
-        .starts_with(|c: char| c.is_ascii_alphanumeric())
-        || intent.model.len() > 160
-        || !intent.model.chars().all(|c| {
-            c.is_ascii_alphanumeric() || matches!(c, '-' | '_' | '.' | ':' | '/' | '[' | ']')
-        })
-    {
-        return Err(ApiError::new("MODEL_REQUIRED", "공식 CLI의 정확한 모델 ID를 적어 주세요. 모델이나 결제 경로를 자동으로 바꾸지 않아요."));
-    }
+    valid_model_id(&intent.model)?;
     let cwd = safety::canonical_profile(Path::new(&intent.cwd)).map_err(|_| {
         ApiError::new(
             "PROJECT_INVALID",
@@ -1121,6 +1135,112 @@ pub fn build_launch_plan(account: &Account, intent: &LaunchIntent) -> Result<Lau
         env: profile_env(&account.tool, &profile),
         account: account.clone(),
     })
+}
+
+fn valid_model_id(model: &str) -> Result<(), ApiError> {
+    if !model.starts_with(|c: char| c.is_ascii_alphanumeric())
+        || model.len() > 160
+        || !model.chars().all(|c| {
+            c.is_ascii_alphanumeric() || matches!(c, '-' | '_' | '.' | ':' | '/' | '[' | ']')
+        })
+    {
+        return Err(ApiError::new("MODEL_REQUIRED", "공식 CLI의 정확한 모델 ID를 적어 주세요. 모델이나 결제 경로를 자동으로 바꾸지 않아요."));
+    }
+    Ok(())
+}
+
+/// 구독 한도를 모두 쓴 뒤 Ojak에 등록한 API 키로 공식 CLI를 비대화형으로 실행하는 계획.
+/// Claude Console 키는 `claude -p`(`ANTHROPIC_API_KEY`), OpenAI 키는 `codex exec`·`codex review`(`CODEX_API_KEY`)다.
+///
+/// - 비대화형 실행에만 쓴다(`intent.non_interactive`). 대화형은 거절한다. 키는 이 자식 프로세스 환경에만 넣는다.
+/// - native identity probe는 구독 전용이라 건너뛰고, 키의 지문(`identity_key(provider, key)`)이 등록된 계정과 같은지로 대신 확인한다.
+/// - `key`는 호출자가 Keychain에서 읽어 넘긴다. 키는 반환하는 `env`에만 들어가며 오류·로그에 쓰지 않는다.
+/// - 사용자 환경·설정의 인증 재정의 검사(`check_api_credit_env`·`check_native_auth_context`)는 호출자가 이 함수 전에 부모 환경에 대해 수행해야 한다.
+/// - `CLAUDE_CONFIG_DIR`·`CODEX_HOME`은 넣지 않는다. 호출자는 상속된 값을 그대로 두고 사용자의 기본 프로필 동작을 따른다.
+///   Codex 키는 저장된 ChatGPT 로그인(`auth.json`)을 읽지도 바꾸지도 않고 이번 실행에만 우선한다. 이어 하기(`resume`)·다른 계정으로 이어 가기는 거절한다.
+pub fn build_api_credit_plan(
+    account: &Account,
+    intent: &LaunchIntent,
+    binary: &Path,
+    key: &str,
+) -> Result<(LaunchPlan, IdentityEvidence), ApiError> {
+    let provider = api_credit::ApiProvider::of(&account.provider);
+    if account.tool != api_credit::API_TOOL
+        || provider.is_none_or(|provider| provider.tool() != intent.tool)
+        || intent.account_id.as_ref().is_some_and(|id| id != &account.id)
+    {
+        return Err(ApiError::new(
+            "ACCOUNT_MISMATCH",
+            "요청한 도구 또는 계정이 선택한 binding과 일치하지 않습니다.",
+        ));
+    }
+    let provider = provider.expect("checked");
+    if !account.enabled {
+        return Err(ApiError::new(
+            "ACCOUNT_DISABLED",
+            "이 계정은 새 실행에서 제외되어 있습니다.",
+        ));
+    }
+    if !intent.non_interactive || intent.continue_elsewhere {
+        return Err(ApiError::new(
+            "INVALID_PARAMS",
+            match provider {
+                api_credit::ApiProvider::Anthropic => "API 크레딧은 비대화형 실행(claude -p)에만 쓸 수 있어요. 실행하지 않았어요.",
+                api_credit::ApiProvider::OpenAi => "OpenAI API 키는 비대화형 실행(codex exec·codex review)에만 쓸 수 있어요. 실행하지 않았어요.",
+            },
+        ));
+    }
+    if provider == api_credit::ApiProvider::OpenAi && intent.resume_session_id.is_some() {
+        return Err(ApiError::new(
+            "INVALID_PARAMS",
+            "OpenAI API 키로는 이전 대화를 이어 하지 않아요. 구독 계정의 대화는 그 계정에서만 이어져요. 실행하지 않았어요.",
+        ));
+    }
+    valid_model_id(&intent.model)?;
+    if intent.resume_session_id.as_ref().is_some_and(|id| uuid::Uuid::parse_str(id).is_err()) {
+        return Err(ApiError::new(
+            "SESSION_MAPPING_INVALID",
+            "native 대화 ID가 유효한 UUID가 아닙니다.",
+        ));
+    }
+    api_credit::validate_key_format(provider, key)?;
+    let fingerprint = api_credit::identity_key(provider, key);
+    if account.identity_key.as_deref() != Some(fingerprint.as_str()) {
+        return Err(ApiError::new(
+            "IDENTITY_MISMATCH",
+            "저장된 API 키가 선택한 키 계정과 일치하지 않아 실행을 막았어요.",
+        ));
+    }
+    let mut args = if intent.model == NATIVE_DEFAULT_MODEL {
+        Vec::new()
+    } else {
+        vec!["--model".into(), intent.model.clone()]
+    };
+    if let Some(native_id) = &intent.resume_session_id {
+        args.extend(["--resume".into(), native_id.clone()]);
+    }
+    let mut env = process::base_env();
+    env.insert(
+        match provider {
+            api_credit::ApiProvider::Anthropic => "ANTHROPIC_API_KEY",
+            api_credit::ApiProvider::OpenAi => "CODEX_API_KEY",
+        }
+        .into(),
+        key.to_owned(),
+    );
+    Ok((
+        LaunchPlan {
+            program: binary.to_string_lossy().into_owned(),
+            args,
+            env,
+            account: account.clone(),
+        },
+        IdentityEvidence {
+            identity_key: fingerprint,
+            tier: "preflight-verified".into(),
+            observed_at: now_ms(),
+        },
+    ))
 }
 
 /// 선두 `~/`(또는 `~`만)를 사용자 홈으로 풀어 준다. 그 밖의 상대 경로는 그대로 두어 `canonical_profile`이 거절한다.
@@ -2019,6 +2139,72 @@ mod tests {
         add_omp_reports(&mut result, &json!({"reports":[cached]}), Path::new("/native/omp"), &[]);
         assert_eq!(result.accounts[0].buckets[0].used_percent, Some(90.0));
         assert_eq!(result.accounts[0].buckets[0].observed_at, now);
+    }
+
+    fn limit(id: &str, window: &str, duration: i64, used: f64, observed: i64) -> Value {
+        json!({"id":id,"window":{"id":window,"durationMs":duration,"resetsAt":observed+3_600_000},"amount":{"usedFraction":used},"status":"ok"})
+    }
+
+    #[test]
+    fn verified_ultra_report_without_a_five_hour_window_drops_the_stored_one() {
+        let now = now_ms();
+        // 이전에는 5시간 한도가 소진으로 기록됐다(미검증 Ultra·Max). 이제 새 관측은 주간 한도만 있다.
+        let mut native = native_account("/profile/a");
+        native.buckets = vec![QuotaBucket {
+            id: stable_id(&["omp", "anthropic", "anthropic|subject:subject-a|workspace:workspace-a", "anthropic:5h"]),
+            label: "Claude 5 Hour · 5시간".into(), model: None, used_percent: Some(100.0), resets_at: Some(now + 3_600_000),
+            observed_at: now - 120_000, source: "OMP usage / anthropic".into(), status: "exhausted".into(),
+        }];
+        let mut weekly_only = report("subject-a", "workspace-a");
+        weekly_only["fetchedAt"] = json!(now);
+        weekly_only["limits"] = json!([limit("anthropic:7d", "7d", 604_800_000, 0.3, now)]);
+        let mut result = ScanResult { accounts: vec![native], tools: vec![], notices: vec![], merged_observation_ids: vec![] };
+        add_omp_reports(&mut result, &json!({"reports":[weekly_only]}), Path::new("/native/omp"), &[]);
+        let buckets = &result.accounts[0].buckets;
+        assert_eq!(buckets.len(), 1, "{buckets:?}");
+        assert!(buckets[0].label.ends_with("주간"), "{buckets:?}");
+        assert!(buckets.iter().all(|bucket| bucket.status == "known"));
+    }
+
+    #[test]
+    fn official_usage_without_a_five_hour_window_replaces_the_stored_one_but_a_failed_probe_keeps_it_stale() {
+        let now = now_ms();
+        let official = quota::CLAUDE_USAGE_SOURCE;
+        let mut account = native_account("/fixture");
+        account.buckets = vec![usage_bucket("exhausted", now - 600_000, official)];
+        // 조회가 실패하면 마지막 값은 낡은 값으로만 남는다(관측하지 못한 것을 지우지 않는다).
+        record_usage_failure(&mut account, &UsageFailure { stage: "usage", error: ApiError::new("PROBE_TIMEOUT", "x"), elapsed_ms: 1 });
+        assert_eq!(account.buckets.len(), 1);
+        assert_eq!(account.buckets[0].status, "stale");
+        // 성공한 공식 조회가 주간 한도만 돌려주면(5시간 창 없음) 저장된 5시간 한도는 사라진다.
+        let events = vec![
+            json!({"type":"system","subtype":"init","apiKeySource":"none"}),
+            json!({"type":"assistant","local_command_run":{"command":"usage","args":""},"usage_report":{"session":{},"rate_limits":{"limits":[{"kind":"weekly_all","percent":30,"resets_at":"2999-01-01T00:00:00+00:00","scope":null}],"extra_usage":{"is_enabled":false}}}}),
+            json!({"type":"result","subtype":"success","is_error":false,"num_turns":0}),
+        ];
+        let buckets = quota::claude_usage_buckets(&events, now, |upstream| stable_id(&["omp", "anthropic", "subject", upstream]));
+        record_usage_success(&mut account, buckets);
+        assert_eq!(account.buckets.len(), 1);
+        assert_eq!(account.buckets[0].label, "Claude 7 Day · 주간");
+        assert!(!account.buckets.iter().any(|bucket| bucket.label.contains("5")));
+    }
+
+    /// 공식 `/usage`가 주간은 읽었지만 5시간(session) 값을 읽지 못하면(null·형식 오류), 5시간 한도가 사라진 게 아니다.
+    /// 한도가 있다는 사실은 `unknown` 버킷으로 남아야 다른 관측 행의 소진 기록을 "사라진 창"으로 지우지 않는다.
+    #[test]
+    fn unreadable_session_limit_is_kept_as_unknown_not_dropped() {
+        let now = now_ms();
+        for session in [json!({"kind":"session","percent":null,"resets_at":"2999-01-01T00:00:00+00:00","scope":null}), json!({"kind":"session","percent":"abc","scope":null}), json!({"kind":"session","scope":null})] {
+            let events = vec![
+                json!({"type":"system","subtype":"init","apiKeySource":"none"}),
+                json!({"type":"assistant","local_command_run":{"command":"usage","args":""},"usage_report":{"rate_limits":{"limits":[session.clone(),{"kind":"weekly_all","percent":30,"resets_at":"2999-01-01T00:00:00+00:00","scope":null}]}}}),
+                json!({"type":"result","subtype":"success","is_error":false,"num_turns":0}),
+            ];
+            let buckets = quota::claude_usage_buckets(&events, now, |upstream| stable_id(&["omp", "anthropic", "subject", upstream]));
+            let short: Vec<_> = buckets.iter().filter(|bucket| bucket.label.contains("5시간")).collect();
+            assert_eq!(short.len(), 1, "{session}");
+            assert_eq!((short[0].status.as_str(), short[0].used_percent), ("unknown", None), "{session}");
+        }
     }
 
     #[test]

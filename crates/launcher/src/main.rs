@@ -5,6 +5,7 @@ mod omp_observer_writer;
 mod omp_bridge;
 mod omp_broker;
 mod omp_extension;
+mod omp_update;
 mod provider_login;
 
 use aam_launcher::{arguments, current_cwd, install, read_snapshot, supervisor};
@@ -200,15 +201,42 @@ enum AccountAction {
         #[arg(long)]
         account: String,
     },
+    #[command(name = "api-key", about = "Claude Console 또는 OpenAI Platform API 키를 등록하거나 지워요.")]
+    ApiKey {
+        #[command(subcommand)]
+        action: ApiKeyAction,
+    },
+}
+#[derive(Subcommand)]
+enum ApiKeyAction {
+    #[command(
+        about = "API 키를 시스템 보안 저장소에 등록해요. 키는 표준 입력에서 읽어요(터미널이면 화면에 보이지 않게, 파이프면 한 줄). 예: aam account api-key add --label 크레딧 --confirm-no-auto-reload / aam account api-key add --provider openai --label OpenAI --confirm-no-auto-reload"
+    )]
+    Add {
+        #[arg(long)]
+        label: String,
+        #[arg(long, default_value = "anthropic", value_parser = ["anthropic", "openai"], help = "키의 공급자. anthropic은 Claude Console 키, openai는 OpenAI Platform 키(Codex)예요")]
+        provider: String,
+        #[arg(long, help = "이 키의 Console·Platform 조직에서 자동 충전(auto-reload)을 끄고 추가 결제를 따로 하지 않았다는 확인. OpenAI 키는 실제 요금이 청구돼요")]
+        confirm_no_auto_reload: bool,
+    },
+    #[command(about = "등록한 API 키 계정과 시스템 보안 저장소의 키를 지워요. 공급자 쪽의 키는 그대로예요.")]
+    Remove {
+        account: String,
+    },
 }
 #[derive(Subcommand)]
 enum ServiceAction {
     Install,
     Uninstall,
     Stop,
-    /// 앱과 버전이 다른 서비스를, 쓰는 중인 세션이 없을 때만 다시 시작한다.
-    #[command(about = "앱과 버전이 다른 서비스를 안전하게 다시 시작해요. 쓰는 중인 세션이 있으면 멈춰요.")]
-    Restart,
+    /// 앱과 버전이 다른 서비스를 다시 시작한다. 끊길 작업이 있으면 요약만 보여 주고 멈춘다.
+    #[command(about = "앱과 버전이 다른 서비스를 다시 시작해요. 쓰는 중인 작업(omp 응답, Claude·Codex 터미널 대화)이 있으면 목록을 보여 주고 멈춰요. --force를 주면 끊어도 된다고 보고 진행해요.")]
+    Restart {
+        /// 끊길 작업이 있어도 다시 시작한다. 서비스가 다시 뜨면 omp 응답은 끊기고, 터미널 대화는 이어진다.
+        #[arg(long, alias = "yes")]
+        force: bool,
+    },
     Status,
 }
 #[derive(Subcommand)]
@@ -238,6 +266,16 @@ enum OmpBridgeAction {
     CheckModels,
     Connect,
     Disconnect,
+    #[command(
+        name = "update-omp",
+        about = "Ojak 서비스가 충분히 새 버전일 때만 공개 omp 채널(omp-v*) 릴리스의 호환 omp로 교체해요. 서비스 버전을 모르면 아무것도 바꾸지 않아요."
+    )]
+    UpdateOmp {
+        #[arg(long, help = "설치하지 않고 설치할 수 있는지만 확인해요.")]
+        check: bool,
+        #[arg(long, help = "이미 최신이어도 다시 설치해요. 서비스 버전 확인은 생략하지 않아요.")]
+        force: bool,
+    },
 }
 
 #[derive(Subcommand)]
@@ -271,6 +309,48 @@ enum TakeoverAction {
 enum ShellAction {
     Install,
     Uninstall,
+}
+
+/// API 키를 표준 입력에서 읽는다. 터미널이면 화면에 보이지 않게 한 줄, 파이프면 첫 줄. argv·환경에는 키를 받지 않는다.
+fn read_api_key() -> Result<String, ApiError> {
+    use std::io::{BufRead, IsTerminal, Write};
+    let stdin = std::io::stdin();
+    let terminal = stdin.is_terminal();
+    #[cfg(unix)]
+    let restore = if terminal { hide_echo() } else { None };
+    if terminal {
+        eprint!("Claude Console API 키(입력은 보이지 않아요): ");
+        let _ = std::io::stderr().flush();
+    }
+    let mut line = String::new();
+    let read = stdin.lock().read_line(&mut line);
+    #[cfg(unix)]
+    if let Some(original) = restore {
+        unsafe { libc::tcsetattr(libc::STDIN_FILENO, libc::TCSANOW, &original) };
+        eprintln!();
+    }
+    read.map_err(|_| ApiError::new("API_KEY_FORMAT", "표준 입력에서 API 키를 읽지 못했어요."))?;
+    let key = line.trim().to_owned();
+    if key.is_empty() {
+        return Err(ApiError::new(
+            "API_KEY_FORMAT",
+            "API 키가 비어 있어요. 예: pbpaste | aam account api-key add --label 크레딧 --confirm-no-auto-reload",
+        ));
+    }
+    Ok(key)
+}
+
+#[cfg(unix)]
+fn hide_echo() -> Option<libc::termios> {
+    unsafe {
+        let mut original: libc::termios = std::mem::zeroed();
+        if libc::tcgetattr(libc::STDIN_FILENO, &mut original) != 0 {
+            return None;
+        }
+        let mut hidden = original;
+        hidden.c_lflag &= !libc::ECHO;
+        (libc::tcsetattr(libc::STDIN_FILENO, libc::TCSANOW, &hidden) == 0).then_some(original)
+    }
 }
 
 fn path_text(path: PathBuf) -> Result<String, ApiError> {
@@ -459,10 +539,12 @@ fn execute(paths: &Paths, action: Action) -> Result<(), ApiError> {
                 native_session_id: None,
                 adopted: false,
                 continue_elsewhere: false,
+                non_interactive: false,
             };
             print_json(&call(paths, "route.explain", json!({"intent":intent}))?)?;
         }
         Action::Run(args) => {
+            let non_interactive = arguments::non_interactive(&args.tool, &args.native_args);
             let intent = LaunchIntent {
                 tool: args.tool,
                 model: args.model,
@@ -473,6 +555,7 @@ fn execute(paths: &Paths, action: Action) -> Result<(), ApiError> {
                 native_session_id: None,
                 adopted: false,
                 continue_elsewhere: false,
+                non_interactive,
             };
             let status = aam_launcher::run(paths, intent, args.native_args)?;
             supervisor::finish_with_status(status);
@@ -521,6 +604,38 @@ fn execute(paths: &Paths, action: Action) -> Result<(), ApiError> {
             supervisor::finish_with_status(status);
         }
         Action::Account {
+            action: AccountAction::ApiKey { action: ApiKeyAction::Add { label, provider, confirm_no_auto_reload } },
+        } => {
+            if !confirm_no_auto_reload {
+                return Err(ApiError::new(
+                    "API_CREDIT_CONFIRM_REQUIRED",
+                    "이 키의 Console·Platform 조직에서 자동 충전(auto-reload)을 끄고 추가 결제를 따로 하지 않았는지 확인한 뒤 --confirm-no-auto-reload를 붙여 주세요. OpenAI 키는 실제 요금이 청구돼요.",
+                ));
+            }
+            let key = read_api_key()?;
+            // 서비스가 형식·Keychain 저장·유효성 확인을 한다. 키는 응답과 출력에 다시 나오지 않는다.
+            let value: Value = call(
+                paths,
+                "account.apiKeyAdd",
+                json!({"label": label, "key": key, "provider": provider, "confirmedNoAutoReload": true}),
+            )?;
+            print_json(&value)?;
+        }
+        Action::Account {
+            action: AccountAction::ApiKey { action: ApiKeyAction::Remove { account } },
+        } => {
+            let snapshot = aam_launcher::read_snapshot(paths)?;
+            if !snapshot.accounts.iter().any(|item| item.id == account && item.tool == aam_adapters::api_credit::API_TOOL) {
+                return Err(ApiError::new("ACCOUNT_NOT_FOUND", "지울 API 키 계정을 찾지 못했어요. 계정 ID를 확인해 주세요."));
+            }
+            call(paths, "account.remove", json!({"id": account}))?;
+            // 서비스가 이미 Keychain 키를 지웠어도 성공이다. 지우지 못하면 알린다(키 값은 출력하지 않는다).
+            if let Err(error) = aam_adapters::api_credit::delete_key(&account) {
+                eprintln!("aam: 시스템 보안 저장소의 키를 지우지 못했어요. macOS 키체인 접근 또는 Windows 자격 증명 관리자에서 직접 지워 주세요. ({})", error.code);
+            }
+            println!("API 키 계정을 지웠어요. Console의 키는 그대로예요.");
+        }
+        Action::Account {
             action: AccountAction::Remove { account },
         } => {
             let value = call(paths, "account.remove", json!({"id": account}))?;
@@ -539,7 +654,7 @@ fn execute(paths: &Paths, action: Action) -> Result<(), ApiError> {
                     ServiceAction::Install => install::service_install(paths)?,
                     ServiceAction::Uninstall => install::service_uninstall(paths)?,
                     ServiceAction::Stop => install::service_stop(paths)?,
-                    ServiceAction::Restart => aam_launcher::service_version::restart(paths)?,
+                    ServiceAction::Restart { force } => aam_launcher::service_version::restart(paths, force)?.cli_text()?,
                     ServiceAction::Status => {
                         let mut text = install::service_status(paths)?;
                         if let Some(version) = aam_launcher::service_version::status_text(paths) {
@@ -612,6 +727,7 @@ fn execute(paths: &Paths, action: Action) -> Result<(), ApiError> {
             OmpBridgeAction::Connect => print_json(&omp_bridge::connect(paths)?)?,
             OmpBridgeAction::Disconnect => print_json(&omp_bridge::disconnect(paths)?)?,
             OmpBridgeAction::CheckModels => print_json(&omp_bridge::check_models()?)?,
+            OmpBridgeAction::UpdateOmp { check, force } => print_json(&omp_update::update(paths, check, force)?)?,
         },
         Action::OmpObserver { action } => {
             #[cfg(windows)]

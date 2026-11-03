@@ -168,7 +168,7 @@ function modelRecovery(quotas: readonly Quota[], now: number): number | null {
   return earliest;
 }
 
-const TONES: Record<RowState, Tone> = { available: "good", availableLow: "warning", reserve: "warning", partial: "warning", resting: "danger", excluded: "neutral", login: "danger", unknown: "neutral", credits: "warning", extra: "warning" };
+const TONES: Record<RowState, Tone> = { available: "good", availableLow: "warning", reserve: "warning", partial: "warning", resting: "danger", excluded: "neutral", login: "danger", unknown: "neutral", credits: "warning", extra: "warning", "api-credit": "warning" };
 
 export function overviewOf(verdict: Verdict, quotas: readonly Quota[], now: number): Overview {
   const kind = verdict.kind;

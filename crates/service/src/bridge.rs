@@ -8,6 +8,8 @@
 mod native;
 #[path = "bridge_admission.rs"]
 mod admission;
+#[path = "bridge_api_key.rs"]
+mod api_key;
 
 use crate::{scheduler, store::{accounts, policy}, Service};
 use crate::runtime_health::{self, ResourceGuard, ResourceStatus};
@@ -182,7 +184,33 @@ pub(crate) struct Candidate {
     /// 정책이 추가 과금 경로(Codex 크레딧·Claude 추가 사용량)를 켰고, 이 계정에 신선한 관측이 그 경로를 명시하면
     /// 관측 신선도 기준(ms). 구독 한도가 남은 계정이 하나도 없을 때만 `choose`가 쓴다. 선택 상태는 저장하지 않는다.
     pub paid_fallback: Option<i64>,
+    /// API 크레딧 키 후보(`tool == "api"`). 한도 버킷이 없어 일반 규칙으로는 "여유 있는 계정"으로 보이므로 `choose`가 일반 후보·
+    /// "모두 소진" 판정·추가 과금 fallback에서 처음부터 뺀다. 구독 후보가 신선한 관측으로 전부 소진됐을 때만 `paid_fallback` 값을 기준으로 쓴다.
+    /// 이 후보의 `paid_fallback`은 정책이 켜져 있고 키가 사용 가능(월 상한 미만)할 때만 `Some(관측 신선도 ms)`다.
+    pub api_credit: bool,
+    /// API 키 후보의 이번 달 추정 사용액(USD). 새 대화에서 덜 쓴 키를 먼저 고르는 데만 쓴다(진행 중 대화는 고정 유지). 구독 후보는 0.
+    pub api_used: f64,
+    /// 소비 균형 모드에서 구독이 남아 있어도 새 대화에 선제적으로 쓸 수 있는 API 키 후보일 때만 `Some`. 구독 후보는 `None`.
+    /// 허용 기간이 진행 중이고, 사용량 미확인 요청이 없고, 남은 예산이 있고, 월 상한 아래일 때만 채운다.
+    pub proactive: Option<Proactive>,
+    /// 소비 균형 모드. 켜져 있으면 새 대화는 (남은 허용량 ÷ 남은 기간)이 큰 후보를 먼저 받는다.
+    pub balanced: bool,
+    /// 소비 균형 모드의 "리셋 전 사용" 기준(ms, 정책 `expiringWindowHours`). 0이면 꺼짐(다른 모드·API 키 후보).
+    /// 안전 여유량 안쪽이어도 가장 빡빡한 긴 주기 한도가 이 시간 안에 리셋되면 새 대화를 먼저 받는다. `scheduler::use_before_reset` 참고.
+    pub use_before_reset_ms: i64,
 }
+
+/// 선제 사용이 열린 API 크레딧 후보의 판정 입력. 사용자가 확인한 허용 기간 기준의 값이며 Console 잔액이 아니다.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub(crate) struct Proactive {
+    /// (남은 예산 비율) ÷ (남은 기간 비율). 구독 한도의 같은 비율과 직접 비교한다.
+    pub pace: f64,
+    /// 허용 기간에 남은 추정 예산(USD).
+    pub remaining_usd: f64,
+}
+/// 선제 사용으로 새 대화를 받으려면 남아 있어야 하는 최소 예산(USD). 한 요청의 실제 비용은 미리 알 수 없어서 보수적 여유를 둔다.
+/// 이미 진행 중인 대화는 이 값과 무관하게 같은 키를 유지한다.
+const PROACTIVE_MIN_REMAINING_USD: f64 = 5.0;
 
 /// 정책의 추가 과금 경로 옵트인. 모두 꺼져 있으면(기본) 브릿지 선택은 바뀌지 않는다.
 #[derive(Debug, Clone, Copy, Default)]
@@ -192,15 +220,41 @@ pub(crate) struct PaidPolicy {
     /// 두 옵트인 중 하나라도 켜졌을 때만 관측 신선도 기준(ms).
     pub fresh_ms: Option<i64>,
     pub stale_seconds: u64,
+    /// API 크레딧 fallback 옵트인, 월 상한(USD), 소진 관측 신선도 기준(ms). 옵트인과 무관하게 정책 값을 그대로 담는다.
+    pub api: bool,
+    pub api_limit_usd: f64,
+    pub api_fresh_ms: i64,
+    /// 소비 균형 모드이고 `balanceApiCredit`·`useApiCreditAfterLimit`가 모두 켜졌는지.
+    pub balance: bool,
+    /// 사용자가 확인한 API 크레딧 허용 기간. 있으면 한도 뒤 fallback도 진행 중일 때만 열린다.
+    pub grant: Option<scheduler::GrantTerms>,
+    pub balanced_mode: bool,
+    /// 소비 균형 모드일 때만 `expiringWindowHours`를 ms로 담는다. 그 밖의 모드는 0(리셋 전 사용 꺼짐).
+    pub use_before_reset_ms: i64,
+    /// OpenAI API 키 fallback 옵트인과 월 상한(USD). Claude 쪽 `api`·`api_limit_usd`와 독립이다. OpenAI에는 허용 기간·선제 사용이 없다.
+    pub openai_api: bool,
+    pub openai_api_limit_usd: f64,
+    /// 지운 키의 이번 달 사용액(공급자별)과 현재 허용 기간(Claude)의 합산 사용액·미확인 요청 수.
+    pub ledger: scheduler::ApiLedger,
 }
 impl PaidPolicy {
-    pub(crate) fn of(policy: &aam_protocol::Policy) -> Self {
+    pub(crate) fn of(policy: &aam_protocol::Policy, ledger: scheduler::ApiLedger) -> Self {
         let fresh = policy.stale_after_seconds.saturating_mul(1000).min(i64::MAX as u64) as i64;
         Self {
             credits: policy.use_credits_after_limit,
             extra: policy.use_extra_usage_after_limit,
             fresh_ms: (policy.use_credits_after_limit || policy.use_extra_usage_after_limit).then_some(fresh),
             stale_seconds: policy.stale_after_seconds,
+            api: policy.use_api_credit_after_limit,
+            api_limit_usd: policy.api_credit_monthly_limit_usd,
+            api_fresh_ms: fresh,
+            balanced_mode: policy.allocation_mode == aam_protocol::AllocationMode::ExpiryBalanced,
+            use_before_reset_ms: if policy.allocation_mode == aam_protocol::AllocationMode::ExpiryBalanced { i64::from(policy.expiring_window_hours).saturating_mul(3_600_000) } else { 0 },
+            balance: policy.allocation_mode == aam_protocol::AllocationMode::ExpiryBalanced && policy.balance_api_credit && policy.use_api_credit_after_limit,
+            openai_api: policy.use_openai_api_after_limit,
+            openai_api_limit_usd: policy.openai_api_monthly_limit_usd,
+            grant: scheduler::GrantTerms::of(policy),
+            ledger,
         }
     }
 }
@@ -294,6 +348,24 @@ fn weekly_drain(buckets: &[QuotaBucket], model: &str, now: i64) -> f64 {
         .unwrap_or(0.0)
 }
 
+/// 소비 균형용 비율: (남은 허용량 비율) ÷ (리셋까지 남은 기간 비율, 주 168시간 기준). 클수록 일정보다 덜 써서 리셋 전에 쓰는 게 이득이다.
+/// 요청에 걸리는 긴 주기 한도 중 가장 빡빡한 값이며, 한도 정보가 없으면 `None`(API와 비교하지 않는다).
+fn weekly_pace(buckets: &[QuotaBucket], model: &str, now: i64) -> Option<f64> {
+    buckets
+        .iter()
+        .filter(|bucket| scheduler::applies(bucket, model) && !scheduler::short_window(bucket))
+        .filter_map(|bucket| {
+            let used = bucket.used_percent.filter(|used| used.is_finite())?;
+            let remaining = ((100.0 - used) / 100.0).clamp(0.0, 1.0);
+            let hours = bucket
+                .resets_at
+                .map_or(168.0, |reset| ((reset - now).max(60_000) as f64 / 3_600_000.0).min(168.0));
+            Some(remaining / (hours / 168.0))
+        })
+        .fold(None, |min: Option<f64>, value| Some(min.map_or(value, |current| current.min(value))))
+}
+
+/// 요청에 걸리는 5시간 한도 중 가장 많이 쓴 값(%). 5시간 한도가 없는 계정(인증된 Claude Ultra·ChatGPT Pro 등)은 단기 압박이 없는 것이므로 0이다.
 fn primary_used(buckets: &[QuotaBucket], model: &str) -> f64 {
     buckets
         .iter()
@@ -321,9 +393,41 @@ fn paid_cover(buckets: &[QuotaBucket], model: &str, now: i64, fresh_ms: i64) -> 
     spent
 }
 
+/// API 키 풀. 요청 공급자(`anthropic`·`openai-codex`)에 대응하는 API 키 공급자의 키만 본다(Claude 키는 Codex 요청에, OpenAI 키는 Claude 요청에 절대 쓰지 않는다).
+/// 구독 후보가 하나 이상 있고(없으면 "소진"을 증명할 수 없다), 활성 구독 후보가 전부 건강하며 신선한 관측으로
+/// 공용 한도가 소진됐을 때만(`paid_cover`: 모델 전용 한도만 소진이거나 낡은 관측이면 아님) 단가를 아는 모델에 한해 쓸 수 있는 키를 돌려준다.
+/// 일시 차단·장애·관측 부족·일부만 소진이면 비어 있어 요청이 기다린다.
+fn api_credit_pool(candidates: &[Candidate], provider: &str, model: &str, scope: Option<&str>, blocks: &[Block], tried: &[String], now: i64) -> Vec<usize> {
+    let Some(api) = aam_adapters::api_credit::ApiProvider::of_request(provider).filter(|api| aam_adapters::api_credit::priced(*api, model)) else {
+        return Vec::new();
+    };
+    let prefix = format!("{}|", api.id());
+    let subscriptions: Vec<&Candidate> = candidates.iter().filter(|candidate| !candidate.api_credit && candidate.enabled).collect();
+    if subscriptions.is_empty() {
+        return Vec::new();
+    }
+    candidates
+        .iter()
+        .enumerate()
+        .filter(|(_, candidate)| {
+            candidate.api_credit
+                && candidate.key.starts_with(&prefix)
+                && candidate.healthy
+                && candidate.enabled
+                && !tried.contains(&candidate.key)
+                && !blocked(blocks, &candidate.key, scope, now)
+                && candidate.paid_fallback.is_some_and(|fresh_ms| {
+                    subscriptions.iter().all(|subscription| subscription.healthy && paid_cover(&subscription.buckets, model, now, fresh_ms))
+                })
+        })
+        .map(|(index, _)| index)
+        .collect()
+}
+
 /// 요청에 쓸 계정을 고른다. 고를 수 없으면 `None`.
 /// 순서: 세션 고정 → 안전 여유량이 남은 계정 우선 → (5시간 과열 여부, 동시 사용 세션 수, 주간 소진 급한 정도, 5시간 사용률).
 /// 여유량 안쪽 계정은 여유 있는 계정이 하나도 없을 때만 새 세션을 받는다. 이미 고정된 세션은 소진 전까지 유지한다.
+/// 예외(소비 균형 한정): 가장 빡빡한 긴 주기 한도가 곧 리셋돼 남은 양이 어차피 사라질 여유량 안쪽 계정은 여유 있는 계정과 같은 풀에서, 리셋이 이른 순으로 먼저 받는다(`scheduler::use_before_reset`).
 pub(crate) fn choose(
     candidates: &[Candidate],
     provider: &str,
@@ -336,11 +440,13 @@ pub(crate) fn choose(
     now: i64,
 ) -> Option<usize> {
     let scope = block_scope(provider, model);
+    // API 크레딧 키(`api_credit`)는 일반 후보가 아니다. 버킷이 비어 있으면 아래 규칙에서 정상 후보가 되므로 처음부터 뺀다.
     let eligible: Vec<usize> = candidates
         .iter()
         .enumerate()
         .filter(|(_, candidate)| {
-            candidate.healthy
+            !candidate.api_credit
+                && candidate.healthy
                 && candidate.enabled
                 && !tried.contains(&candidate.key)
                 && !blocked(blocks, &candidate.key, scope.as_deref(), now)
@@ -356,7 +462,7 @@ pub(crate) fn choose(
     // 리셋·회복 관측이 들어오면 다음 요청부터 구독 계정이 이기고, 그 계정에 붙은 세션 고정도 그때 풀린다
     // (고정은 eligible 안에서만 유지된다). 한도가 남았지만 일시 차단·장애로 못 쓰는 구독 계정이 있으면 기다린다.
     let eligible = if eligible.is_empty()
-        && candidates.iter().all(|candidate| {
+        && candidates.iter().filter(|candidate| !candidate.api_credit).all(|candidate| {
             !candidate.enabled
                 || candidate.buckets.iter().any(|bucket| scheduler::applies(bucket, model) && exhausted(bucket, now))
         })
@@ -366,7 +472,8 @@ pub(crate) fn choose(
             .enumerate()
             .filter(|(_, candidate)| {
                 // 사용자가 제외한(enabled=false) 계정에는 절대 과금 경로를 쓰지 않는다. 일반 경로와 같은 조건이다.
-                candidate.healthy
+                !candidate.api_credit
+                    && candidate.healthy
                     && candidate.enabled
                     && !tried.contains(&candidate.key)
                     && !blocked(blocks, &candidate.key, scope.as_deref(), now)
@@ -377,12 +484,43 @@ pub(crate) fn choose(
     } else {
         eligible
     };
-    let roomy: Vec<usize> = eligible.iter().copied().filter(|index| !in_reserve(&candidates[*index].buckets, model, reserve)).collect();
+    // 구독 후보와 추가 과금 경로가 모두 비었을 때만 API 크레딧 키를 본다. 세션이 키에 고정돼 있어도 위에서 구독 후보가 생기면
+    // 그쪽이 이긴다(고정은 eligible 안에서만 유지된다).
+    let eligible = if eligible.is_empty() { api_credit_pool(candidates, provider, model, scope.as_deref(), blocks, tried, now) } else { eligible };
+    // 소비 균형의 선제 API 후보: 구독 후보가 있고 단가를 아는 모델일 때만. 새 대화에서만 구독과 비교되고, 진행 중 대화는 아래 sticky가 이어 쓴다.
+    // 허용 기간 상태·미확인 사용량·월 상한은 `candidates()`가 이미 걸러 `proactive`가 `Some`일 때만 여기 온다.
+    let proactive: Vec<usize> = if eligible.iter().any(|index| !candidates[*index].api_credit) && aam_adapters::api_credit::ApiProvider::of_request(provider).is_some_and(|api| aam_adapters::api_credit::priced(api, model)) {
+        candidates
+            .iter()
+            .enumerate()
+            .filter(|(_, candidate)| {
+                candidate.api_credit
+                    && candidate.proactive.is_some()
+                    && candidate.healthy
+                    && candidate.enabled
+                    && !tried.contains(&candidate.key)
+                    && !blocked(blocks, &candidate.key, scope.as_deref(), now)
+            })
+            .map(|(index, _)| index)
+            .collect()
+    } else {
+        Vec::new()
+    };
+    // 소비 균형의 "리셋 전 사용": 안전 여유량 안쪽이어도 긴 주기 한도가 곧 리셋돼 남은 양이 사라질 계정은 여유 있는 계정처럼 새 대화를 받는다.
+    // 5시간 한도·소진·차단·장애는 위 eligible에서 이미 걸러졌거나 `use_before_reset`이 거른다. 진행 중 대화(sticky)와 다른 모드에는 영향이 없다.
+    let rush = |index: usize| -> Option<i64> {
+        let candidate = &candidates[index];
+        if !candidate.balanced || candidate.api_credit || candidate.use_before_reset_ms <= 0 || !in_reserve(&candidate.buckets, model, reserve) {
+            return None;
+        }
+        scheduler::use_before_reset(candidate.buckets.iter().filter(|bucket| scheduler::applies(bucket, model)), reserve, candidate.use_before_reset_ms, now)
+    };
+    let roomy: Vec<usize> = eligible.iter().copied().filter(|index| !in_reserve(&candidates[*index].buckets, model, reserve) || rush(*index).is_some()).collect();
     if let Some(sticky) = session.and_then(|id| stickies.get(id)) {
         if now - sticky.last_used < STICKY_MS {
             // 진행 중인 대화는 프롬프트 캐시를 지키려고 안전 여유량 안쪽이어도 같은 계정에 둔다. 소진·차단·장애로
             // eligible에서 빠졌을 때만 옮긴다(그때는 어차피 캐시를 잃는다). 여유량은 새 대화의 순위에만 쓴다.
-            if let Some(index) = eligible.iter().copied().find(|index| candidates[*index].key == sticky.key) {
+            if let Some(index) = eligible.iter().chain(proactive.iter()).copied().find(|index| candidates[*index].key == sticky.key) {
                 return Some(index);
             }
         }
@@ -399,14 +537,48 @@ pub(crate) fn choose(
     if let Some(index) = pool.iter().copied().find(|index| candidates[*index].pinned) {
         return Some(index);
     }
+    let balanced = pool.iter().any(|index| candidates[*index].balanced);
+    // 선제 API는 새 대화를 구독보다 먼저 받는 경우에만 고른다: 구독의 가장 큰 pace보다 API pace가 크고(일정보다 덜 썼고),
+    // 이미 진행 중인 API 대화마다 최소 예산을 예약해 두고도 남을 때만(동시 입장 상한). 예약은 보수적 휴리스틱이며 하드 상한이 아니다.
+    // 리셋 전 사용 후보가 있으면 그 남은 양이 선제 API보다 먼저다(API 허용 기간은 아직 시간이 남는 반면 구독 잔량은 곧 사라진다).
+    if balanced && !proactive.is_empty() && !pool.iter().any(|index| rush(*index).is_some()) {
+        let best_subscription = pool.iter().filter(|index| !candidates[**index].api_credit).filter_map(|index| weekly_pace(&candidates[*index].buckets, model, now)).fold(None, |max: Option<f64>, value| Some(max.map_or(value, |current| current.max(value))));
+        let api_keys: Vec<&str> = candidates.iter().filter(|candidate| candidate.api_credit).map(|candidate| candidate.key.as_str()).collect();
+        let in_flight = stickies
+            .iter()
+            .filter(|(id, sticky)| Some(id.as_str()) != session && api_keys.contains(&sticky.key.as_str()) && now - sticky.last_used < ACTIVE_MS)
+            .count();
+        let best_api = proactive
+            .iter()
+            .copied()
+            .filter(|index| {
+                let facts = candidates[*index].proactive.expect("filtered");
+                facts.pace >= 1.0
+                    && best_subscription.is_some_and(|pace| facts.pace > pace)
+                    && facts.remaining_usd >= PROACTIVE_MIN_REMAINING_USD * (in_flight as f64 + 1.0)
+            })
+            .min_by(|a, b| candidates[*a].api_used.total_cmp(&candidates[*b].api_used).then(candidates[*a].key.cmp(&candidates[*b].key)));
+        if let Some(index) = best_api {
+            return Some(index);
+        }
+    }
     pool.into_iter().min_by(|a, b| {
         let (left, right) = (&candidates[*a], &candidates[*b]);
+        // 리셋 전 사용 후보가 먼저, 그중 리셋이 가장 이른 순서. 해당 없는 후보끼리는 기존 순서 그대로다.
+        let urgent = |index: usize| rush(index).map_or((1, 0), |reset| (0, reset));
         let hot = |candidate: &Candidate| primary_used(&candidate.buckets, model) >= HOT_PRIMARY_PERCENT;
-        hot(left)
-            .cmp(&hot(right))
-            .then(active(&left.key).cmp(&active(&right.key)))
-            .then(weekly_drain(&right.buckets, model, now).total_cmp(&weekly_drain(&left.buckets, model, now)))
+        let pace = |candidate: &Candidate| weekly_pace(&candidate.buckets, model, now).unwrap_or(0.0);
+        let head = hot(left).cmp(&hot(right));
+        // 소비 균형: 일정보다 덜 쓴(pace가 큰) 계정을 동시 사용 수보다 먼저 본다. 그 밖의 모드는 기존 순서 그대로다.
+        let ordering = if balanced {
+            urgent(*a).cmp(&urgent(*b)).then(head).then(pace(right).total_cmp(&pace(left))).then(active(&left.key).cmp(&active(&right.key)))
+        } else {
+            head.then(active(&left.key).cmp(&active(&right.key)))
+                .then(weekly_drain(&right.buckets, model, now).total_cmp(&weekly_drain(&left.buckets, model, now)))
+        };
+        ordering
             .then(primary_used(&left.buckets, model).total_cmp(&primary_used(&right.buckets, model)))
+            .then(left.api_used.total_cmp(&right.api_used))
             .then(left.key.cmp(&right.key))
     })
 }
@@ -449,6 +621,8 @@ struct Gateway {
     org: String,
     /// None: omp broker owns this credential. Some: native CLI owns refresh.
     native_account: Option<String>,
+    /// 등록된 API 키(`tool == "api"`)를 `api_key` 자격 증명으로 내주는 gateway. `native_account`가 그 계정 ID다.
+    api_credit: bool,
     /// 공식 CLI 계정 gateway가 spawn될 때 쓴 내부 listener 포트. broker 계정은 0.
     native_port: u16,
     port: u16,
@@ -495,7 +669,7 @@ struct State {
     #[cfg(windows)]
     broker: Option<Child>,
     error: Option<String>,
-    /// 마지막으로 읽은 계정 사용량·안전 여유량·공급자 수동 배정. 저장소를 읽지 못하면 빈 값 대신 이것을 쓴다.
+    /// 마지막으로 읽은 계정 사용량·안전 여유량·공급자 수동 배정·지운 API 키의 이번 달 사용액(원장). 저장소를 읽지 못하면 빈 값 대신 이것을 쓴다.
     known: Option<(Vec<Account>, f64, BTreeMap<String, String>, PaidPolicy)>,
 }
 
@@ -685,6 +859,7 @@ pub struct Bridge {
     /// 포화 로그 throttle: (listener, 종류) → (마지막 기록 시각, 그 뒤 건너뛴 수).
     overload_log: parking_lot::Mutex<HashMap<(&'static str, &'static str), (i64, u64)>>,
     native_sources: Mutex<HashMap<String, Arc<native::Source>>>,
+    api_sources: Mutex<HashMap<String, Arc<api_key::ApiKeySource>>>,
     /// omp gateway에 거는 토큰 파일. 운영은 사용자 홈의 `.omp/auth-gateway.token`이고 테스트는 임시 경로를 쓴다.
     gateway_token_path: Option<PathBuf>,
 }
@@ -720,6 +895,7 @@ impl Bridge {
             request_timeout,
             overload_log: parking_lot::Mutex::new(HashMap::new()),
             native_sources: Mutex::new(HashMap::new()),
+            api_sources: Mutex::new(HashMap::new()),
             gateway_token_path,
         })
     }
@@ -922,7 +1098,38 @@ impl Bridge {
             .cloned().map(|key| (key, None)).collect();
         let mut native_ids = BTreeSet::new();
         let mut native_errors = BTreeMap::new();
+        let mut api_ids = BTreeSet::new();
         for account in registered {
+            if account.tool == aam_adapters::api_credit::API_TOOL {
+                // API 키(Claude · OpenAI): 켜져 있고 인증된 키만 gateway를 둔다. 후보로 쓸지는 요청마다 `choose`가 정한다.
+                // gateway 공급자는 omp 쪽 공급자 ID다(`anthropic`·`openai`). 모르는 공급자의 키 계정은 건드리지 않는다.
+                let Some(api_provider) = aam_adapters::api_credit::ApiProvider::of(&account.provider) else { continue };
+                let Some(identity) = account.identity_key.clone().filter(|_| account.enabled && account.auth_status == "authenticated") else { continue };
+                let id = account.id.clone();
+                let source = {
+                    let mut sources = self.api_sources.lock().unwrap_or_else(|e| e.into_inner());
+                    if sources.get(&id).is_some_and(|old| old.identity != identity || old.provider != api_provider) {
+                        sources.remove(&id);
+                    }
+                    Arc::clone(sources.entry(id.clone()).or_insert_with(|| {
+                        Arc::new(api_key::ApiKeySource::new(id.clone(), api_provider, identity.clone(), Arc::downgrade(&self.service)))
+                    }))
+                };
+                match source.ready() {
+                    Ok(()) => {
+                        api_ids.insert(id.clone());
+                        desired.insert((api_provider.id().to_owned(), identity), Some(id));
+                    }
+                    Err(error) => {
+                        // Keychain에 키가 없거나 등록된 키와 다르면 쓸 수 없는 계정이다. 잠금 같은 일시 실패는 표시만 하고 계정은 건드리지 않는다.
+                        if matches!(error.code.as_str(), "AUTH_REQUIRED" | "PROFILE_IDENTITY_MISMATCH") {
+                            api_key::mark_auth_required(&self.service, &id);
+                        }
+                        failures.push(format!("API 키({}): {}", api_provider.id(), api_key::failure(&error.code).1));
+                    }
+                }
+                continue;
+            }
             let native_provider = match account.tool.as_str() {
                 "claude" => Some("anthropic"),
                 "codex" => Some("openai-codex"),
@@ -982,14 +1189,16 @@ impl Bridge {
             }
         }
         self.native_sources.lock().unwrap_or_else(|e| e.into_inner()).retain(|id, _| native_ids.contains(id));
+        self.api_sources.lock().unwrap_or_else(|e| e.into_inner()).retain(|id, _| api_ids.contains(id));
         // 이후 신규 연결 admission의 내부 예약량에만 쓰인다. 이미 받은 연결은 끊지 않는다.
-        self.admission.set_native_profiles(native_ids.len());
+        self.admission.set_native_profiles(native_ids.len() + api_ids.len());
         let mut state = self.state();
         state.synced_at = now_ms();
         state.error = None;
         state.native_errors = native_errors;
         let mut providers = snapshot.providers.clone();
-        providers.extend(desired.keys().map(|(provider, _)| provider.clone()));
+        // API 키 gateway는 구독 로그인이 아니므로 "이 공급자에 로그인이 있다"는 근거로 세지 않는다.
+        providers.extend(desired.iter().filter(|(_, id)| !id.as_ref().is_some_and(|id| api_ids.contains(id))).map(|((provider, _), _)| provider.clone()));
         state.authenticated_providers = (state.broker_known.is_some() || !native_ids.is_empty()).then(|| providers.clone());
         retain_gateways(&mut state.gateways, &desired, native_port);
         for ((provider, identity), native_account) in &desired {
@@ -1008,6 +1217,7 @@ impl Bridge {
                 email,
                 org,
                 native_account: native_account.clone(),
+                api_credit: native_account.as_ref().is_some_and(|id| api_ids.contains(id)),
                 native_port: native_account.as_ref().map_or(0, |_| native_port),
                 port,
                 child: None,
@@ -1034,7 +1244,8 @@ impl Bridge {
             state.error = Some(failures.join(" "));
         }
         // 방금 띄운 gateway도 이 동기화에서 실행 중이면 바로 올린다. 다음 60초를 기다리지 않는다.
-        let running: Vec<String> = state.gateways.iter_mut().filter_map(|gateway| gateway.running().then(|| gateway.provider.clone())).collect();
+        // API 키 gateway는 구독 로그인이 아니므로 Ojak 공급자 로그인(ojak-claude) 등록 근거로 세지 않는다.
+        let running: Vec<String> = state.gateways.iter_mut().filter_map(|gateway| (gateway.running() && !gateway.api_credit).then(|| gateway.provider.clone())).collect();
         let logged_in: Vec<String> = snapshot.providers.iter().cloned().collect();
         let missing = missing_ojak_logins(&logged_in, &running);
         drop(state);
@@ -1295,7 +1506,27 @@ impl Bridge {
             return respond(client, 401, &json!({"error":"Native broker authentication failed."}));
         }
         let source = self.native_sources.lock().unwrap_or_else(|e| e.into_inner()).get(id).cloned();
-        let Some(source) = source else { return respond(client, 404, &json!({"error":"Native profile is unavailable."})); };
+        let Some(source) = source else {
+            // API 크레딧 키 계정은 같은 내부 listener의 `/native/<accountId>`로 키를 내준다.
+            let api = self.api_sources.lock().unwrap_or_else(|e| e.into_inner()).get(id).cloned();
+            let Some(api) = api else { return respond(client, 404, &json!({"error":"Native profile is unavailable."})); };
+            if let Err(error) = api.validate() {
+                let (status, message) = api_key::failure(&error.code);
+                return respond(client, status, &json!({"code":error.code,"error":message}));
+            }
+            let long_poll = request.method == "GET" && suffix == "v1/snapshot" && wait_ms(&request.query) > 0;
+            if long_poll {
+                if let Err(overload) = permit.promote() {
+                    return self.refuse(client, overload);
+                }
+            }
+            let route = if request.query.is_empty() { format!("/{suffix}") } else { format!("/{suffix}?{}", request.query) };
+            let request = match read_body(client, request, rest, read_deadline.min(request_deadline)) {
+                Ok(request) => request,
+                Err(_) => return respond(client, 400, &json!({"error":"Invalid native broker request."})),
+            };
+            return api.handle(client, &request, &route, request_deadline);
+        };
         // 해당 계정 한 행만 읽는다. 모든 계정·한도 JSON을 매 인증 요청마다 다시 해석하지 않는다.
         if let Err(error) = source.validate() {
             let (status, message) = native::failure(&error.code);
@@ -1340,7 +1571,7 @@ impl Bridge {
     fn providers(&self, client: &mut TcpStream) {
         let mut counts: Vec<(&str, usize)> = ALIASES.iter().map(|(_, original)| (*original, 0)).collect();
         for gateway in &mut self.state().gateways {
-            if gateway.running() {
+            if gateway.running() && !gateway.api_credit {
                 if let Some(entry) = counts.iter_mut().find(|(provider, _)| *provider == gateway.provider) {
                     entry.1 += 1;
                 }
@@ -1354,15 +1585,43 @@ impl Bridge {
         let pin = pins
             .get(aam_protocol::pin_provider(provider))
             .and_then(|id| accounts.iter().find(|account| &account.id == id));
+        use aam_adapters::api_credit::ApiProvider;
+        // 요청 공급자(`openai-codex`)와 API 키 gateway의 공급자(`openai`)는 이름이 다르다. 대응하는 API 키 공급자만 같은 풀에 올린다.
+        let api_provider = ApiProvider::of_request(provider);
+        let total = |api: ApiProvider| scheduler::api_total_used(accounts, api, paid.ledger.removed(api), now);
+        let (claude_total, openai_total) = (total(ApiProvider::Anthropic), total(ApiProvider::OpenAi));
+        let openai_unmetered = scheduler::api_unmetered(accounts, ApiProvider::OpenAi, paid.ledger.openai_removed_unmetered, now);
+        let grant = paid.grant.map(|terms| scheduler::GrantView::at(terms, &paid.ledger, now));
         let mut state = self.state();
         state
             .gateways
             .iter_mut()
-            .filter(|gateway| gateway.provider == provider)
+            .filter(|gateway| gateway.provider == provider || (gateway.api_credit && api_provider.is_some_and(|api| api.id() == gateway.provider)))
             .map(|gateway| {
                 let healthy = gateway.running() && gateway.unhealthy_until <= now;
-                let (buckets, enabled, pinned, paid_fallback) = account_view(gateway, accounts, pin, paid, now);
-                (Candidate { key: gateway.key(), buckets, healthy, enabled, pinned, paid_fallback }, gateway.port)
+                let candidate = if gateway.api_credit {
+                    // 키 계정은 한도 버킷이 없다. 정책이 켜져 있고 전체 키의 이번 달 합계가 상한 미만일 때만 후보로 올리며,
+                    // 일반 후보로는 절대 쓰이지 않는다(`choose`). 여러 키 중에서는 이번 달에 덜 쓴 키를 먼저 쓴다(`api_used`).
+                    // 사용자가 허용 기간을 확인해 둔 경우 그 기간이 진행 중일 때만(시작 전·만료·소진이면 한도 뒤 fallback도) 연다.
+                    let account = gateway.native_account.as_deref().and_then(|id| accounts.iter().find(|account| account.id == id));
+                    let grant_open = grant.is_none_or(|view| view.state == scheduler::GrantState::Active);
+                    let api = ApiProvider::of(&gateway.provider).unwrap_or(ApiProvider::Anthropic);
+                    let usable = account.is_some_and(|account| match api {
+                        ApiProvider::Anthropic => paid.api && grant_open && api_key::usable(api, account, claude_total, paid.api_limit_usd),
+                        // OpenAI에는 허용 기간·선제 사용이 없고, 금액을 읽지 못한 요청이 한 번이라도 있으면 이번 달은 더 쓰지 않는다.
+                        ApiProvider::OpenAi => paid.openai_api && !openai_unmetered && api_key::usable(api, account, openai_total, paid.openai_api_limit_usd),
+                    });
+                    let api_used = account.map_or(0.0, |account| crate::scheduler::api_credit_used(account, now));
+                    // 소비 균형의 선제 사용: 모드·옵트인·진행 중 허용 기간·사용량 확인(미확인 요청 없음)이 모두 맞을 때만 사실을 채운다.
+                    let proactive = grant
+                        .filter(|view| api == ApiProvider::Anthropic && paid.balance && usable && view.state == scheduler::GrantState::Active && view.unmetered == 0)
+                        .map(|view| Proactive { pace: view.pace(now), remaining_usd: view.remaining });
+                    Candidate { key: gateway.key(), buckets: Vec::new(), healthy, enabled: usable, pinned: false, paid_fallback: usable.then_some(paid.api_fresh_ms), api_credit: true, api_used, proactive, balanced: paid.balanced_mode && api == ApiProvider::Anthropic, use_before_reset_ms: 0 }
+                } else {
+                    let (buckets, enabled, pinned, paid_fallback) = account_view(gateway, accounts, pin, paid, now);
+                    Candidate { key: gateway.key(), buckets, healthy, enabled, pinned, paid_fallback, api_credit: false, api_used: 0.0, proactive: None, balanced: paid.balanced_mode, use_before_reset_ms: paid.use_before_reset_ms }
+                };
+                (candidate, gateway.port)
             })
             .collect()
     }
@@ -1415,15 +1674,17 @@ impl Bridge {
             .lock()
             .and_then(|store| {
                 let policy = policy(&store.connection)?;
-                Ok((accounts(&store.connection)?, policy.safety_reserve_percent, policy.provider_pins.clone(), PaidPolicy::of(&policy)))
+                let ledger = crate::store::api_ledger(&store.connection, &policy, now_ms())?;
+                Ok((accounts(&store.connection)?, policy.safety_reserve_percent, policy.provider_pins.clone(), PaidPolicy::of(&policy, ledger)))
             });
         let (accounts, reserve, pins, paid) = match fresh {
             Ok(view) => {
                 self.state().known = Some(view.clone());
                 view
             }
+            // 저장소를 읽지 못해 마지막 값을 쓸 때는 사용액이 낡았을 수 있다. 구독 선택은 그대로 하되 API 선제 사용은 막는다.
             Err(_) => match self.state().known.clone() {
-                Some(view) => view,
+                Some((accounts, reserve, pins, paid)) => (accounts, reserve, pins, PaidPolicy { balance: false, ..paid }),
                 None => return respond_not_submitted(client, "Ojak이 계정 한도를 아직 읽지 못했어요. 계정 상태를 확인한 뒤 다시 시작해 주세요."),
             },
         };
@@ -1435,14 +1696,16 @@ impl Bridge {
         loop {
             let now = now_ms();
             let mut candidates = self.candidates(&provider, &accounts, &pins, paid, now);
-            if candidates.is_empty() {
+            // API 키 후보만 남았으면 구독 후보는 없는 것이다. 구독 쪽 연결 오류·로그인 안내를 가리지 않는다.
+            let no_subscription = candidates.iter().all(|(candidate, _)| candidate.api_credit);
+            if no_subscription {
                 let native_error = self.state().native_errors.get(&provider).cloned();
                 if let Some(code) = native_error {
                     let (status, message) = native::failure(&code);
                     return respond(client, status, &json!({"code":code,"error":format!("Ojak: {provider} · {message}")}));
                 }
             }
-            if candidates.is_empty() && self.state().authenticated_providers.as_ref().is_some_and(|providers| !providers.contains(&provider)) {
+            if no_subscription && self.state().authenticated_providers.as_ref().is_some_and(|providers| !providers.contains(&provider)) {
                 return respond(client, 401, &json!({
                     "error": format!("Ojak: {provider}에 사용할 수 있는 로그인이 없어요. Ojak의 공식 CLI 계정 또는 omp의 원래 공급자 로그인 상태를 확인해 주세요. 두 곳에 중복 로그인할 필요는 없어요."),
                     "code": "UPSTREAM_AUTH_REQUIRED"
@@ -1501,7 +1764,10 @@ impl Bridge {
             };
             let (candidate, port) = &candidates[index];
             tried.push(candidate.key.clone());
-            let mut upstream = match forward(*port, &token, &request, &upstream_body) {
+            // API 키 gateway의 omp 공급자는 요청 공급자와 다를 수 있다(`openai-codex` 요청 → `openai` 키). 그때만 본문을 다시 쓴다(모델 ID는 그대로).
+            let api = if candidate.api_credit { aam_adapters::api_credit::ApiProvider::of(key_provider(&candidate.key)) } else { None };
+            let rewritten = api.filter(|api| api.id() != provider).map(|api| rewrite_provider(&upstream_body, api.id(), &model));
+            let mut upstream = match forward(*port, &token, &request, rewritten.as_deref().unwrap_or(&upstream_body)) {
                 Ok(stream) => stream,
                 Err(failure) => {
                     self.mark_unhealthy(&candidate.key, now);
@@ -1516,7 +1782,39 @@ impl Bridge {
                     return respond_execution_unknown(client);
                 }
             };
-            if let Some(Limit { quota, retry_ms }) = limit_signal(&head, &peek) {
+            // 판정은 chunk 틀을 걷어 낸 본문으로 한다. 오류 문구가 chunk 경계에서 잘려도 놓치지 않게 한다. 전달할 바이트는 원본(`peek`) 그대로다.
+            let body = peek_body(&head, &peek);
+            if candidate.api_credit {
+                // 키 거절(401)이면 계정을 `auth-required`로 표시해 다른 요청이 쓰지 않게 하고, 조직 크레딧 잔액이 바닥났으면 다음 달까지 막는다.
+                // 어느 쪽이든 구독 계정으로 돌아가지 않고(구독이 회복됐으면 다음 요청 때 `choose`가 알아서 구독을 고른다) 다른 키만 본다.
+                let api = api.unwrap_or(aam_adapters::api_credit::ApiProvider::Anthropic);
+                let rejected = api_key::rejected(api, &head, &body);
+                if rejected || api_key::credit_exhausted(api, &head, &body) {
+                    // 거절된 키는 계정이 `auth-required`가 되어 gateway가 내려가므로 짧게만 막는다(같은 키를 다시 등록해도 오래 남지 않게).
+                    let until = if rejected { now + QUOTA_BLOCK_MS } else { api_key::next_period_start(now) };
+                    if rejected {
+                        if let Some(id) = self.api_account_id(&candidate.key) {
+                            api_key::mark_auth_required(&self.service, &id);
+                        }
+                    }
+                    self.state().blocks.push(Block {
+                        key: candidate.key.clone(),
+                        scope: None,
+                        until,
+                        observed_at: now_ms(),
+                        reason: if rejected { "API 키 거절".into() } else { "API 크레딧 잔액 소진".into() },
+                        quota: !rejected,
+                        estimate: rejected,
+                    });
+                    self.write_log_line(&format_block_line(now, &provider, &model, session.as_deref().map_or("-", tail), &account_key(identity_from_key(&candidate.key)), !rejected, None, until, rejected));
+                    let mut bytes = head;
+                    bytes.extend_from_slice(&peek);
+                    let _ = upstream.take(PEEK_LIMIT as u64).read_to_end(&mut bytes);
+                    last_limited = Some(bytes);
+                    continue;
+                }
+            }
+            if let Some(Limit { quota, retry_ms }) = limit_signal(&head, &body) {
                 // 응답이 알려 준 대기가 관측 리셋보다 길면 그 시각까지 막는다(최대 8일).
                 let hinted = retry_ms.map(|ms| now + ms.min(8 * 24 * 60 * 60_000));
                 let (until, estimate) = block_until(&candidate.buckets, &model, quota, hinted, now);
@@ -1563,7 +1861,24 @@ impl Bridge {
                 tools,
                 &alias,
                 reserve_fallback,
+                candidate.api_credit,
             ));
+            if candidate.api_credit {
+                // API 크레딧 응답은 그대로 넘기면서 마지막 종료 이벤트의 usage만 읽어 월 누적 추정액에 더한다(프롬프트는 보관하지 않는다).
+                let mut scanner = api_key::UsageScanner::new(api_key::UsageScanner::is_chunked(&head));
+                scanner.feed(&peek);
+                let usage = if client.write_all(&head).and_then(|_| client.write_all(&peek)).is_ok() {
+                    api_key::copy_metered(&mut upstream, client, scanner)
+                } else {
+                    None
+                };
+                finish(client);
+                // 오류 응답(4xx·5xx)은 과금되지 않았으므로 요청 수에도 넣지 않는다.
+                if api_key::succeeded(&head) {
+                    self.record_api_usage(&candidate.key, &model, usage);
+                }
+                return;
+            }
             if client.write_all(&head).and_then(|_| client.write_all(&peek)).is_ok() {
                 let _ = io::copy(&mut upstream, client);
             }
@@ -1576,6 +1891,21 @@ impl Bridge {
                 finish(client);
             }
             None => respond_not_submitted(client, &format!("Ojak: {model}에 쓸 수 있는 {provider} 계정이 없어요.")),
+        }
+    }
+
+    /// 이 gateway 키(`provider|identity`)가 가리키는 API 키 계정 ID.
+    fn api_account_id(&self, key: &str) -> Option<String> {
+        self.state().gateways.iter().find(|gateway| gateway.api_credit && gateway.key() == key).and_then(|gateway| gateway.native_account.clone())
+    }
+
+    /// 한 요청의 추정 비용을 월 누적에 더한다. usage를 못 읽었거나 단가를 모르면 "미확인 요청"으로 센다. 비용·계정 외 값은 기록하지 않는다.
+    /// 단가표는 키의 공급자(gateway 키 `<공급자>|…`)로 고른다. 다른 공급자의 단가는 쓰지 않는다.
+    fn record_api_usage(&self, key: &str, model: &str, usage: Option<aam_adapters::api_credit::Usage>) {
+        let Some(id) = self.api_account_id(key) else { return };
+        let cost = aam_adapters::api_credit::ApiProvider::of(key_provider(key)).and_then(|api| usage.and_then(|usage| aam_adapters::api_credit::cost_usd(api, model, usage)));
+        if let Ok(mut store) = self.service.lock() {
+            let _ = crate::store::record_api_credit(&mut store.connection, &id, cost, now_ms());
         }
     }
 
@@ -1700,6 +2030,19 @@ pub(crate) fn for_gateway(mut body: Value, provider: &str, model: &str) -> Vec<u
     serde_json::to_vec(&body).unwrap_or_default()
 }
 
+/// 이미 `for_gateway`를 거친 본문을 다른 공급자의 gateway용으로 다시 쓴다. 모델 ID는 그대로다. 파싱할 수 없으면 원본을 돌려준다(gateway가 거절한다).
+fn rewrite_provider(body: &[u8], provider: &str, model: &str) -> Vec<u8> {
+    match serde_json::from_slice::<Value>(body) {
+        Ok(value) => for_gateway(value, provider, model),
+        Err(_) => body.to_vec(),
+    }
+}
+
+/// gateway 키(`<공급자>|<identity>`)의 공급자 부분.
+fn key_provider(key: &str) -> &str {
+    key.split_once('|').map_or(key, |(provider, _)| provider)
+}
+
 /// `logs/bridge.log`에 한 줄을 덧붙인다. 줄과 줄바꿈을 한 번에 쓴다(`writeln!`은 두 번에 나눠 써서 동시 요청의 줄이 한 줄로 붙었다).
 fn append_log_line(home: &Path, line: &str) {
     let path = home.join("logs/bridge.log");
@@ -1744,7 +2087,7 @@ fn account_view(gateway: &Gateway, accounts: &[Account], pin: Option<&Account>, 
         "zai" => "other",
         other => other,
     };
-    let mut merged: HashMap<String, QuotaBucket> = HashMap::new();
+    let mut rows: Vec<&[QuotaBucket]> = Vec::new();
     let mut enabled = true;
     let mut pinned = false;
     let mut paid_ok = false;
@@ -1771,16 +2114,19 @@ fn account_view(gateway: &Gateway, accounts: &[Account], pin: Option<&Account>, 
         // Codex 크레딧(openai)과 Claude 추가 사용량(anthropic)은 단위가 달라 각 공급자에서만 본다.
         paid_ok |= (paid.credits && provider == "openai" && account.credits.as_ref().is_some_and(|credits| credits.usable(now, paid.stale_seconds)))
             || (paid.extra && provider == "anthropic" && account.extra_usage.as_ref().is_some_and(|extra| extra.usable(now, paid.stale_seconds)));
-        for bucket in &account.buckets {
-            let newer = merged.get(&bucket.id).is_none_or(|current| bucket.observed_at > current.observed_at);
-            if newer {
-                merged.insert(bucket.id.clone(), bucket.clone());
-            }
+        rows.push(&account.buckets);
+    }
+    // 같은 계정을 본 다른 행에 더 새로운 관측이 있는데 5시간 창이 없다면(인증된 Claude Ultra·ChatGPT Pro, 플랜 변경) 예전 5시간 한도는 버린다.
+    let freshness = if paid.stale_seconds > 0 { paid.stale_seconds.saturating_mul(1000).min(i64::MAX as u64) as i64 } else { 900_000 };
+    let mut merged: HashMap<&str, &QuotaBucket> = HashMap::new();
+    for bucket in scheduler::without_vanished_short_windows(&rows, now, freshness) {
+        if merged.get(bucket.id.as_str()).is_none_or(|current| bucket.observed_at > current.observed_at) {
+            merged.insert(bucket.id.as_str(), bucket);
         }
     }
     // 추가 과금 경로는 이 gateway와 같은 계정으로 확인된 연결 중 하나라도 신선한 관측으로 명시할 때만 쓴다.
     let paid_fallback = paid.fresh_ms.filter(|_| paid_ok);
-    (merged.into_values().collect(), enabled, pinned, paid_fallback)
+    (merged.into_values().cloned().collect(), enabled, pinned, paid_fallback)
 }
 
 #[derive(Clone, Default)]
@@ -1933,7 +2279,10 @@ fn spawn_gateway(paths: &Paths, gateway: &Gateway, providers: &BTreeSet<String>)
     for provider in providers.iter().map(String::as_str).chain(ALIASES.iter().flat_map(|(alias, original)| [*alias, *original])) {
         pool.insert(provider.to_owned(), json!([]));
     }
-    pool.insert(gateway.provider.clone(), json!([gateway.identity]));
+    // API 키 gateway는 omp가 `identityKey: null`인 api_key 자격 증명에 풀 필터를 걸지 않지만, 풀에 키 지문을 넣을 이유도 없다.
+    if !gateway.api_credit {
+        pool.insert(gateway.provider.clone(), json!([gateway.identity]));
+    }
     let pool_path = pools.join(format!("{}.json", gateway.port));
     fs::write(&pool_path, serde_json::to_vec(&Value::Object(pool)).unwrap_or_default())
         .and_then(|_| aam_protocol::secure::restrict_file(&pool_path))
@@ -1941,6 +2290,11 @@ fn spawn_gateway(paths: &Paths, gateway: &Gateway, providers: &BTreeSet<String>)
     let log = open_bounded_log(&logs.join(format!("bridge-gateway-{}.log", gateway.port)))
         .map_err(|_| "gateway 로그 파일을 열지 못했습니다.".to_owned())?;
     let mut command = Command::new(omp);
+    // API 키 gateway는 실제 Console 키를 싣는다. 서비스 환경의 인증·엔드포인트 재정의는 고치지 않고 멈춘다(spawn하지 않는다).
+    if gateway.api_credit {
+        let api = aam_adapters::api_credit::ApiProvider::of(&gateway.provider).ok_or("API 키 gateway의 공급자를 알 수 없어요.")?;
+        aam_adapters::check_api_credit_env(api).map_err(|error| format!("{}: {}", error.code, error.message))?;
+    }
     for (key, _) in std::env::vars_os() {
         let name = key.to_string_lossy();
         if name.starts_with("OMP_") || name.starts_with("PI_") {
@@ -2009,8 +2363,9 @@ fn sanitize_log_token(value: &str) -> String {
     if out.is_empty() { "-".into() } else { out }
 }
 
-/// `<ms> <provider>/<model> session=<id> turn=<bool> tools=<n> -> <accountKey> [reserve-fallback]`
-/// 계정 칸은 identity sha256의 앞 12 hex다. 데스크톱 파서와 함께 바꾼다.
+/// `<ms> <provider>/<model> session=<id> turn=<bool> tools=<n> -> <accountKey> [reserve-fallback] [api-credit]`
+/// 계정 칸은 identity sha256의 앞 12 hex다(API 키 계정은 `apikey:<12hex>` identity의 sha256). 끝 표식은 이 순서로만 붙는다.
+/// `api-credit`: 이 요청을 구독이 아니라 Console API 키(월 API 크레딧)로 보냈다. 데스크톱 파서와 함께 바꾼다.
 pub(crate) fn format_usage_line(
     at: i64,
     provider: &str,
@@ -2020,12 +2375,14 @@ pub(crate) fn format_usage_line(
     tools: usize,
     account_key: &str,
     reserve_fallback: bool,
+    api_credit: bool,
 ) -> String {
     format!(
-        "{at} {provider}/{} session={} turn={turn} tools={tools} -> {account_key}{}",
+        "{at} {provider}/{} session={} turn={turn} tools={tools} -> {account_key}{}{}",
         sanitize_log_model(model),
         sanitize_log_token(session),
-        if reserve_fallback { " reserve-fallback" } else { "" }
+        if reserve_fallback { " reserve-fallback" } else { "" },
+        if api_credit { " api-credit" } else { "" }
     )
 }
 
@@ -2345,8 +2702,10 @@ fn classify(candidate: &Candidate, scope: Option<&str>, model: &str, blocks: &[B
 /// 후보마다 (로그용 계정 별칭, 원인). 별칭은 identity sha256 앞 12 hex라 이메일이 나오지 않는다.
 pub(crate) fn classify_all(candidates: &[Candidate], provider: &str, model: &str, blocks: &[Block], now: i64) -> Vec<(String, Cause)> {
     let scope = block_scope(provider, model);
+    // API 크레딧 키는 구독 후보가 아니다. 대기 시각·"한도를 다 썼다" 안내는 구독 후보만으로 정한다(버킷 없는 키가 `Ready`로 분류돼 안내를 지우지 않게).
     candidates
         .iter()
+        .filter(|candidate| !candidate.api_credit)
         .map(|candidate| (account_key(identity_from_key(&candidate.key)), classify(candidate, scope.as_deref(), model, blocks, now)))
         .collect()
 }
@@ -2576,6 +2935,55 @@ fn forward(port: u16, token: &str, request: &Request, body: &[u8]) -> Result<Tcp
     Ok(stream)
 }
 
+/// 받은 chunked 본문에서 끝까지 도착한 chunk의 데이터만 이어 붙인다. chunk extension(`;name=value`)은 무시하고,
+/// 크기 줄이나 데이터가 아직 덜 왔으면 거기서 멈춘다(덜 온 데이터를 이벤트로 보지 않는다).
+fn complete_chunks(mut raw: &[u8]) -> Vec<u8> {
+    let mut out = Vec::new();
+    while let Some(line_end) = raw.windows(2).position(|window| window == b"\r\n") {
+        let size_text = String::from_utf8_lossy(&raw[..line_end]);
+        let Ok(size) = usize::from_str_radix(size_text.split(';').next().unwrap_or("").trim(), 16) else { break };
+        let rest = &raw[line_end + 2..];
+        if size == 0 || rest.len() < size + 2 {
+            break;
+        }
+        out.extend_from_slice(&rest[..size]);
+        raw = &rest[size + 2..];
+    }
+    out
+}
+
+/// SSE 본문에 주석(`:`)이 아닌 줄을 가진 완성 프레임(빈 줄로 끝남)이 있는지. `: keepalive`만 받았으면 아직 첫 이벤트가 아니다.
+/// omp 18.15부터 gateway가 실제 이벤트보다 먼저 `: keepalive`를 보낸다. 이를 첫 이벤트로 보면 한도·인증 거절을 놓친다.
+/// 줄바꿈까지 실제로 받은 줄만 센다. 마지막 줄이 아직 줄바꿈 없이 끊겼으면 그 줄은 미완성이다.
+/// SSE가 아닌 오류 본문도 같은 규칙으로 첫 빈 줄(또는 `PEEK_LIMIT`)에서 멈춘다.
+fn has_event_frame(body: &[u8]) -> bool {
+    let mut seen = false;
+    for line in body.split_inclusive(|byte| *byte == b'\n') {
+        let Some(line) = line.strip_suffix(b"\n") else { return false };
+        let line = line.strip_suffix(b"\r").unwrap_or(line);
+        if line.is_empty() {
+            if seen {
+                return true;
+            }
+            continue;
+        }
+        if !line.starts_with(b":") {
+            seen = true;
+        }
+    }
+    false
+}
+
+/// 응답 머리의 `Transfer-Encoding`에 따라 chunk 틀을 걷어 낸 실제 본문. 판정용이며 전달할 원본 바이트는 바꾸지 않는다.
+fn peek_body(head: &[u8], raw: &[u8]) -> Vec<u8> {
+    if api_key::UsageScanner::is_chunked(head) { complete_chunks(raw) } else { raw.to_vec() }
+}
+
+/// 풀어낸 본문에 완성된 첫 이벤트가 도착했는지.
+fn first_event_ready(head: &[u8], raw: &[u8]) -> bool {
+    has_event_frame(&peek_body(head, raw))
+}
+
 /// 응답 헤더와 첫 이벤트까지만 읽는다. 한도 응답이면 다른 계정으로 다시 보낼 수 있다.
 fn peek_response(stream: &mut TcpStream) -> io::Result<(Vec<u8>, Vec<u8>)> {
     let mut buffer = Vec::new();
@@ -2594,7 +3002,7 @@ fn peek_response(stream: &mut TcpStream) -> io::Result<(Vec<u8>, Vec<u8>)> {
         buffer.extend_from_slice(&chunk[..read]);
     };
     let mut peek = buffer.split_off(end);
-    while !peek.windows(2).any(|window| window == b"\n\n") && peek.len() < PEEK_LIMIT {
+    while !first_event_ready(&buffer, &peek) && peek.len() < PEEK_LIMIT {
         let read = stream.read(&mut chunk)?;
         if read == 0 {
             break;
@@ -2804,7 +3212,7 @@ mod tests {
         }
     }
     fn candidate(key: &str, buckets: Vec<QuotaBucket>) -> Candidate {
-        Candidate { key: key.into(), buckets, healthy: true, enabled: true, pinned: false, paid_fallback: None }
+        Candidate { key: key.into(), buckets, healthy: true, enabled: true, pinned: false, paid_fallback: None, api_credit: false, api_used: 0.0, proactive: None, balanced: false, use_before_reset_ms: 0 }
     }
     const DAY: i64 = 86_400_000;
 
@@ -3230,6 +3638,86 @@ mod tests {
         assert_eq!(choose(&[off], "anthropic", "claude-opus-5-5", None, &none, &[], &[], 10.0, now), None);
     }
 
+    /// 소비 균형의 "리셋 전 사용": 주간 96% 사용·리셋 임박 계정은 안전 여유량 안쪽이어도 새 대화를 먼저 받는다.
+    /// 스마트(`balanced:false`·창 0)는 그대로 여유 있는 계정을 고르고, 리셋이 멀거나 소진·차단·장애·5시간 과열 계정은 이 규칙으로 고르지 않으며 진행 중 대화는 옮기지 않는다.
+    #[test]
+    fn expiry_balanced_uses_reserve_leftover_near_reset_only_for_new_conversations() {
+        let now = 1_000_000_000_000;
+        let window = 48 * 3_600_000;
+        let rush = |key: &str, buckets: Vec<QuotaBucket>| Candidate { balanced: true, use_before_reset_ms: window, ..candidate(key, buckets) };
+        let near = rush("near", vec![bucket("7d", None, 96.0, DAY * 2 / 3, now)]);
+        let roomy = rush("roomy", vec![bucket("7d", None, 40.0, 5 * DAY, now)]);
+        let none = HashMap::new();
+        let model = "claude-opus-5-5";
+        for pool in [[near.clone(), roomy.clone()], [roomy.clone(), near.clone()]] {
+            let near_index = pool.iter().position(|candidate| candidate.key == "near").unwrap();
+            let roomy_index = 1 - near_index;
+            // 소비 균형: 남은 4%를 먼저 쓴다. 안전 여유량이 0이면 규칙이 필요 없고 기존 소비 균형 점수(여유 있는 계정)가 이긴다.
+            assert_eq!(choose(&pool, "anthropic", model, None, &none, &[], &[], 10.0, now), Some(near_index));
+            assert_eq!(choose(&pool, "anthropic", model, None, &none, &[], &[], 0.0, now), Some(roomy_index));
+            // 스마트·소비 순서: `balanced:false`·창 0이면 기존 안전 여유량 규칙 그대로 roomy.
+            let plain = pool.clone().map(|candidate| Candidate { balanced: false, use_before_reset_ms: 0, ..candidate });
+            assert_eq!(choose(&plain, "anthropic", model, None, &none, &[], &[], 10.0, now), Some(roomy_index));
+            // 창이 0이면(= 이 규칙 꺼짐) `balanced`여도 안전 여유량을 지킨다.
+            let off = pool.clone().map(|candidate| Candidate { use_before_reset_ms: 0, ..candidate });
+            assert_eq!(choose(&off, "anthropic", model, None, &none, &[], &[], 10.0, now), Some(roomy_index));
+        }
+        // 리셋이 창(48시간) 밖이면 여유량을 지킨다. 창 안쪽 경계는 포함이다.
+        let far = rush("near", vec![bucket("7d", None, 96.0, 6 * DAY, now)]);
+        assert_eq!(choose(&[far, roomy.clone()], "anthropic", model, None, &none, &[], &[], 10.0, now), Some(1));
+        let edge = rush("near", vec![bucket("7d", None, 96.0, window, now)]);
+        assert_eq!(choose(&[edge, roomy.clone()], "anthropic", model, None, &none, &[], &[], 10.0, now), Some(0));
+        let beyond = rush("near", vec![bucket("7d", None, 96.0, window + 1, now)]);
+        assert_eq!(choose(&[beyond, roomy.clone()], "anthropic", model, None, &none, &[], &[], 10.0, now), Some(1));
+        // 소진된 계정은 절대 고르지 않는다.
+        let spent = rush("near", vec![bucket("7d", None, 100.0, DAY / 2, now)]);
+        assert_eq!(choose(&[spent.clone(), roomy.clone()], "anthropic", model, None, &none, &[], &[], 10.0, now), Some(1));
+        assert_eq!(choose(&[spent], "anthropic", model, None, &none, &[], &[], 10.0, now), None);
+        // 요청 모델의 전용 한도가 소진이면 공용 한도가 곧 리셋돼도 그 모델은 받지 않는다.
+        let model_spent = rush("near", vec![bucket("7d", None, 96.0, DAY / 2, now), bucket("fable", Some("fable"), 100.0, 2 * DAY, now)]);
+        assert_eq!(choose(&[model_spent.clone(), roomy.clone()], "anthropic", "claude-fable-5-1", None, &none, &[], &[], 10.0, now), Some(1));
+        // 5시간 한도가 뜨겁거나(85%+) 안전 여유량 안쪽이면 이 규칙으로 앞서지 못한다. 덜 쓴 5시간 한도는 상관없다.
+        let hot = rush("near", vec![bucket("7d", None, 96.0, DAY / 2, now), bucket("5h", None, 90.0, DAY / 10, now)]);
+        assert_eq!(choose(&[hot, roomy.clone()], "anthropic", model, None, &none, &[], &[], 10.0, now), Some(1));
+        let warm = rush("near", vec![bucket("7d", None, 96.0, DAY / 2, now), bucket("5h", None, 60.0, DAY / 10, now)]);
+        assert_eq!(choose(&[warm, roomy.clone()], "anthropic", model, None, &none, &[], &[], 10.0, now), Some(0));
+        // 차단·장애·배정에서 뺀 계정, 이미 시도한 계정은 후보가 아니다.
+        let blocks = [block("near", None, now + 60_000, false, false)];
+        assert_eq!(choose(&[near.clone(), roomy.clone()], "anthropic", model, None, &none, &blocks, &[], 10.0, now), Some(1));
+        let down = Candidate { healthy: false, ..near.clone() };
+        assert_eq!(choose(&[down, roomy.clone()], "anthropic", model, None, &none, &[], &[], 10.0, now), Some(1));
+        let excluded = Candidate { enabled: false, ..near.clone() };
+        assert_eq!(choose(&[excluded, roomy.clone()], "anthropic", model, None, &none, &[], &[], 10.0, now), Some(1));
+        assert_eq!(choose(&[near.clone(), roomy.clone()], "anthropic", model, None, &none, &[], &["near".into()], 10.0, now), Some(1));
+        // 리셋이 더 이른 계정이 먼저다. 등록 순서와 무관하다.
+        let sooner = rush("sooner", vec![bucket("7d", None, 97.0, DAY / 4, now)]);
+        assert_eq!(choose(&[near.clone(), sooner.clone(), roomy.clone()], "anthropic", model, None, &none, &[], &[], 10.0, now), Some(1));
+        assert_eq!(choose(&[sooner.clone(), near.clone(), roomy.clone()], "anthropic", model, None, &none, &[], &[], 10.0, now), Some(0));
+        // 진행 중인 대화는 그대로다: roomy에 붙은 대화는 near가 리셋 임박이어도 옮기지 않고, near에 붙은 대화도 그대로 near다.
+        let mut stickies = HashMap::new();
+        stickies.insert("s".into(), Sticky { key: "roomy".into(), model: model.into(), cwd: None, last_used: now, requests: 4 });
+        assert_eq!(choose(&[near.clone(), roomy.clone()], "anthropic", model, Some("s"), &stickies, &[], &[], 10.0, now), Some(1));
+        stickies.get_mut("s").unwrap().key = "near".into();
+        assert_eq!(choose(&[near.clone(), roomy.clone()], "anthropic", model, Some("s"), &stickies, &[], &[], 10.0, now), Some(0));
+        // 고정이 끝난 대화는 새 대화처럼 규칙을 적용받는다.
+        stickies.get_mut("s").unwrap().key = "roomy".into();
+        stickies.get_mut("s").unwrap().last_used = now - STICKY_MS - 1;
+        assert_eq!(choose(&[near.clone(), roomy.clone()], "anthropic", model, Some("s"), &stickies, &[], &[], 10.0, now), Some(0));
+        // 공급자 수동 배정 계정은 새 대화에서 여전히 먼저다.
+        let pinned = Candidate { pinned: true, ..roomy.clone() };
+        assert_eq!(choose(&[near.clone(), pinned], "anthropic", model, None, &none, &[], &[], 10.0, now), Some(1));
+        // 구독 한도가 남은 계정이 있으면 유료 경로(추가 사용량·API 키)는 이 규칙으로 열리지 않는다.
+        let paid = Candidate { paid_fallback: Some(900_000), ..near.clone() };
+        let api = api_key_candidate("anthropic|apikey:aaaaaaaaaaaa", Some(FRESH));
+        assert_eq!(choose(&[paid, roomy.clone(), api.clone()], "anthropic", model, None, &none, &[], &[], 10.0, now), Some(0));
+        assert_eq!(choose(&[near.clone(), api.clone()], "anthropic", model, None, &none, &[], &[], 10.0, now), Some(0));
+        // 선제 API 후보가 일정보다 앞서 있어도 리셋 직전 구독 잔량이 먼저다. 규칙이 해당 없으면(창 밖) 기존대로 API가 받는다.
+        let proactive = proactive_key(KEY_A, 1.2, 100.0);
+        assert_eq!(choose(&[near.clone(), proactive.clone()], "anthropic", model, None, &none, &[], &[], 10.0, now), Some(0));
+        let far = rush("near", vec![bucket("7d", None, 96.0, 6 * DAY, now)]);
+        assert_eq!(choose(&[far, proactive], "anthropic", model, None, &none, &[], &[], 10.0, now), Some(1));
+    }
+
     #[test]
     fn limit_detection_distinguishes_quota_from_rate_limit_and_success() {
         assert_eq!(limit_signal(b"HTTP/1.1 429 Too Many Requests\r\n\r\n", b"{\"error\":\"slow down\"}"), Some(Limit { quota: false, retry_ms: None }));
@@ -3247,6 +3735,82 @@ mod tests {
         assert_eq!(limit_signal(b"HTTP/1.1 200 OK\r\n\r\n", b"event: start\ndata: {}\n\n"), None);
     }
 
+    /// omp 18.15 gateway는 실제 이벤트보다 먼저 `: keepalive`를 보낸다. 주석만 보고 멈추면 뒤따르는 한도 오류를 놓쳐
+    /// 계정 차단·다른 계정 재전송이 일어나지 않는다(2026-11-03 격리 실측). 주석·오류 JSON이 HTTP chunk 경계에서
+    /// 잘리거나 chunk extension이 붙어도, 풀어낸 SSE에서 완성된 첫 이벤트까지 읽어야 한다.
+    #[test]
+    fn peek_reads_past_leading_keepalive_even_when_split_across_chunks() {
+        let error: &[u8] = b"event: error\ndata: {\"message\":\"429 rate_limit_error retry-after-ms=461826000\"}\n\n";
+        // (이름, 서버가 한 번에 보낼 조각들). 조각 사이에 쉬어 읽기가 여러 번 나뉘게 한다.
+        let cases: Vec<(&str, Vec<Vec<u8>>)> = vec![
+            ("one keepalive chunk", vec![b"d\r\n: keepalive\n\n\r\n".to_vec(), chunk(error, None)]),
+            ("keepalive split across two chunks", vec![b"5\r\n: kee\r\n".to_vec(), b"8\r\npalive\n\n\r\n".to_vec(), chunk(error, None)]),
+            ("error JSON split across chunks", vec![chunk(b": keepalive\n\n", None), chunk(&error[..30], None), chunk(&error[30..], None)]),
+            ("limit marker split inside rate_limit", vec![chunk(b": keepalive\n\n", None), chunk(&error[..40], None), chunk(&error[40..], None)]),
+            ("chunk extensions", vec![chunk(b": keepalive\n\n", Some("x=1")), chunk(error, Some("name=\"v\""))]),
+            ("size line split across reads", vec![b"d".to_vec(), b"\r\n: keepalive\n\n\r\n".to_vec(), chunk(error, None)]),
+        ];
+        for (name, parts) in cases {
+            let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+            let port = listener.local_addr().unwrap().port();
+            let server = std::thread::spawn(move || {
+                let (mut socket, _) = listener.accept().unwrap();
+                socket.write_all(b"HTTP/1.1 200 OK\r\nContent-Type: text/event-stream\r\nTransfer-Encoding: chunked\r\n\r\n").unwrap();
+                for part in parts {
+                    socket.write_all(&part).unwrap();
+                    socket.flush().unwrap();
+                    std::thread::sleep(Duration::from_millis(30));
+                }
+                std::thread::sleep(Duration::from_millis(200));
+            });
+            let mut stream = TcpStream::connect(("127.0.0.1", port)).unwrap();
+            stream.set_read_timeout(Some(Duration::from_secs(5))).unwrap();
+            let (head, peek) = peek_response(&mut stream).unwrap();
+            assert_eq!(limit_signal(&head, &peek_body(&head, &peek)), Some(Limit { quota: true, retry_ms: Some(461_826_000) }), "{name}");
+            server.join().unwrap();
+        }
+        // chunked가 아닌 응답은 원본 그대로 본다: 주석만이면 아직이고, 주석 뒤 실제 프레임이나 일반 오류 본문이면 준비됐다.
+        let plain = b"HTTP/1.1 200 OK\r\nContent-Type: text/event-stream\r\n\r\n";
+        assert!(!first_event_ready(plain, b": keepalive\n\n"));
+        assert!(first_event_ready(plain, b": keepalive\n\nevent: start\ndata: {}\n\n"));
+        assert!(first_event_ready(b"HTTP/1.1 429 Too Many Requests\r\n\r\n", b"{\"error\":\"slow down\"}\n\n"));
+        // 덜 도착한 chunk는 이벤트로 세지 않는다.
+        let chunked = b"HTTP/1.1 200 OK\r\nTransfer-Encoding: chunked\r\n\r\n";
+        assert!(!first_event_ready(chunked, b"5\r\n: kee\r\n8\r\npalive\n\n\r\n"));
+        assert!(!first_event_ready(chunked, b"20\r\nevent: error\ndata: {\"mes"));
+        // 줄바꿈 하나로 끝난 줄만 받았으면 프레임이 아직 끝나지 않았다(빈 줄 `\n\n`이 와야 한다).
+        assert!(!has_event_frame(b"event: error\n"));
+        assert!(!has_event_frame(b": keepalive\n\nevent: error\ndata: {}\n"));
+        assert!(has_event_frame(b"event: error\r\ndata: {}\r\n\r\n"));
+    }
+
+    /// keepalive 뒤 한도 오류 스트림을 모든 바이트 위치에서 두 chunk로 나눠도, 풀어낸 본문의 첫 이벤트 판정과 한도 판정이 같아야 한다.
+    /// 앞쪽 chunk만 받은 시점에는(오류 프레임이 덜 왔으면) 아직 준비되지 않았다고 봐야 peek가 더 읽는다.
+    #[test]
+    fn first_event_detection_holds_for_every_chunk_split_position() {
+        let stream: &[u8] = b": keepalive\n\nevent: error\ndata: {\"message\":\"429 rate_limit_error retry-after-ms=461826000\"}\n\n";
+        let head = b"HTTP/1.1 200 OK\r\nContent-Type: text/event-stream\r\nTransfer-Encoding: chunked\r\n\r\n";
+        for at in 1..stream.len() {
+            let first = chunk(&stream[..at], None);
+            let mut both = first.clone();
+            both.extend_from_slice(&chunk(&stream[at..], None));
+            // 첫 chunk만 받은 경우: 오류 프레임의 끝(마지막 바이트)이 아직 없으므로 준비되지 않았다.
+            assert!(!first_event_ready(head, &first), "split at {at}: first chunk alone must not be a complete event");
+            assert!(first_event_ready(head, &both), "split at {at}");
+            assert_eq!(limit_signal(head, &peek_body(head, &both)), Some(Limit { quota: true, retry_ms: Some(461_826_000) }), "split at {at}");
+        }
+    }
+
+    fn chunk(data: &[u8], extension: Option<&str>) -> Vec<u8> {
+        let mut out = match extension {
+            Some(extension) => format!("{:x};{extension}\r\n", data.len()).into_bytes(),
+            None => format!("{:x}\r\n", data.len()).into_bytes(),
+        };
+        out.extend_from_slice(data);
+        out.extend_from_slice(b"\r\n");
+        out
+    }
+
     #[test]
     fn usage_line_round_trip_omits_email_and_bounds_model() {
         let identity = "email:person@example.com|org:org-1";
@@ -3255,7 +3819,7 @@ mod tests {
         assert!(key.chars().all(|ch| ch.is_ascii_hexdigit()));
         assert_ne!(account_key("email:other@example.com|org:org-1"), key);
         let model = "claude-opus\n5 injected -> anthropic|email:evil@x.io|org:z";
-        let line = format_usage_line(1_700_000_000_000, "anthropic", model, "abcd\n1234", true, 3, &key, true);
+        let line = format_usage_line(1_700_000_000_000, "anthropic", model, "abcd\n1234", true, 3, &key, true, false);
         assert!(!line.contains('@'));
         assert!(!line.contains("email:"));
         assert!(!line.contains("org:"));
@@ -3336,7 +3900,7 @@ mod tests {
     fn subject_scoped_grok_account_respects_exclusion_and_manual_pin() {
         let gateway = Gateway {
             provider: "xai-oauth".into(), identity: "account:subject-a".into(),
-            email: "account:subject-a".into(), org: String::new(), native_account: None, native_port: 0,
+            email: "account:subject-a".into(), org: String::new(), native_account: None, api_credit: false, native_port: 0,
             port: 0, child: None, spawned_at: 0, unhealthy_until: 0,
         };
         let account = Account {
@@ -3353,6 +3917,64 @@ mod tests {
         let (_, enabled, pinned, _) = account_view(&gateway, std::slice::from_ref(&other), Some(&other), PaidPolicy::default(), 0);
         assert!(enabled);
         assert!(!pinned);
+    }
+
+    /// 같은 계정을 본 두 행: 공식 CLI(신선한 주간 한도만)와 예전 omp 관측(5시간 한도가 소진으로 남음).
+    fn five_hour_rows(now: i64, official_age: i64) -> [Account; 2] {
+        let official = bucket("7d", None, 30.0, 3 * DAY, now - official_age);
+        let old_five = bucket("5h", None, 100.0, DAY / 10, now - 600_000);
+        let row = |tool: &str, buckets: Vec<QuotaBucket>| Account {
+            id: tool.into(), provider: "anthropic".into(), tool: tool.into(), email: Some("person@example.test".into()),
+            enabled: true, buckets, ..Account::default()
+        };
+        [row("claude", vec![official]), row("omp", vec![old_five])]
+    }
+    fn anthropic_gateway() -> Gateway {
+        Gateway {
+            provider: "anthropic".into(), identity: "person@example.test".into(), email: "person@example.test".into(), org: String::new(),
+            native_account: None, api_credit: false, native_port: 0, port: 0, child: None, spawned_at: 0, unhealthy_until: 0,
+        }
+    }
+
+    #[test]
+    fn five_hour_window_dropped_by_a_newer_observation_no_longer_blocks_the_account() {
+        let now = 1_000_000_000_000;
+        let gateway = anthropic_gateway();
+        let none = HashMap::new();
+        // 인증된 Ultra처럼 새 관측에 5시간 창이 없으면, 예전 관측에 남은 소진된 5시간 한도는 계정을 막지 않는다.
+        let rows = five_hour_rows(now, 30_000);
+        let (buckets, _, _, _) = account_view(&gateway, &rows, None, PaidPolicy::default(), now);
+        assert!(buckets.iter().all(|bucket| !scheduler::short_window(bucket)), "{buckets:?}");
+        assert_eq!(choose(&[candidate("a", buckets)], "anthropic", "claude-opus-5-5", None, &none, &[], &[], 0.0, now), Some(0));
+        // 새 관측이 없는(공식 관측이 낡은) 계정의 5시간 한도는 그대로 남아 막는다.
+        let rows = five_hour_rows(now, 2 * 3_600_000);
+        let (buckets, _, _, _) = account_view(&gateway, &rows, None, PaidPolicy::default(), now);
+        assert!(buckets.iter().any(|bucket| scheduler::short_window(bucket)));
+        assert_eq!(choose(&[candidate("a", buckets)], "anthropic", "claude-opus-5-5", None, &none, &[], &[], 0.0, now), None);
+        // 새 관측도 5시간 한도를 보고하면(다른 ID) 5시간 창은 여전히 있는 것이다.
+        let mut rows = five_hour_rows(now, 30_000);
+        rows[0].buckets.push(bucket("5h-official", None, 10.0, DAY / 10, now));
+        let (buckets, _, _, _) = account_view(&gateway, &rows, None, PaidPolicy::default(), now);
+        assert!(buckets.iter().any(|bucket| bucket.id == "5h"));
+    }
+
+    #[test]
+    fn absent_five_hour_window_is_no_pressure_and_a_hot_one_still_goes_last() {
+        let now = 1_000_000_000_000;
+        let none = HashMap::new();
+        let weekly_only = candidate("ultra", vec![bucket("7d", None, 30.0, 3 * DAY, now)]);
+        let calm = candidate("max-calm", vec![bucket("5h", None, 20.0, DAY / 5, now), bucket("7d", None, 30.0, 3 * DAY, now)]);
+        let hot = candidate("max-hot", vec![bucket("5h", None, 88.0, DAY / 5, now), bucket("7d", None, 30.0, 3 * DAY, now)]);
+        assert_eq!(primary_used(&weekly_only.buckets, "claude-opus-5-5"), 0.0);
+        // 5시간 한도가 없다고 후보에서 빠지거나 미확인이 되지 않는다.
+        assert_eq!(choose(&[weekly_only.clone()], "anthropic", "claude-opus-5-5", None, &none, &[], &[], 10.0, now), Some(0));
+        // 단기 압박이 없는 것으로 본다: 85% 넘게 쓴 5시간 한도 계정보다 먼저, 덜 쓴 계정보다도 앞선다.
+        assert_eq!(choose(&[hot.clone(), weekly_only.clone()], "anthropic", "claude-opus-5-5", None, &none, &[], &[], 10.0, now), Some(1));
+        assert_eq!(choose(&[calm, weekly_only.clone()], "anthropic", "claude-opus-5-5", None, &none, &[], &[], 10.0, now), Some(1));
+        // 소비 균형 모드도 같다.
+        let balanced = |candidate: Candidate| Candidate { balanced: true, use_before_reset_ms: 48 * 3_600_000, ..candidate };
+        assert_eq!(choose(&[balanced(hot), balanced(weekly_only.clone())], "anthropic", "claude-opus-5-5", None, &none, &[], &[], 10.0, now), Some(1));
+        assert_eq!(choose(&[balanced(weekly_only)], "anthropic", "claude-opus-5-5", None, &none, &[], &[], 10.0, now), Some(0));
     }
 
     // ───────────── 연결 예산·내부 broker listener (loopback, 임시 AAM_HOME, 실제 CLI 없음) ─────────────
@@ -3488,7 +4110,7 @@ mod tests {
         let paths = Paths { socket: home.join("service.sock"), database: home.join("state.db"), profiles: home.join("profiles"), home: home.clone() };
         let mut gateway = Gateway {
             provider: "anthropic".into(), identity: "email:a@example.test|org:a".into(), email: String::new(), org: String::new(),
-            native_account: Some("acc-1".into()), native_port: 49_321, port: 4101, child: None, spawned_at: 0, unhealthy_until: 0,
+            native_account: Some("acc-1".into()), api_credit: false, native_port: 49_321, port: 4101, child: None, spawned_at: 0, unhealthy_until: 0,
         };
         let (url, token) = gateway_broker(&paths, &gateway).unwrap();
         assert_eq!(url, "http://127.0.0.1:49321/native/acc-1");
@@ -3626,7 +4248,7 @@ mod tests {
         }
         let make = |provider: &str, identity: &str, native: Option<&str>, port: u16| Gateway {
             provider: provider.into(), identity: identity.into(), email: String::new(), org: String::new(),
-            native_account: native.map(str::to_owned), native_port: port, port: 4101, child: None, spawned_at: 0, unhealthy_until: 0,
+            native_account: native.map(str::to_owned), api_credit: false, native_port: port, port: 4101, child: None, spawned_at: 0, unhealthy_until: 0,
         };
         let mut gateways = vec![
             make("anthropic", "email:a|org:a", Some("a"), 5000),
@@ -3729,9 +4351,100 @@ mod tests {
         };
         h.bridge.state().gateways.push(Gateway {
             provider: "anthropic".into(), identity: format!("email:synthetic-{port}@example.test|org:o"), email: format!("synthetic-{port}@example.test"),
-            org: "o".into(), native_account: None, native_port: 0, port, child: Some(child), spawned_at: 0, unhealthy_until: 0,
+            org: "o".into(), native_account: None, api_credit: false, native_port: 0, port, child: Some(child), spawned_at: 0, unhealthy_until: 0,
         });
         Synthetic { release, held, served }
+    }
+
+    /// 한 응답만 내는 gateway 자리. `served`로 이 gateway에 요청이 왔는지 본다.
+    fn scripted_gateway(h: &Harness, gateway: Gateway, response: &'static [u8]) -> Arc<std::sync::atomic::AtomicUsize> {
+        use std::sync::atomic::AtomicUsize;
+        let listener = TcpListener::bind(("127.0.0.1", gateway.port)).unwrap();
+        let served = Arc::new(AtomicUsize::new(0));
+        let counter = Arc::clone(&served);
+        std::thread::spawn(move || {
+            for stream in listener.incoming() {
+                let Ok(mut stream) = stream else { break };
+                let deadline = Instant::now() + Duration::from_secs(10);
+                let Ok((request, rest)) = read_head(&mut stream, deadline) else { continue };
+                if read_body(&mut stream, request, rest, deadline).is_err() { continue; }
+                counter.fetch_add(1, Ordering::SeqCst);
+                let _ = stream.write_all(response);
+            }
+        });
+        #[cfg(unix)]
+        let child = (Command::new("sleep").arg("600").stdout(Stdio::null()).stderr(Stdio::null()).spawn().unwrap(), ());
+        #[cfg(windows)]
+        let child = {
+            let mut command = Command::new("ping.exe");
+            command.args(["-n", "601", "127.0.0.1"]).stdin(Stdio::null()).stdout(Stdio::null()).stderr(Stdio::null());
+            aam_protocol::spawn_in_job(&mut command, true, true, false).unwrap()
+        };
+        h.bridge.state().gateways.push(Gateway { child: Some(child), ..gateway });
+        served
+    }
+
+    fn free_port() -> u16 {
+        TcpListener::bind(("127.0.0.1", 0)).unwrap().local_addr().unwrap().port()
+    }
+
+    /// 실제 브릿지 `stream()` 경로: 구독이 신선하게 소진되면 정책을 켰을 때만 API 키 gateway로 가고, 로그에 `api-credit`을 남기며,
+    /// 응답의 종료 이벤트 usage(설치된 omp 18.12.0-ojak.2 auth-gateway의 실제 `done` 형식: `usage`에 `cost` 객체가 들어 있음)로
+    /// 월 추정액을 올린다. 구독 계정에는 보내지 않는다.
+    #[test]
+    fn exhausted_subscription_routes_stream_to_api_key_only_when_enabled_and_meters_usage() {
+        let _env = AUTH_ENV.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
+        let h = harness(Duration::from_secs(10));
+        let now = now_ms();
+        let subscription = Account {
+            id: "sub-1".into(), tool: "claude".into(), provider: "anthropic".into(), enabled: true, auth_status: "authenticated".into(),
+            email: Some("sub@example.test".into()), identity_key: Some("anthropic|email:sub@example.test|workspace:o".into()),
+            buckets: vec![bucket("7d", None, 100.0, DAY, now)],
+            ..Account::default()
+        };
+        let key = format!("sk-ant-api03-{}", "e".repeat(40));
+        {
+            let store = h.bridge.service.lock().unwrap();
+            crate::store::save_account(&store.connection, &subscription).unwrap();
+        }
+        register_api(&h, "api-e", &key);
+        const SUB: &[u8] = b"HTTP/1.1 200 OK\r\nContent-Type: text/event-stream\r\nConnection: close\r\n\r\ndata: {\"type\":\"done\"}\n\n";
+        const API: &[u8] = b"HTTP/1.1 200 OK\r\nContent-Type: text/event-stream\r\nConnection: close\r\n\r\ndata: {\"type\":\"start\"}\n\ndata: {\"type\":\"done\",\"reason\":\"stop\",\"message\":{\"role\":\"assistant\",\"content\":[{\"type\":\"text\",\"text\":\"ok\"}],\"api\":\"anthropic-messages\",\"provider\":\"anthropic\",\"model\":\"claude-opus-5-5\",\"usage\":{\"input\":1000000,\"output\":100000,\"cacheRead\":2000000,\"cacheWrite\":0,\"totalTokens\":3100000,\"cost\":{\"input\":0.0,\"output\":0.0,\"cacheRead\":0.0,\"cacheWrite\":0.0,\"total\":0.0}},\"stopReason\":\"stop\",\"timestamp\":1}}\n\ndata: [DONE]\n\n";
+        let sub_served = scripted_gateway(&h, Gateway {
+            provider: "anthropic".into(), identity: "email:sub@example.test|org:o".into(), email: "sub@example.test".into(), org: "o".into(),
+            native_account: None, api_credit: false, native_port: 0, port: free_port(), child: None, spawned_at: 0, unhealthy_until: 0,
+        }, SUB);
+        let api_served = scripted_gateway(&h, Gateway {
+            provider: "anthropic".into(), identity: aam_adapters::api_credit::identity_key(aam_adapters::api_credit::ApiProvider::Anthropic, &key), email: String::new(), org: String::new(),
+            native_account: Some("api-e".into()), api_credit: true, native_port: 1, port: free_port(), child: None, spawned_at: 0, unhealthy_until: 0,
+        }, API);
+        let request = |session: &str| {
+            let body = json!({"modelId": OPUS, "options": {"model": {"id": OPUS, "provider": "anthropic"}, "sessionId": session}}).to_string();
+            format!("POST /v1/pi/stream HTTP/1.1\r\nHost: localhost\r\nAuthorization: Bearer {}\r\nX-Ojak-Admission: 1\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}", h.public_token, body.len())
+        };
+        // 정책 꺼짐: 키로 보내지 않는다(구독도 소진이라 아무 데도 보내지 않는다).
+        let off = exchange(h.public, &request("s-off"));
+        assert!(!off.starts_with("HTTP/1.1 200 "), "{off}");
+        assert_eq!(api_served.load(Ordering::SeqCst), 0);
+        // 정책 켬: 키 gateway로 보내고 응답을 그대로 넘긴다.
+        {
+            let store = h.bridge.service.lock().unwrap();
+            let mut policy = crate::store::policy(&store.connection).unwrap();
+            policy.use_api_credit_after_limit = true;
+            crate::store::set_metadata(&store.connection, "policy", &policy).unwrap();
+        }
+        let on = exchange(h.public, &request("s-on"));
+        assert!(on.starts_with("HTTP/1.1 200 ") && on.contains("\"type\":\"done\""), "{on}");
+        assert_eq!((api_served.load(Ordering::SeqCst), sub_served.load(Ordering::SeqCst)), (1, 0));
+        wait_idle(&h.bridge);
+        let log = fs::read_to_string(h.home.join("logs/bridge.log")).unwrap();
+        let line = log.lines().find(|line| line.contains("session=s-on")).unwrap_or_else(|| panic!("{log}"));
+        assert!(line.ends_with(" api-credit"), "{line}");
+        assert!(!log.contains(&key) && !log.contains("sk-ant"), "key leaked into bridge.log");
+        // Opus 5.5: 1M input × $4 + 0.1M output × $20 + 2M cache read × $0.20 = $6.40
+        let state = crate::store::account(&h.bridge.service.lock().unwrap().connection, "api-e").unwrap().api_credit.unwrap();
+        assert!((state.used_usd - 6.40).abs() < 1e-9, "{}", state.used_usd);
+        assert_eq!(state.unmetered_requests, 0);
     }
 
     fn stream_request(token: &str, session: usize) -> String {
@@ -4146,6 +4859,498 @@ mod tests {
         wait_idle(&h.bridge);
         assert!(started.elapsed() < CLOSE_DRAIN_DEADLINE + Duration::from_secs(3), "{:?}", started.elapsed());
         assert!(sender.join().unwrap(), "the server must close the connection once the drain window ends");
+    }
+
+    // ───────────── API 크레딧 fallback ─────────────
+
+    const OPUS: &str = "claude-opus-5-5";
+    const FRESH: i64 = 900_000;
+
+    fn api_key_candidate(key: &str, paid: Option<i64>) -> Candidate {
+        Candidate { api_credit: true, paid_fallback: paid, ..candidate(key, Vec::new()) }
+    }
+    fn spent(key: &str, now: i64) -> Candidate {
+        candidate(key, vec![bucket("7d", None, 100.0, DAY, now)])
+    }
+
+    #[test]
+    fn api_key_with_empty_buckets_is_never_a_regular_candidate() {
+        let now = 1_000_000_000_000;
+        let none = HashMap::new();
+        let api = api_key_candidate("anthropic|apikey:aaaaaaaaaaaa", Some(FRESH));
+        // 구독이 남아 있으면 키는 절대 고르지 않는다. 키를 앞에 두어도 같다.
+        let roomy = candidate("sub", vec![bucket("7d", None, 40.0, 5 * DAY, now)]);
+        for pool in [vec![api.clone(), roomy.clone()], vec![roomy.clone(), api.clone()]] {
+            let sub = pool.iter().position(|candidate| !candidate.api_credit).unwrap();
+            assert_eq!(choose(&pool, "anthropic", OPUS, None, &none, &[], &[], 0.0, now), Some(sub));
+            assert_eq!(choose(&pool, "anthropic", OPUS, None, &none, &[], &[], 20.0, now), Some(sub));
+        }
+        // 안전 여유량 안쪽(90% 사용)뿐인 구독도 키보다 먼저다.
+        let reserve_only = candidate("sub", vec![bucket("7d", None, 90.0, 5 * DAY, now)]);
+        let pool = [api.clone(), reserve_only];
+        assert_eq!(choose(&pool, "anthropic", OPUS, None, &none, &[], &[], 20.0, now), Some(1));
+        // 버킷이 비어 있는(관측 없는) 구독도 일반 후보다.
+        let unknown = candidate("sub", Vec::new());
+        assert_eq!(choose(&[api.clone(), unknown], "anthropic", OPUS, None, &none, &[], &[], 0.0, now), Some(1));
+        // 구독 후보가 하나도 없으면 소진을 증명할 수 없으므로 키로 넘어가지 않는다.
+        assert_eq!(choose(&[api], "anthropic", OPUS, None, &none, &[], &[], 0.0, now), None);
+    }
+
+
+    const CODEX_MODEL: &str = "gpt-6-astra";
+
+    #[test]
+    fn openai_key_is_used_only_after_codex_subscriptions_are_exhausted_and_never_for_claude() {
+        let now = 1_000_000_000_000;
+        let none = HashMap::new();
+        let openai = api_key_candidate("openai|openai-apikey:aaaaaaaaaaaa", Some(FRESH));
+        let claude = api_key_candidate("anthropic|apikey:bbbbbbbbbbbb", Some(FRESH));
+        // 구독이 남아 있으면 OpenAI 키는 고르지 않는다.
+        let roomy = candidate("openai-codex|sub", vec![bucket("7d", None, 40.0, 5 * DAY, now)]);
+        assert_eq!(choose(&[openai.clone(), roomy.clone()], "openai-codex", CODEX_MODEL, None, &none, &[], &[], 0.0, now), Some(1));
+        // 모든 Codex 구독이 신선한 관측으로 소진되면 OpenAI 키가 받는다.
+        let spent_sub = candidate("openai-codex|sub", vec![bucket("7d", None, 100.0, 5 * DAY, now)]);
+        assert_eq!(choose(&[spent_sub.clone(), openai.clone()], "openai-codex", CODEX_MODEL, None, &none, &[], &[], 0.0, now), Some(1));
+        // Claude 키는 Codex 요청에 쓰지 않는다.
+        assert_eq!(choose(&[spent_sub.clone(), claude.clone()], "openai-codex", CODEX_MODEL, None, &none, &[], &[], 0.0, now), None);
+        // OpenAI 키는 Claude 요청에 쓰지 않는다.
+        let spent_claude = candidate("anthropic|sub", vec![bucket("7d", None, 100.0, 5 * DAY, now)]);
+        assert_eq!(choose(&[spent_claude, openai.clone()], "anthropic", OPUS, None, &none, &[], &[], 0.0, now), None);
+        // 단가를 모르는 모델은 쓰지 않는다. 일부 구독만 소진이면 기다린다.
+        assert_eq!(choose(&[spent_sub.clone(), openai.clone()], "openai-codex", "gpt-9-unknown", None, &none, &[], &[], 0.0, now), None);
+        assert_eq!(choose(&[spent_sub, roomy, openai], "openai-codex", CODEX_MODEL, None, &none, &[], &[], 0.0, now), Some(1));
+    }
+
+    #[test]
+    fn rewrite_provider_swaps_provider_and_keeps_model_id() {
+        let body = json!({"modelId":"openai-codex/gpt-6-astra","options":{"model":{"provider":"openai-codex","id":"gpt-6-astra"},"sessionId":"s"},"context":{"messages":[]}});
+        let upstream = for_gateway(body, "openai-codex", "gpt-6-astra");
+        let rewritten: Value = serde_json::from_slice(&rewrite_provider(&upstream, "openai", "gpt-6-astra")).unwrap();
+        assert_eq!(rewritten["modelId"], "openai/gpt-6-astra");
+        assert_eq!(rewritten["options"]["model"]["provider"], "openai");
+        assert_eq!(rewritten["options"]["model"]["id"], "gpt-6-astra");
+        assert_eq!(rewritten["options"]["sessionId"], "s");
+        assert_eq!(key_provider("openai|openai-apikey:abc"), "openai");
+    }
+    /// 여러 키 중 새 대화는 이번 달에 덜 쓴 키가 받는다(서비스 스케줄러와 같은 기준). 진행 중 대화는 고정 키를 유지한다.
+    #[test]
+    fn among_api_keys_new_conversations_go_to_the_least_used_key() {
+        let now = 1_000_000_000_000;
+        let none = HashMap::new();
+        let heavy = Candidate { api_used: 120.0, ..api_key_candidate("anthropic|apikey:aaaaaaaaaaaa", Some(FRESH)) };
+        let light = Candidate { api_used: 5.0, ..api_key_candidate("anthropic|apikey:bbbbbbbbbbbb", Some(FRESH)) };
+        let pool = [spent("sub", now), heavy.clone(), light.clone()];
+        assert_eq!(choose(&pool, "anthropic", OPUS, None, &none, &[], &[], 0.0, now), Some(2));
+        let swapped = [spent("sub", now), light, heavy];
+        assert_eq!(choose(&swapped, "anthropic", OPUS, None, &none, &[], &[], 0.0, now), Some(1));
+        let mut stuck = HashMap::new();
+        stuck.insert("s".to_owned(), Sticky { key: "anthropic|apikey:aaaaaaaaaaaa".into(), model: OPUS.into(), cwd: None, last_used: now, requests: 3 });
+        assert_eq!(choose(&swapped, "anthropic", OPUS, Some("s"), &stuck, &[], &[], 0.0, now), Some(2));
+    }
+
+    fn balanced(candidate: Candidate) -> Candidate {
+        Candidate { balanced: true, ..candidate }
+    }
+    fn proactive_key(key: &str, pace: f64, remaining_usd: f64) -> Candidate {
+        Candidate { proactive: Some(Proactive { pace, remaining_usd }), ..balanced(api_key_candidate(key, Some(FRESH))) }
+    }
+    const KEY_A: &str = "anthropic|apikey:aaaaaaaaaaaa";
+    const KEY_B: &str = "anthropic|apikey:bbbbbbbbbbbb";
+
+    /// 소비 균형: 구독이 일정보다 많이 남아 있는 새 대화는 구독이, 구독이 일정보다 빨리 닳은 새 대화만 API 허용 기간이 받는다.
+    /// 그 밖의 모드(`balanced:false`)나 선제 사용이 닫힌 키(`proactive:None`)는 구독 우선 규칙을 그대로 지킨다.
+    #[test]
+    fn expiry_balanced_gives_new_conversations_to_the_api_grant_only_when_it_is_ahead_of_every_subscription() {
+        let now = 1_000_000_000_000;
+        let none = HashMap::new();
+        let slow = balanced(candidate("sub", vec![bucket("7d", None, 90.0, 6 * DAY, now)]));
+        let busy = balanced(candidate("sub", vec![bucket("7d", None, 10.0, DAY, now)]));
+        let api = proactive_key(KEY_A, 1.2, 100.0);
+        // 구독이 일정보다 적게 남았고 API가 일정보다 덜 썼으면 API가 새 대화를 받는다.
+        assert_eq!(choose(&[slow.clone(), api.clone()], "anthropic", OPUS, None, &none, &[], &[], 0.0, now), Some(1));
+        // 구독이 더 많이 남아 있으면(리셋이 임박한 90% 잔여) 구독이 먼저다.
+        assert_eq!(choose(&[busy.clone(), api.clone()], "anthropic", OPUS, None, &none, &[], &[], 0.0, now), Some(0));
+        // 같은 입력이라도 소비 균형이 아니거나(모드), 키의 선제 사용이 닫혀 있으면(허용 기간 아님·미확인·월 상한 등) 구독만 쓴다.
+        let off_mode = Candidate { balanced: false, ..slow.clone() };
+        let api_off_mode = Candidate { balanced: false, ..api.clone() };
+        assert_eq!(choose(&[off_mode, api_off_mode], "anthropic", OPUS, None, &none, &[], &[], 0.0, now), Some(0));
+        let closed = Candidate { proactive: None, ..api.clone() };
+        assert_eq!(choose(&[slow.clone(), closed], "anthropic", OPUS, None, &none, &[], &[], 0.0, now), Some(0));
+        // API가 일정보다 느리게 쓰이는 경우(pace < 1)는 쓰지 않는다.
+        let behind = proactive_key(KEY_A, 0.9, 100.0);
+        assert_eq!(choose(&[slow.clone(), behind], "anthropic", OPUS, None, &none, &[], &[], 0.0, now), Some(0));
+        // 단가를 모르는 모델은 미확인 사용이 되므로 선제 사용을 하지 않는다.
+        assert_eq!(choose(&[slow.clone(), api.clone()], "anthropic", "mystery-model-9", None, &none, &[], &[], 0.0, now), Some(0));
+        // 구독 후보에 한도 관측이 없으면 비교할 수 없어 API로 넘기지 않는다.
+        let unknown = balanced(candidate("sub", Vec::new()));
+        assert_eq!(choose(&[unknown, api.clone()], "anthropic", OPUS, None, &none, &[], &[], 0.0, now), Some(0));
+    }
+
+    /// 선제 사용의 동시 입장은 남은 예산이 (진행 중인 API 대화 수 + 1) × 최소 예산 이상일 때만 새 대화를 받는다.
+    /// 진행 중 대화와 공급자 수동 배정은 이 판정과 무관하게 먼저 지켜진다.
+    #[test]
+    fn expiry_balanced_admission_reserves_budget_and_keeps_sticky_conversations_and_pins() {
+        let now = 1_000_000_000_000;
+        let slow = balanced(candidate("sub", vec![bucket("7d", None, 90.0, 6 * DAY, now)]));
+        let almost_out = proactive_key(KEY_A, 1.2, 4.0);
+        let none = HashMap::new();
+        assert_eq!(choose(&[slow.clone(), almost_out], "anthropic", OPUS, None, &none, &[], &[], 0.0, now), Some(0));
+        // 이미 API 대화 하나가 진행 중이면 남은 $9로는 새 대화를 열지 않는다(최소 $5 × 2).
+        let api = proactive_key(KEY_A, 1.2, 9.0);
+        let mut running = HashMap::new();
+        running.insert("api-1".to_owned(), Sticky { key: KEY_A.into(), model: OPUS.into(), cwd: None, last_used: now, requests: 1 });
+        assert_eq!(choose(&[slow.clone(), api.clone()], "anthropic", OPUS, Some("new"), &running, &[], &[], 0.0, now), Some(0));
+        // 남은 $10이면 열린다.
+        let enough = proactive_key(KEY_A, 1.2, 10.0);
+        assert_eq!(choose(&[slow.clone(), enough.clone()], "anthropic", OPUS, Some("new"), &running, &[], &[], 0.0, now), Some(1));
+        // 진행 중인 API 대화는 예산이 빠듯해도(선제 사용이 열려 있는 한) 같은 키를 유지한다.
+        assert_eq!(choose(&[slow.clone(), api.clone()], "anthropic", OPUS, Some("api-1"), &running, &[], &[], 0.0, now), Some(1));
+        // 선제 사용이 닫히면(만료·소진·미확인) 진행 중이던 대화도 구독으로 옮긴다.
+        let closed = Candidate { proactive: None, ..api.clone() };
+        assert_eq!(choose(&[slow.clone(), closed], "anthropic", OPUS, Some("api-1"), &running, &[], &[], 0.0, now), Some(0));
+        // 진행 중인 구독 대화는 API가 더 앞서도 옮기지 않는다.
+        let mut on_sub = HashMap::new();
+        on_sub.insert("s".to_owned(), Sticky { key: "sub".into(), model: OPUS.into(), cwd: None, last_used: now, requests: 4 });
+        assert_eq!(choose(&[slow.clone(), enough.clone()], "anthropic", OPUS, Some("s"), &on_sub, &[], &[], 0.0, now), Some(0));
+        // 공급자 수동 배정 계정은 새 대화에서 API보다 먼저다.
+        let pinned = Candidate { pinned: true, ..slow.clone() };
+        assert_eq!(choose(&[pinned, enough.clone()], "anthropic", OPUS, None, &none, &[], &[], 0.0, now), Some(0));
+        // 구독이 한도를 다 쓴 뒤의 기존 fallback은 소비 균형 모드에서도 같은 후보 규칙(`paid_fallback`)으로 열린다.
+        let spent_sub = balanced(spent("sub", now));
+        assert_eq!(choose(&[spent_sub, api_key_candidate(KEY_B, Some(FRESH))], "anthropic", OPUS, None, &none, &[], &[], 0.0, now), Some(1));
+    }
+
+    #[test]
+    fn api_key_is_chosen_only_after_every_subscription_is_freshly_exhausted() {
+        let now = 1_000_000_000_000;
+        let none = HashMap::new();
+        let api = api_key_candidate("anthropic|apikey:aaaaaaaaaaaa", Some(FRESH));
+        let pool = [spent("a", now), spent("b", now), api.clone()];
+        assert_eq!(choose(&pool, "anthropic", OPUS, None, &none, &[], &[], 0.0, now), Some(2));
+        // 이미 시도한 키는 다시 고르지 않는다.
+        assert_eq!(choose(&pool, "anthropic", OPUS, None, &none, &[], &["anthropic|apikey:aaaaaaaaaaaa".into()], 0.0, now), None);
+        // 정책이 꺼져 있거나(paid_fallback 없음) 상한에 닿았으면(`candidates`가 enabled=false로 내림) 키가 없는 것과 같다.
+        let off = api_key_candidate("anthropic|apikey:aaaaaaaaaaaa", None);
+        assert_eq!(choose(&[spent("a", now), off], "anthropic", OPUS, None, &none, &[], &[], 0.0, now), None);
+        let limited = Candidate { enabled: false, ..api.clone() };
+        assert_eq!(choose(&[spent("a", now), limited], "anthropic", OPUS, None, &none, &[], &[], 0.0, now), None);
+        // 단가를 모르는 모델은 키로 보내지 않는다.
+        assert_eq!(choose(&pool, "anthropic", "claude-future-9", None, &none, &[], &[], 0.0, now), None);
+        // 관측이 낡았거나(소진 관측이 신선도 밖) 리셋이 지났으면 아니다.
+        let mut old = bucket("7d", None, 100.0, DAY, now - 2 * FRESH);
+        old.observed_at = now - 2 * FRESH;
+        assert_eq!(choose(&[candidate("a", vec![old]), api.clone()], "anthropic", OPUS, None, &none, &[], &[], 0.0, now), None);
+        // 모델 전용 한도만 소진이면 키로 넘어가지 않는다(공용 한도는 남음 → 구독 후보가 이긴다).
+        let model_only = candidate("a", vec![bucket("7d", None, 20.0, 5 * DAY, now), bucket("fable", Some("fable"), 100.0, DAY, now)]);
+        assert_eq!(choose(&[model_only.clone(), api.clone()], "anthropic", "claude-fable-5-1", None, &none, &[], &[], 0.0, now), None);
+        // 같은 계정이어도 모델 전용 한도가 걸리지 않는 모델이면 구독이 받는다.
+        assert_eq!(choose(&[model_only, api.clone()], "anthropic", OPUS, None, &none, &[], &[], 0.0, now), Some(0));
+        // 일부만 소진: 남은 구독이 받는다.
+        assert_eq!(choose(&[spent("a", now), candidate("b", vec![bucket("7d", None, 50.0, 3 * DAY, now)]), api.clone()], "anthropic", OPUS, None, &none, &[], &[], 0.0, now), Some(1));
+        // 소진됐지만 일시 차단된 구독이 섞인 경우 / gateway가 죽은 구독이 있는 경우는 키가 아니라 기다린다.
+        let blocks = [Block { key: "b".into(), scope: None, until: now + 60_000, observed_at: now, reason: "test".into(), quota: false, estimate: false }];
+        let waiting = [spent("a", now), candidate("b", vec![bucket("7d", None, 50.0, 3 * DAY, now)]), api.clone()];
+        assert_eq!(choose(&waiting, "anthropic", OPUS, None, &none, &blocks, &[], 0.0, now), None);
+        let blocked_spent = [spent("a", now), spent("b", now), api.clone()];
+        // 소진된 구독에 429 차단이 걸려 있어도 신선한 소진 관측이 있으면 소진으로 본다(차단은 소진을 뒤집지 않는다).
+        assert_eq!(choose(&blocked_spent, "anthropic", OPUS, None, &none, &blocks, &[], 0.0, now), Some(2));
+        let down = [spent("a", now), Candidate { healthy: false, ..spent("b", now) }, api.clone()];
+        assert_eq!(choose(&down, "anthropic", OPUS, None, &none, &[], &[], 0.0, now), None);
+        // 배정에서 뺀 구독은 소진 판정에 넣지 않는다. 활성 구독이 모두 소진이면 키로 넘어간다.
+        let excluded = [Candidate { enabled: false, ..candidate("off", vec![bucket("7d", None, 10.0, DAY, now)]) }, spent("a", now), api.clone()];
+        assert_eq!(choose(&excluded, "anthropic", OPUS, None, &none, &[], &[], 0.0, now), Some(2));
+        // 활성 구독이 하나도 없으면 키로 넘어가지 않는다.
+        let all_off = [Candidate { enabled: false, ..spent("off", now) }, api.clone()];
+        assert_eq!(choose(&all_off, "anthropic", OPUS, None, &none, &[], &[], 0.0, now), None);
+        // 키가 막혔거나 gateway가 죽었으면 쓰지 않는다.
+        let key_blocks = [Block { key: api.key.clone(), scope: None, until: now + 60_000, observed_at: now, reason: "test".into(), quota: true, estimate: false }];
+        assert_eq!(choose(&pool, "anthropic", OPUS, None, &none, &key_blocks, &[], 0.0, now), None);
+        let key_down = [spent("a", now), Candidate { healthy: false, ..api.clone() }];
+        assert_eq!(choose(&key_down, "anthropic", OPUS, None, &none, &[], &[], 0.0, now), None);
+    }
+
+    #[test]
+    fn extra_usage_and_credits_are_tried_before_the_api_key() {
+        let now = 1_000_000_000_000;
+        let none = HashMap::new();
+        let api = api_key_candidate("anthropic|apikey:aaaaaaaaaaaa", Some(FRESH));
+        let extra = Candidate { paid_fallback: Some(FRESH), ..spent("extra", now) };
+        assert_eq!(choose(&[api.clone(), extra, spent("b", now)], "anthropic", OPUS, None, &none, &[], &[], 0.0, now), Some(1));
+        // 추가 사용량 계정이 막혔거나 한 번 시도했다면 그다음에야 키다.
+        let extra = Candidate { paid_fallback: Some(FRESH), ..spent("extra", now) };
+        assert_eq!(choose(&[api, extra, spent("b", now)], "anthropic", OPUS, None, &none, &[], &["extra".into()], 0.0, now), Some(0));
+    }
+
+    #[test]
+    fn session_stuck_to_the_api_key_returns_to_the_subscription_when_it_recovers() {
+        let now = 1_000_000_000_000;
+        let api = api_key_candidate("anthropic|apikey:aaaaaaaaaaaa", Some(FRESH));
+        let mut stickies = HashMap::new();
+        stickies.insert("s".to_owned(), Sticky { key: api.key.clone(), model: OPUS.into(), cwd: None, last_used: now, requests: 4 });
+        // 구독이 전부 소진인 동안은 키에 고정을 유지한다.
+        let exhausted_pool = [spent("a", now), api.clone()];
+        assert_eq!(choose(&exhausted_pool, "anthropic", OPUS, Some("s"), &stickies, &[], &[], 0.0, now), Some(1));
+        // 구독 한도가 회복(새 관측)되면 고정과 무관하게 구독이 이긴다.
+        let recovered = [candidate("a", vec![bucket("7d", None, 20.0, 5 * DAY, now)]), api.clone()];
+        assert_eq!(choose(&recovered, "anthropic", OPUS, Some("s"), &stickies, &[], &[], 0.0, now), Some(0));
+        // 안전 여유량 안쪽으로만 회복돼도 키보다 구독이다.
+        let in_reserve_pool = [candidate("a", vec![bucket("7d", None, 90.0, 5 * DAY, now)]), api];
+        assert_eq!(choose(&in_reserve_pool, "anthropic", OPUS, Some("s"), &stickies, &[], &[], 20.0, now), Some(0));
+    }
+
+    #[test]
+    fn several_api_keys_are_chosen_in_a_stable_order_and_skip_blocked_ones() {
+        let now = 1_000_000_000_000;
+        let none = HashMap::new();
+        let pool = [
+            spent("a", now),
+            api_key_candidate("anthropic|apikey:bbbbbbbbbbbb", Some(FRESH)),
+            api_key_candidate("anthropic|apikey:aaaaaaaaaaaa", Some(FRESH)),
+        ];
+        assert_eq!(choose(&pool, "anthropic", OPUS, None, &none, &[], &[], 0.0, now), Some(2));
+        let blocks = [Block { key: "anthropic|apikey:aaaaaaaaaaaa".into(), scope: None, until: now + 60_000, observed_at: now, reason: "test".into(), quota: false, estimate: false }];
+        assert_eq!(choose(&pool, "anthropic", OPUS, None, &none, &blocks, &[], 0.0, now), Some(1));
+    }
+
+    #[test]
+    fn classify_all_ignores_api_keys_so_waiting_hints_stay_subscription_only() {
+        let now = 1_000_000_000_000;
+        let pool = [spent("a", now), api_key_candidate("anthropic|apikey:aaaaaaaaaaaa", None)];
+        let causes = classify_all(&pool, "anthropic", OPUS, &[], now);
+        assert_eq!(causes.len(), 1);
+        assert!(summarize(&causes).is_some());
+    }
+
+    fn api_account(id: &str, used: Option<f64>, now: i64) -> Account {
+        Account {
+            id: id.into(), tool: "api".into(), provider: "anthropic".into(), enabled: true, auth_status: "authenticated".into(),
+            identity_key: Some("apikey:0123456789ab".into()), verification: "api-key".into(), can_launch: true,
+            api_credit: used.map(|used| aam_protocol::ApiCreditState { period_start: aam_adapters::api_credit::period_start(now), used_usd: used, unmetered_requests: 0, updated_at: now }),
+            ..Account::default()
+        }
+    }
+
+    #[test]
+    fn api_key_usable_requires_enabled_authenticated_and_combined_monthly_room() {
+        let now = 1_793_361_600_000; // 2026-10-30T12:00:00Z
+        let total = |accounts: &[Account]| scheduler::api_total_used(accounts, aam_adapters::api_credit::ApiProvider::Anthropic, 0.0, now);
+        let key = api_account("k", None, now);
+        assert!(api_key::usable(aam_adapters::api_credit::ApiProvider::Anthropic, &key, 0.0, 200.0));
+        assert!(api_key::usable(aam_adapters::api_credit::ApiProvider::Anthropic, &key, 199.99, 200.0));
+        assert!(!api_key::usable(aam_adapters::api_credit::ApiProvider::Anthropic, &key, 200.0, 200.0));
+        assert!(!api_key::usable(aam_adapters::api_credit::ApiProvider::Anthropic, &key, 0.0, 0.0));
+        // 상한은 모든 키의 합계다: 각각 $150인 키 둘이면 $300이라 둘 다 쓰지 않는다(키 수가 상한을 늘리지 않는다).
+        let pair = [api_account("a", Some(150.0), now), api_account("b", Some(150.0), now)];
+        assert!((total(&pair) - 300.0).abs() < 1e-9);
+        assert!(pair.iter().all(|account| !api_key::usable(aam_adapters::api_credit::ApiProvider::Anthropic, account, total(&pair), 200.0)));
+        // 구독 계정의 값은 합계에 들어가지 않고, 지난달 누적은 0으로 본다.
+        let last_month = Account { api_credit: Some(aam_protocol::ApiCreditState { period_start: aam_adapters::api_credit::period_start(now) - 86_400_000, used_usd: 500.0, unmetered_requests: 3, updated_at: now }), ..api_account("old", None, now) };
+        let mixed = [last_month, api_account("c", Some(10.0), now), Account { tool: "claude".into(), ..api_account("sub", Some(999.0), now) }];
+        assert!((total(&mixed) - 10.0).abs() < 1e-9);
+        assert!(!api_key::usable(aam_adapters::api_credit::ApiProvider::Anthropic, &Account { enabled: false, ..api_account("k", None, now) }, 0.0, 200.0));
+        assert!(!api_key::usable(aam_adapters::api_credit::ApiProvider::Anthropic, &Account { auth_status: "auth-required".into(), ..api_account("k", None, now) }, 0.0, 200.0));
+        assert!(!api_key::usable(aam_adapters::api_credit::ApiProvider::Anthropic, &Account { tool: "claude".into(), ..api_account("k", None, now) }, 0.0, 200.0));
+        assert_eq!(api_key::next_period_start(now), 1_793_491_200_000);
+    }
+
+    #[test]
+    fn api_key_response_classification() {
+        let credit = br#"{"type":"error","error":{"type":"invalid_request_error","message":"Your credit balance is too low to access the Anthropic API."}}"#;
+        assert!(api_key::credit_exhausted(aam_adapters::api_credit::ApiProvider::Anthropic, b"HTTP/1.1 400 Bad Request\r\n\r\n", credit));
+        assert!(!api_key::rejected(aam_adapters::api_credit::ApiProvider::Anthropic, b"HTTP/1.1 400 Bad Request\r\n\r\n", credit));
+        let denied = br#"{"type":"error","error":{"type":"authentication_error","message":"invalid x-api-key"}}"#;
+        assert!(api_key::rejected(aam_adapters::api_credit::ApiProvider::Anthropic, b"HTTP/1.1 401 Unauthorized\r\n\r\n", denied));
+        // 정상 스트림 본문에 같은 단어가 있어도 오류 응답이 아니면 해당하지 않는다.
+        assert!(!api_key::credit_exhausted(aam_adapters::api_credit::ApiProvider::Anthropic, b"HTTP/1.1 200 OK\r\n\r\n", b"data: {\"type\":\"text_delta\",\"text\":\"credit balance\"}\n\n"));
+        assert!(!api_key::rejected(aam_adapters::api_credit::ApiProvider::Anthropic, b"HTTP/1.1 200 OK\r\n\r\n", b"data: {\"type\":\"text_delta\",\"text\":\"authentication_error\"}\n\n"));
+        assert!(api_key::succeeded(b"HTTP/1.1 200 OK\r\n\r\n") && !api_key::succeeded(b"HTTP/1.1 429 Too Many Requests\r\n\r\n"));
+    }
+
+    fn sse_stream() -> Vec<u8> {
+        // omp는 `type`을 맨 앞에 둔 JSON을 낸다(JS 객체 삽입 순서). 본문 문자열 안의 `"usage":{`는 따옴표가 이스케이프돼 있다.
+        let done = r#"{"type":"done","reason":"stop","message":{"role":"assistant","content":[{"type":"text","text":"he said \"usage\":{\"input\":1} \\ ok"}],"api":"anthropic-messages","provider":"anthropic","model":"claude-opus-5-5","usage":{"input":1200,"output":340,"cacheRead":5000,"cacheWrite":700,"totalTokens":7240,"cost":{"input":0,"output":0,"cacheRead":0,"cacheWrite":0,"total":0}},"stopReason":"stop","timestamp":1}}"#;
+        let early = r#"{"type":"text_delta","partial":{"usage":{"input":9,"output":9,"cacheRead":9,"cacheWrite":9}}}"#;
+        format!("data: {{\"type\":\"start\"}}\n\ndata: {early}\n\ndata: {done}\n\ndata: [DONE]\n\n").into_bytes()
+    }
+    fn expected_usage() -> aam_adapters::api_credit::Usage {
+        aam_adapters::api_credit::Usage { input: 1200, output: 340, cache_read: 5000, cache_write: 700 }
+    }
+    fn chunked(body: &[u8], size: usize) -> Vec<u8> {
+        let mut out = Vec::new();
+        for part in body.chunks(size) {
+            out.extend_from_slice(format!("{:x}\r\n", part.len()).as_bytes());
+            out.extend_from_slice(part);
+            out.extend_from_slice(b"\r\n");
+        }
+        out.extend_from_slice(b"0\r\n\r\n");
+        out
+    }
+
+    #[test]
+    fn usage_scanner_reads_done_usage_across_arbitrary_read_boundaries() {
+        let body = sse_stream();
+        for chunk in [1usize, 2, 3, 7, 13, 64, 4096] {
+            // 평문 본문: 읽기 경계가 어디든 같은 값을 읽는다.
+            let mut plain = api_key::UsageScanner::new(false);
+            for part in body.chunks(chunk) { plain.feed(part); }
+            assert_eq!(plain.finish(), Some(expected_usage()), "plain read={chunk}");
+            // HTTP chunked 틀: 청크 크기와 읽기 경계가 서로 어긋나도 같다.
+            let framed = chunked(&body, 11);
+            let mut scanner = api_key::UsageScanner::new(true);
+            for part in framed.chunks(chunk) { scanner.feed(part); }
+            assert_eq!(scanner.finish(), Some(expected_usage()), "chunked read={chunk}");
+        }
+        assert!(api_key::UsageScanner::is_chunked(b"HTTP/1.1 200 OK\r\nTransfer-Encoding: chunked\r\n\r\n"));
+        assert!(!api_key::UsageScanner::is_chunked(b"HTTP/1.1 200 OK\r\nContent-Length: 3\r\n\r\n"));
+    }
+
+    #[test]
+    fn usage_scanner_ignores_non_terminal_events_and_reads_error_usage() {
+        // 종료 이벤트가 없으면(끊긴 스트림) 중간 이벤트의 usage는 쓰지 않는다.
+        let mut scanner = api_key::UsageScanner::new(false);
+        scanner.feed(b"data: {\"type\":\"start\"}\n\ndata: {\"type\":\"text_delta\",\"usage\":{\"input\":9,\"output\":9}}\n\n");
+        assert_eq!(scanner.finish(), None);
+        // error 이벤트의 usage도 읽는다. cache 필드가 없으면 0이다.
+        let mut scanner = api_key::UsageScanner::new(false);
+        scanner.feed(br#"data: {"type":"error","reason":"error","error":{"stopReason":"error","usage":{"input":10,"output":2},"errorMessage":"x"}}"#);
+        assert_eq!(scanner.finish(), Some(aam_adapters::api_credit::Usage { input: 10, output: 2, cache_read: 0, cache_write: 0 }));
+        // 종료 이벤트 줄이 매우 길어도 뒤쪽 usage를 읽고 메모리는 상한을 넘기지 않는다.
+        let filler = "x".repeat(2_000_000);
+        let line = format!("data: {{\"type\":\"done\",\"message\":{{\"content\":[{{\"type\":\"text\",\"text\":\"{filler}\"}}],\"usage\":{{\"input\":3,\"output\":4,\"cacheRead\":5,\"cacheWrite\":6}}}}}}\n\n");
+        let mut scanner = api_key::UsageScanner::new(false);
+        for part in line.as_bytes().chunks(8192) { scanner.feed(part); }
+        assert_eq!(scanner.finish(), Some(aam_adapters::api_credit::Usage { input: 3, output: 4, cache_read: 5, cache_write: 6 }));
+        // 깨진 usage는 읽지 않는다(미확인 요청으로 센다).
+        let mut scanner = api_key::UsageScanner::new(false);
+        scanner.feed(b"data: {\"type\":\"done\",\"message\":{\"usage\":{\"input\":\"many\"}}}\n\n");
+        assert_eq!(scanner.finish(), None);
+    }
+
+    #[test]
+    fn usage_line_marks_api_credit_requests_and_still_parses() {
+        let key = account_key("apikey:0123456789ab");
+        let line = format_usage_line(1_700_000_000_000, "anthropic", OPUS, "abcd1234", true, 3, &key, false, true);
+        assert!(line.ends_with(&format!("-> {key} api-credit")), "{line}");
+        let (_, _, _, account, _, turn) = parse_usage_line(&line).unwrap();
+        assert_eq!(account, key.as_str());
+        assert!(turn);
+        let both = format_usage_line(1, "anthropic", OPUS, "-", true, 0, &key, true, true);
+        assert!(both.ends_with(" reserve-fallback api-credit"));
+        assert!(parse_usage_line(&both).is_some());
+        assert!(!format_usage_line(1, "anthropic", OPUS, "-", true, 0, &key, false, false).contains("api-credit"));
+    }
+
+    fn register_api(harness: &Harness, id: &str, key: &str) {
+        let mut account = api_account(id, None, now_ms());
+        account.identity_key = Some(aam_adapters::api_credit::identity_key(aam_adapters::api_credit::ApiProvider::Anthropic, key));
+        {
+            let store = harness.bridge.service.lock().unwrap();
+            crate::store::save_account(&store.connection, &account).unwrap();
+        }
+        let source = api_key::ApiKeySource::new(id.into(), aam_adapters::api_credit::ApiProvider::Anthropic, account.identity_key.clone().unwrap(), Arc::downgrade(&harness.bridge.service)).with_key(key);
+        harness.bridge.api_sources.lock().unwrap().insert(id.into(), Arc::new(source));
+    }
+
+    /// 프로세스 환경을 바꾸는 테스트와 그 환경을 읽는 API 키 테스트가 동시에 돌면 서로의 결과를 바꾼다.
+    /// 기본 `cargo test`(병렬)에서도 안전하도록 둘 다 이 잠금을 잡는다.
+    static AUTH_ENV: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
+    /// 서비스 환경에 인증·엔드포인트 재정의가 있으면 키를 내주지 않고, API 키 gateway도 띄우지 않는다.
+    #[test]
+    fn api_key_path_refuses_auth_override_env_without_serving_or_spawning() {
+        let _env = AUTH_ENV.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
+        let h = harness(Duration::from_secs(5));
+        let key = format!("sk-ant-api03-{}", "c".repeat(40));
+        register_api(&h, "api-c", &key);
+        for (name, value) in [("ANTHROPIC_BASE_URL", "http://127.0.0.1:9/steal"), ("CLAUDE_CODE_USE_BEDROCK", "enabled-marker"), ("ANTHROPIC_AUTH_TOKEN", "other-token")] {
+            std::env::set_var(name, value);
+            let response = get(h.native, "/native/api-c/v1/snapshot", Some(&h.native_token));
+            let refresh = post(h.native, "/native/api-c/v1/credential/1/refresh", &h.native_token, "");
+            let gateway = Gateway {
+                provider: "anthropic".into(), identity: aam_adapters::api_credit::identity_key(aam_adapters::api_credit::ApiProvider::Anthropic, &key), email: String::new(), org: String::new(),
+                native_account: Some("api-c".into()), api_credit: true, native_port: 1, port: 4998, child: None, spawned_at: 0, unhealthy_until: 0,
+            };
+            let spawned = spawn_gateway(&h.bridge.paths, &gateway, &BTreeSet::new());
+            std::env::remove_var(name);
+            assert!(response.starts_with("HTTP/1.1 409 "), "{name}: {response}");
+            assert!(response.contains("AUTH_OVERRIDE_CONFLICT"), "{name}: {response}");
+            assert!(refresh.starts_with("HTTP/1.1 409 "), "{name}: {refresh}");
+            for body in [&response, &refresh] {
+                assert!(!body.contains(&key) && !body.contains("api_key") && !body.contains(value), "{name} leaked");
+            }
+            let error = spawned.err().expect("API key gateway must not spawn with an auth override");
+            assert!(error.starts_with("AUTH_OVERRIDE_CONFLICT") && error.contains(name) && !error.contains(value), "{error}");
+        }
+        // 재정의를 지우면 같은 소스가 다시 키를 내준다(상태를 고치거나 지우지 않았다).
+        assert!(get(h.native, "/native/api-c/v1/snapshot", Some(&h.native_token)).starts_with("HTTP/1.1 200 "));
+        assert_eq!(crate::store::account(&h.bridge.service.lock().unwrap().connection, "api-c").unwrap().auth_status, "authenticated");
+        wait_idle(&h.bridge);
+    }
+
+    #[test]
+    fn api_key_source_serves_an_api_key_snapshot_and_marks_rejected_keys() {
+        let _env = AUTH_ENV.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
+        let h = harness(Duration::from_secs(5));
+        let key = format!("sk-ant-api03-{}", "t".repeat(40));
+        register_api(&h, "api-1", &key);
+        // 공개 listener에는 노출되지 않고, 공개 토큰은 내부 listener에서 거부된다.
+        assert!(get(h.public, "/native/api-1/v1/snapshot", Some(&h.native_token)).starts_with("HTTP/1.1 404 "));
+        assert!(get(h.native, "/native/api-1/v1/snapshot", Some(&h.public_token)).starts_with("HTTP/1.1 401 "));
+        let response = get(h.native, "/native/api-1/v1/snapshot", Some(&h.native_token));
+        assert!(response.starts_with("HTTP/1.1 200 "), "{response}");
+        let body: Value = serde_json::from_str(response.split_once("\r\n\r\n").unwrap().1).unwrap();
+        assert_eq!(body["generation"], 1);
+        assert_eq!(body["refresher"]["enabled"], false);
+        let rows = body["credentials"].as_array().unwrap();
+        assert_eq!(rows.len(), 1);
+        assert_eq!(rows[0]["id"], 1);
+        assert_eq!(rows[0]["provider"], "anthropic");
+        assert!(rows[0]["identityKey"].is_null());
+        assert_eq!(rows[0]["credential"], json!({"type":"api_key","key":key}));
+        assert!(rows[0]["rotatesInMs"].is_null());
+        assert_eq!(rows[0]["blocks"], json!([]));
+        // 같은 세대로 되물으면(long-poll 아님) 즉시 같은 세대를 돌려준다.
+        let again = get(h.native, "/native/api-1/v1/snapshot", Some(&h.native_token));
+        assert!(again.contains("\"generation\":1"));
+        // 제어 요청은 no-op 200이다.
+        for (route, method) in [("/native/api-1/v1/credential/1/block", "POST"), ("/native/api-1/v1/credential/1/block", "DELETE"), ("/native/api-1/v1/credential/1/blocks", "DELETE")] {
+            let request = format!("{method} {route} HTTP/1.1\r\nHost: localhost\r\nAuthorization: Bearer {}\r\nContent-Length: 2\r\nConnection: close\r\n\r\n{{}}", h.native_token);
+            assert!(exchange(h.native, &request).starts_with("HTTP/1.1 200 "), "{method} {route}");
+        }
+        let refreshed = post(h.native, "/native/api-1/v1/credential/1/refresh", &h.native_token, "");
+        assert!(refreshed.starts_with("HTTP/1.1 200 ") && refreshed.contains("\"type\":\"api_key\""));
+        // 키 거절이 아닌 disable 사유는 계정을 건드리지 않는다.
+        assert!(post(h.native, "/native/api-1/v1/credential/1/disable", &h.native_token, "{\"cause\":\"replaced by newer credential\"}").starts_with("HTTP/1.1 200 "));
+        assert_eq!(crate::store::account(&h.bridge.service.lock().unwrap().connection, "api-1").unwrap().auth_status, "authenticated");
+        // 401(키 거절) 사유면 계정을 auth-required로 표시하고 이후 키를 내주지 않는다.
+        assert!(post(h.native, "/native/api-1/v1/credential/1/disable", &h.native_token, "{\"cause\":\"authentication_error: invalid x-api-key\"}").starts_with("HTTP/1.1 200 "));
+        assert_eq!(crate::store::account(&h.bridge.service.lock().unwrap().connection, "api-1").unwrap().auth_status, "auth-required");
+        let denied = get(h.native, "/native/api-1/v1/snapshot", Some(&h.native_token));
+        assert!(denied.starts_with("HTTP/1.1 401 "), "{denied}");
+        assert!(!denied.contains(&key));
+        wait_idle(&h.bridge);
+    }
+
+    #[test]
+    fn api_usage_is_recorded_against_the_key_account_without_a_key_in_the_log() {
+        let _env = AUTH_ENV.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
+        let h = harness(Duration::from_secs(5));
+        let key = format!("sk-ant-api03-{}", "u".repeat(40));
+        register_api(&h, "api-2", &key);
+        let identity = aam_adapters::api_credit::identity_key(aam_adapters::api_credit::ApiProvider::Anthropic, &key);
+        h.bridge.state().gateways.push(Gateway {
+            provider: "anthropic".into(), identity: identity.clone(), email: String::new(), org: String::new(),
+            native_account: Some("api-2".into()), api_credit: true, native_port: 1, port: 4999, child: None, spawned_at: 0, unhealthy_until: 0,
+        });
+        let gateway_key = format!("anthropic|{identity}");
+        assert_eq!(h.bridge.api_account_id(&gateway_key).as_deref(), Some("api-2"));
+        h.bridge.record_api_usage(&gateway_key, OPUS, Some(aam_adapters::api_credit::Usage { input: 1_000_000, output: 0, cache_read: 0, cache_write: 0 }));
+        h.bridge.record_api_usage(&gateway_key, "claude-future-9", Some(aam_adapters::api_credit::Usage { input: 1, output: 1, cache_read: 0, cache_write: 0 }));
+        h.bridge.record_api_usage(&gateway_key, OPUS, None);
+        let state = crate::store::account(&h.bridge.service.lock().unwrap().connection, "api-2").unwrap().api_credit.unwrap();
+        assert!((state.used_usd - 4.0).abs() < 1e-9, "{}", state.used_usd);
+        assert_eq!(state.unmetered_requests, 2);
+        h.bridge.state().gateways.clear();
     }
 
 }

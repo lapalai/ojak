@@ -7,6 +7,7 @@ import type { LocalUsageReport, UsageRange } from "./local-usage";
 import type { LoginRequest, LoginStatus } from "./login";
 import { parseAllocation } from "./allocation";
 import type { ToolAllocation } from "./allocation";
+import type { BusyReport, RestartReport } from "./serviceRestart";
 
 export function toApiError(value: unknown): ApiError {
   let candidate = value;
@@ -153,8 +154,12 @@ export const restartAfterUpdate = () => native<void>("restart_after_update");
 export interface ServiceVersionReport { appVersion: string; serviceVersion: string | null; state: "current" | "older" | "newer" | "unknown"; mismatch: boolean }
 /// 앱과 실행 중인 서비스의 버전 비교(읽기 전용). 서비스가 응답하지 않으면 오류.
 export const serviceVersionStatus = () => native<ServiceVersionReport>("service_version_status");
-/// 사용자가 눌렀을 때만 부른다. 쓰는 중인 세션이 있으면 서비스가 `SESSION_BUSY`로 거절하고 아무것도 바꾸지 않는다.
-export const serviceRestart = () => native<string>("service_restart");
+export type { BusyReport, OmpBusy, RestartReport, RestartStatus, ToolBusy } from "./serviceRestart";
+/// 서비스를 다시 시작하면 끊길 작업의 개수(관리 CLI 대화·omp 응답). 읽기 전용이다. 계정·경로·프롬프트는 없다.
+export const serviceBusyPreview = () => native<BusyReport>("service_busy_preview");
+/// 사용자가 눌렀을 때만 부른다. `force`는 화면이 끊길 작업 목록을 보여 주고 사용자가 확인한 뒤에만 참이다.
+/// `force`가 거짓이고 끊길 작업이 있으면 아무것도 바꾸지 않고 `status: "busy"`로 그 작업을 돌려준다.
+export const serviceRestart = (force: boolean) => native<RestartReport>("service_restart", { force });
 /// PC에 남은 omp·Claude CLI·Codex 사용 기록의 토큰·API 환산 비용. 네이티브가 색인한 기록을 기간으로 조회하며, 읽는 중이면 `scanning`이 true인 부분 결과를 준다.
 export const localUsage = async (range: UsageRange): Promise<LocalUsageReport> => parseLocalUsageReport(await native<unknown>("local_usage", { sinceMs: range.sinceMs, untilMs: range.untilMs }));
 

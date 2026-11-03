@@ -6,7 +6,13 @@ import { fileURLToPath } from 'node:url';
 import { spawnSync } from 'node:child_process';
 
 const root = resolve(dirname(fileURLToPath(import.meta.url)), '..');
-const platforms = { 'darwin-arm64': 'omp-darwin-arm64', 'win32-x64': 'omp-windows-x64.exe' };
+// Native build outputs keep the upstream names; releases publish them under v2 names only.
+// Releases must never contain `omp-compatible.json` (schema 1) or the unversioned `omp-darwin-arm64` /
+// `omp-windows-x64.exe` names: deployed 18.12 updaters install those without checking the Ojak service version.
+const built = { 'darwin-arm64': 'omp-darwin-arm64', 'win32-x64': 'omp-windows-x64.exe' };
+const platforms = { 'darwin-arm64': 'omp-v2-darwin-arm64', 'win32-x64': 'omp-v2-windows-x64.exe' };
+export const MANIFEST_NAME = 'omp-compatible-v2.json';
+export const MINIMUM_OJAK_SERVICE = '0.22.2';
 
 export async function packageCompatibleOmp(source, destination, platform = `${process.platform}-${process.arch}`, run = spawnSync) {
   const asset = platforms[platform];
@@ -23,7 +29,7 @@ export async function packageCompatibleOmp(source, destination, platform = `${pr
   runChecked('bun', ['install', '--frozen-lockfile'], source);
   runChecked('bun', ['run', 'build:native'], source);
   runChecked('bun', ['scripts/ci-release-build-binaries.ts', '--targets', platform], source);
-  const output = join(source, 'packages/coding-agent/binaries', asset);
+  const output = join(source, 'packages/coding-agent/binaries', built[platform]);
   const reported = runChecked(output, ['--version'], source, true).trim();
   if (!reported.split(/\s+/).some(word => word === expected || word === `omp/${expected}`)) throw new Error(`Built omp did not report ${expected}`);
   await mkdir(destination, { recursive: true });
@@ -42,8 +48,8 @@ export async function generateCompatibleManifest(directory, version) {
     for await (const chunk of createReadStream(file)) hash.update(chunk);
     entries[platform] = { asset, sha256: hash.digest('hex'), size: info.size };
   }
-  const manifest = { schemaVersion: 1, admissionProtocol: 1, version, platforms: entries };
-  await writeFile(join(directory, 'omp-compatible.json'), `${JSON.stringify(manifest, null, 2)}\n`);
+  const manifest = { schemaVersion: 2, admissionProtocol: 1, version, minimumOjakService: MINIMUM_OJAK_SERVICE, platforms: entries };
+  await writeFile(join(directory, MANIFEST_NAME), `${JSON.stringify(manifest, null, 2)}\n`);
   return manifest;
 }
 
