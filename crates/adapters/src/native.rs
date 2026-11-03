@@ -49,7 +49,9 @@ pub(crate) fn blank_account(tool: &str, profile: &Path, binary: &Path, label: &s
         auth_status: "unverified".into(),
         verification: "configured".into(),
         enabled: true,
-        max_concurrency: 1,
+        // Claude는 같은 로그인으로 여러 터미널 대화를 공식 지원하므로 새 계정은 개수 제한 없이 시작한다.
+        // 다른 도구는 공유 프로필 동시 실행이 확인되지 않아 1로 둔다(`supports_shared_profile_concurrency`).
+        max_concurrency: if tool == "claude" { 0 } else { 1 },
         last_checked_at: now_ms(),
         ..Account::default()
     }
@@ -443,6 +445,12 @@ pub(crate) fn codex_usage(
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn new_claude_accounts_allow_parallel_sessions_but_codex_stays_single() {
+        let path = Path::new("/sanitized/profile");
+        assert_eq!(blank_account("claude", path, Path::new("/sanitized/claude"), "계정").max_concurrency, 0);
+        assert_eq!(blank_account("codex", path, Path::new("/sanitized/codex"), "계정").max_concurrency, 1);
+    }
     #[test]
     fn native_subscription_and_workspace_are_both_required() {
         let path = Path::new("/sanitized/profile");
