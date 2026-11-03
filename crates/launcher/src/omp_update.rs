@@ -593,9 +593,14 @@ mod tests {
         }
     }
 
-    /// `omp --version`만 흉내 내는 실행 파일(쉘 스크립트). 네이티브 검사는 `resolve_target`에서만 하므로 여기서는 통과시킨다.
+    /// `omp --version`만 흉내 내는 실행 파일. Unix는 쉘 스크립트, Windows는 같은 이름으로 실행되는 배치 파일이라
+    /// 파일 이름(`omp`·`omp.cmd`)이 플랫폼마다 다르다. 네이티브 검사는 `resolve_target`에서만 하므로 여기서는 통과시킨다.
     fn fake_omp(version: &str) -> Vec<u8> {
-        format!("#!/bin/sh\necho 'omp/{version}'\n").into_bytes()
+        if cfg!(windows) {
+            format!("@echo omp/{version}\r\n").into_bytes()
+        } else {
+            format!("#!/bin/sh\necho 'omp/{version}'\n").into_bytes()
+        }
     }
 
     struct Fixture {
@@ -608,7 +613,7 @@ mod tests {
             Self { dir: dir.canonicalize().unwrap() }
         }
         fn omp(&self, version: &str) -> PathBuf {
-            let path = self.dir.join("omp");
+            let path = self.dir.join(if cfg!(windows) { "omp.cmd" } else { "omp" });
             fs::write(&path, fake_omp(version)).unwrap();
             #[cfg(unix)]
             {
