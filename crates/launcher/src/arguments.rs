@@ -731,6 +731,81 @@ pub fn is_interactive(tool: &str, args: &[OsString]) -> bool {
     true
 }
 
+/// 한 번만 실행하는 비대화형 실행인지. API 키는 이 경우에만 쓴다.
+/// Claude는 `-p`/`--print`, Codex는 첫 위치 인수가 `exec`·`e`·`review`인 실행이다. 대화형 `codex`·`codex resume`·`codex exec resume`은 아니다
+/// (이어 하기는 그 대화를 시작한 구독 계정의 기록이 필요하고, 대화형에는 키를 넘기지 않는다).
+/// `is_interactive`와 달리 읽을 수 없는 인수나 `--output-format`만 있는 경우는 비대화형으로 치지 않는다(키를 쓰지 않는 쪽이 안전).
+pub fn non_interactive(tool: &str, args: &[OsString]) -> bool {
+    match tool {
+        "claude" if !is_interactive(tool, args) => {}
+        "codex" if !is_interactive(tool, args) => return codex_one_shot(args),
+        _ => return false,
+    }
+    let mut index = 0;
+    while index < args.len() {
+        let Some(text) = args[index].to_str() else {
+            return false;
+        };
+        if !text.starts_with('-') || text.len() < 2 || text == "--" {
+            return false;
+        }
+        let name = text.split_once('=').map_or(text, |(key, _)| key);
+        if matches!(name, "--print" | "-p") {
+            return true;
+        }
+        if !text.contains('=') && takes_option_value(tool, name) {
+            index += 1;
+        }
+        index += 1;
+    }
+    false
+}
+
+/// Codex 한 번짜리 실행: 첫 위치 인수가 `exec`·`e`·`review`이고, 그 뒤에 이어 하기 하위 명령(`resume`)이 없다.
+fn codex_one_shot(args: &[OsString]) -> bool {
+    let mut index = 0;
+    while index < args.len() {
+        let Some(text) = args[index].to_str() else {
+            return false;
+        };
+        if text == "--" {
+            return false;
+        }
+        if text.starts_with('-') && text.len() > 1 {
+            let name = text.split_once('=').map_or(text, |(key, _)| key);
+            if !text.contains('=') && takes_option_value("codex", name) {
+                index += 1;
+            }
+            index += 1;
+            continue;
+        }
+        if !matches!(text, "exec" | "e" | "review") {
+            return false;
+        }
+        // 하위 명령 뒤 첫 위치 인수가 `resume`이면 이어 하기다.
+        let mut rest = index + 1;
+        while rest < args.len() {
+            let Some(next) = args[rest].to_str() else {
+                return false;
+            };
+            if next == "--" {
+                return true;
+            }
+            if next.starts_with('-') && next.len() > 1 {
+                let name = next.split_once('=').map_or(next, |(key, _)| key);
+                if !next.contains('=') && takes_option_value("codex", name) {
+                    rest += 1;
+                }
+                rest += 1;
+                continue;
+            }
+            return next != "resume";
+        }
+        return true;
+    }
+    false
+}
+
 /// 대화 기록을 남기지 않는 실행인지. 기록이 없으면 한도 소진 증거도, 이어 열 대화도 없다.
 pub fn is_ephemeral(args: &[OsString]) -> bool {
     args.iter()
@@ -780,6 +855,26 @@ mod tests {
     use super::*;
     fn args(values: &[&str]) -> Vec<OsString> {
         values.iter().map(OsString::from).collect()
+    }
+
+    #[test]
+    fn non_interactive_is_true_only_for_claude_print_and_codex_one_shot_runs() {
+        assert!(non_interactive("claude", &args(&["-p", "질문"])));
+        assert!(non_interactive("claude", &args(&["--print", "질문"])));
+        assert!(non_interactive("claude", &args(&["--model", "sonnet", "-p", "질문"])));
+        assert!(non_interactive("claude", &args(&["--output-format", "json", "-p", "질문"])));
+        assert!(!non_interactive("claude", &args(&[])));
+        assert!(!non_interactive("claude", &args(&["질문"])));
+        assert!(!non_interactive("claude", &args(&["--model", "sonnet"])));
+        // `--` 뒤의 -p는 프롬프트 문장이다.
+        assert!(!non_interactive("claude", &args(&["--", "-p"])));
+        // Codex는 `exec`·`e`·`review`만 한 번짜리 실행이다. 대화형·이어 하기·`-p`(프로필)·읽을 수 없는 인수는 아니다.
+        for one_shot in [&["exec", "질문"][..], &["e", "질문"], &["review"], &["exec", "--json", "--skip-git-repo-check", "질문"], &["--model", "gpt-6-sol", "exec", "질문"], &["exec", "--", "resume"]] {
+            assert!(non_interactive("codex", &args(one_shot)), "{one_shot:?}");
+        }
+        for interactive in [&[][..], &["질문"], &["resume"], &["exec", "resume", "--last", "계속"], &["exec", "--model", "x", "resume"], &["-p", "질문"], &["login"], &["--", "exec"]] {
+            assert!(!non_interactive("codex", &args(interactive)), "{interactive:?}");
+        }
     }
 
     #[test]

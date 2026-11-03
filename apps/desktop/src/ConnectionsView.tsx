@@ -7,6 +7,7 @@ import { ProviderLoginDialog, loginProviderNames } from "./LoginDialog";
 import { loginProviderOf } from "./login";
 import type { LoginProvider, LoginRequest } from "./login";
 import { absoluteTime, bucketState, canonicalProvider, nextReset, occupiedStates, privacyText, providerNames, relativeTime, toolNames, useAction } from "./state";
+import { ApiKeyPanel } from "./ApiKeys";
 import type { Account, AccountQuotaSummary, ApiError, HostConnections, Snapshot } from "./types";
 import { canRelogin, choiceLabel } from "./overview";
 import { hostNote, t } from "./i18n";
@@ -224,6 +225,7 @@ export function ConnectionsView({ snapshot, masked, online, refreshing, onRefres
     <div className="top"><div><h1 id="connect-title">{t("nav.connect")}</h1><div className="sub">{t("connect.subtitle")}</div></div></div>
     <OmpPanel masked={masked} accounts={snapshot.accounts} online={online} onReload={onReload} />
     <ToolPanel tool="claude" snapshot={snapshot} masked={masked} online={online} shimInstalled={shim("claude")} onAdd={onAdd} onReload={onReload} />
+    <ApiKeyPanel snapshot={snapshot} masked={masked} online={online} onReload={onReload} />
     <ToolPanel tool="codex" snapshot={snapshot} masked={masked} online={online} shimInstalled={shim("codex")} onAdd={onAdd} onReload={onReload} />
     <HostsPanel connections={connections} loadError={loadError} masked={masked} online={online} onIntegration={onIntegration} onRefresh={loadHosts} />
     <div className="panel">

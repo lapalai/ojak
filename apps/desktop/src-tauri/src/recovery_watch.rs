@@ -451,6 +451,7 @@ mod tests {
             expiring: None,
             credits: None,
             extra_usage: None,
+            api_credit: None,
         }
     }
 
@@ -469,6 +470,9 @@ mod tests {
             last_refresh_at: None,
             takeovers: Vec::new(),
             quota_summaries,
+            api_credit_removed: None,
+            openai_api_removed: None,
+            api_credit_grant: None,
             service_version: None,
         }
     }

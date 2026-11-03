@@ -260,9 +260,12 @@ pub(crate) fn claude_usage_buckets(
     };
     let mut buckets: Vec<QuotaBucket> = Vec::new();
     for limit in limits {
-        let Some(used) = limit.get("percent").and_then(Value::as_f64).and_then(percent) else {
+        // 값을 읽지 못한 항목도 한도가 "있다"는 사실은 남긴다. 특히 5시간(session) 항목을 건너뛰면 주간만 남은 관측이
+        // "5시간 한도가 사라졌다"로 오해되어 다른 관측 행의 소진 기록까지 지울 수 있다. 읽지 못한 값은 `unknown`이다.
+        let used = limit.get("percent").and_then(Value::as_f64).and_then(percent);
+        if used.is_none() && limit.get("kind").and_then(Value::as_str) != Some("session") {
             continue;
-        };
+        }
         let (upstream, label, period, model): (String, String, &str, Option<String>) =
             match limit.get("kind").and_then(Value::as_str) {
                 Some("session") => ("anthropic:5h".into(), "Claude 5 Hour".into(), "5시간", None),
@@ -298,9 +301,11 @@ pub(crate) fn claude_usage_buckets(
             })
             .and_then(|at| i64::try_from(at.unix_timestamp_nanos() / 1_000_000).ok())
             .filter(|at| *at > 0);
-        let status = if resets_at.is_some_and(|reset| reset <= observed_at) {
+        let status = if used.is_none() {
+            "unknown"
+        } else if resets_at.is_some_and(|reset| reset <= observed_at) {
             "stale"
-        } else if used >= 100.0 {
+        } else if used.is_some_and(|used| used >= 100.0) {
             "exhausted"
         } else {
             "known"
@@ -309,7 +314,7 @@ pub(crate) fn claude_usage_buckets(
             id,
             label,
             model,
-            used_percent: Some(used),
+            used_percent: used,
             resets_at,
             observed_at,
             source: CLAUDE_USAGE_SOURCE.into(),

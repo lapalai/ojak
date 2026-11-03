@@ -6,7 +6,9 @@ import type { CSSProperties } from "react";
 import { ActionFeedback, Badge, Busy, Dot, ErrorMessage, Modal, Sparkline } from "./components";
 import { AccountDetails, AccountRow, accountName, accountText, formatPercent } from "./AccountRow";
 import type { AccountDetailsProps } from "./AccountRow";
+import { MODE_TEXT, allocationModeOf } from "./allocation-mode";
 import { AllocationSettings, CreditSettings } from "./AllocationSettings";
+import { ApiCreditStatus } from "./ApiKeys";
 import { FirstSuccessNotice, OnboardingCard } from "./OnboardingCard";
 import { getRecoveryWatches, rpc, setRecoveryWatch, toApiError } from "./api";
 import { canonicalProvider, fullTime, groupAccounts, isCurrentGroup, projectName, providerNames, relativeTime, timeZoneLabel, useAction, useBridge, useCharacters, useWindowVisible } from "./state";
@@ -114,7 +116,10 @@ export function UsageView({ snapshot, masked, online, refreshing, onReload, onRe
     }));
     const find = (provider: string, account: string) => rows.find(row => row.provider === provider && (row.group ? row.group.keys.includes(account.toLowerCase()) : row.account?.toLowerCase() === account.toLowerCase()));
     const synthesize = (provider: string, account: string): UsageRow => {
-      const row: UsageRow = { key: `${provider}:${account}`, provider, account, group: null, cells: [], quotas: [], verdict: null, detail: [], notes: [t("usage.note.unregisteredBridgeAccount")], off: false, unknown: false, alias: null, sortKey: "" };
+      // API 키는 구독 그룹에서 제외되지만, 등록된 gateway identity와 연결된 별도 계정이다.
+      const apiKey = snapshot.accounts.find(item => item.tool === "api" && canonicalProvider(item.provider) === provider && item.identityKey === account);
+      const verdict = apiKey ? snapshot.quotaSummaries?.find(summary => summary.accountIds.includes(apiKey.id)) ?? null : null;
+      const row: UsageRow = { key: `${provider}:${account}`, provider, account, group: null, cells: [], quotas: [], verdict, detail: [], notes: [t(apiKey ? "apiKey.title" : "usage.note.unregisteredBridgeAccount")], off: apiKey ? !apiKey.enabled : false, unknown: false, alias: apiKey?.label ?? null, sortKey: "" };
       rows.push(row);
       return row;
     };
@@ -215,7 +220,7 @@ export function UsageView({ snapshot, masked, online, refreshing, onReload, onRe
     row, provider: row.provider, masked, online, now, reserve, work: workByRow[row.key], tools: snapshot.tools,
     bridgeOn, usageUnavailable, usageError: error, periodLabel, peak, pinned: pinnedGroup(row.provider, row),
     canPin: Boolean(row.group && pinMember(row.group, row.provider)) && !row.unknown, pinPending: pinAction.pending,
-    onChoose: () => chooseAccount(row.provider), expiringBoosted: Boolean(snapshot.policy.expiringBoost) && (snapshot.policy.allocationMode ?? "smart") === "smart",
+    onChoose: () => chooseAccount(row.provider), expiringBoosted: Boolean(snapshot.policy.expiringBoost) && allocationModeOf(snapshot.policy.allocationMode) === "smart",
     refreshing, onRefresh, onConnect, accounts: snapshot.accounts, onReload, watch,
   });
   const pickerRows = picker ? rows.filter(row => row.provider === picker.provider && row.group && !row.unknown && pinMember(row.group, picker.provider)) : [];
@@ -235,8 +240,9 @@ export function UsageView({ snapshot, masked, online, refreshing, onReload, onRe
       <button type="button" className="text-button" title={t("usage.dashboard.workHelp")} onClick={() => setFilter("running")}><span className={runningCount ? "live inline" : "dot idle"} />{t("usage.dashboard.running", { count: runningCount })}</button>
       {attentionCount > 0 && <button type="button" className="text-button" onClick={() => setFilter("attention")}>{t("usage.dashboard.attention", { count: attentionCount })}</button>}
       </> : <span><span className="dot idle" />{t("usage.dashboard.offline")}</span>}
-      <button type="button" className={`paid-summary${snapshot.policy.useCreditsAfterLimit || snapshot.policy.useExtraUsageAfterLimit ? " enabled" : ""}`} aria-label={t("paid.settings")} onClick={() => setSettings("paid")}><ShieldCheck size={14} />{t(snapshot.policy.useCreditsAfterLimit || snapshot.policy.useExtraUsageAfterLimit ? "usage.dashboard.paidOn" : "usage.dashboard.paidOff")}<ChevronRight size={13} /></button>
+      <button type="button" className={`paid-summary${snapshot.policy.useCreditsAfterLimit || snapshot.policy.useExtraUsageAfterLimit || snapshot.policy.useApiCreditAfterLimit ? " enabled" : ""}`} aria-label={t("paid.settings")} onClick={() => setSettings("paid")}><ShieldCheck size={14} />{t(snapshot.policy.useCreditsAfterLimit || snapshot.policy.useExtraUsageAfterLimit || snapshot.policy.useApiCreditAfterLimit ? "usage.dashboard.paidOn" : "usage.dashboard.paidOff")}<ChevronRight size={13} /></button>
     </div>
+    <ApiCreditStatus snapshot={snapshot} />
     {online && <FirstSuccessNotice snapshot={snapshot} masked={masked} />}
     {online && isTauri() && <OnboardingCard snapshot={snapshot} request={setupRequest} revision={setupRevision} onAdd={onAdd} onSetup={onSetup} />}
     <div className="usage-toolbar">
@@ -329,7 +335,7 @@ export function UsageView({ snapshot, masked, online, refreshing, onReload, onRe
       <form onSubmit={event => { event.preventDefault(); if (!online || !pinValid || pickerStale || draftPin === picker.initial) return; void (async () => { if (await setPin(picker.provider, draftPin || null, picker.revision)) setPicker(null); })(); }}>
         <div className="modal-body"><fieldset className="account-choices" disabled={!online || pinAction.pending}>
           <legend className="sr-only">{t("usage.pin.modeAria", { provider: providerNames[picker.provider] })}</legend>
-          <label className={draftPin === "" ? "chosen" : ""}><input type="radio" name="account-choice" value="" aria-label={t("usage.dashboard.auto")} aria-describedby="usage-choice-auto-hint" checked={draftPin === ""} onChange={() => setDraftPin("")} /><span><strong>{t("usage.dashboard.auto")}</strong><small id="usage-choice-auto-hint">{t((snapshot.policy.allocationMode ?? "smart") === "priority" ? "policy.mode.priorityDesc" : "policy.mode.smartDesc")}</small></span></label>
+          <label className={draftPin === "" ? "chosen" : ""}><input type="radio" name="account-choice" value="" aria-label={t("usage.dashboard.auto")} aria-describedby="usage-choice-auto-hint" checked={draftPin === ""} onChange={() => setDraftPin("")} /><span><strong>{t("usage.dashboard.auto")}</strong><small id="usage-choice-auto-hint">{t(MODE_TEXT[allocationModeOf(snapshot.policy.allocationMode)].desc)}</small></span></label>
           {pickerRows.map(row => {
             const member = pinMember(row.group!, picker.provider)!;
             const chosen = row.group!.members.some(account => account.id === draftPin);

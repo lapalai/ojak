@@ -29,6 +29,7 @@ aam explain --tool codex
 | `CAPACITY_RESERVED` | Another session holds a slot, or Ojak has not confirmed that it ended. |
 | `MODEL_LIMIT_GUARD` | A model-specific limit is exhausted. This is a warning when the CLI chooses the model; explicitly requesting that model can exclude the account. |
 | `RESERVE_DEPRIORITIZED` / `RESERVE_FALLBACK` | The account is within the safety reserve. Ojak prefers other eligible accounts with more quota, but can use the remaining quota if none are available. These are priority explanations, not a hard ban. |
+| `USE_BEFORE_RESET` | Only in the "Use before it expires" mode. The account is within the safety reserve, but its weekly-style limit resets within the "Resetting soon" window (48 hours by default), so the reserve would be lost at the reset anyway. New sessions take this account first, soonest reset first. Running sessions never move, so Ojak cannot guarantee the last percent is used if no new work starts before the reset. Used-up, blocked, signed-out accounts and accounts over 85% of their 5-hour limit are never chosen this way. The 5-hour rule applies only where a 5-hour limit exists; some plans (verified Claude Ultra, ChatGPT Pro) have none and are judged by their weekly limit alone. |
 
 ### Continue after a limit is reached
 
@@ -85,7 +86,7 @@ If in-app updating is unavailable, download the new DMG or setup.exe from [Relea
 
 ### After a manual reinstall
 
-- **Mac:** replacing `Ojak.app` does not necessarily replace the running service. Open the app and use **Restart service** if a version-mismatch notice appears. The safe restart refuses while managed sessions are active or uncertain and warns about recent omp activity. The CLI equivalent is `aam service restart`; check the result with `aam service status` or `aam setup --check` (`serviceVersionMismatch`).
+- **Mac:** replacing `Ojak.app` does not necessarily replace the running service. Open the app and use **Restart service** if a version-mismatch notice appears. Before restarting it lists what would be interrupted (omp responses in progress, Claude/Codex terminal conversations) and asks first; with nothing running it restarts directly. Restarting cuts omp responses in progress, while terminal conversations keep running. The CLI equivalent is `aam service restart` (it refuses with the same list; add `--force` to go ahead); check the result with `aam service status` or `aam setup --check` (`serviceVersionMismatch`).
 - **Windows:** run setup.exe as the same normal user. It checks sessions, stops the app-owned service, replaces and verifies the files, and restarts the service if it was registered to start at sign-in. Quit Orca and omp first.
 
 For maintainers only, a direct macOS restart is `launchctl kickstart -k gui/$(id -u)/ai.aam.service`, followed by `aam integration install`. Unlike the safe restart action, this does **not** check managed sessions first.

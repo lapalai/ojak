@@ -29,6 +29,7 @@ aam explain --tool codex
 | `CAPACITY_RESERVED` | 다른 세션이 실행 자리를 쓰고 있거나, 그 세션이 끝났는지 확인되지 않았어요. |
 | `MODEL_LIMIT_GUARD` | 특정 모델의 한도가 소진됐어요. CLI가 모델을 정하는 요청에서는 경고이며, 그 모델을 직접 지정하면 계정이 제외될 수 있어요. |
 | `RESERVE_DEPRIORITIZED` / `RESERVE_FALLBACK` | 안전 여유량 안쪽이에요. 여유 있는 다른 계정을 먼저 쓰되, 없다면 남은 한도를 사용할 수 있어요. 배정을 무조건 막는 조건이 아니라 우선순위 설명입니다. |
+| `USE_BEFORE_RESET` | ‘만료 전에 쓰기’ 방식에서만 나와요. 안전 여유량 안쪽이지만 주간 같은 긴 한도가 ‘곧 리셋’ 시간(기본 48시간) 안에 풀리므로 여유분이 어차피 리셋 때 사라져요. 새 세션이 이 계정을 먼저 받고 리셋이 빠른 계정이 앞서요. 실행 중인 세션은 옮기지 않으므로 리셋 전에 새 작업이 시작되지 않으면 남은 한도를 끝까지 쓴다고 보장할 수 없어요. 소진·차단·로그아웃 계정이나 5시간 한도를 85% 넘게 쓴 계정은 이렇게 고르지 않아요. 5시간 한도 규칙은 5시간 한도가 있는 계정에만 적용돼요. 확인된 Claude Ultra·ChatGPT Pro처럼 5시간 한도가 없는 플랜은 주간 한도만 봐요. |
 
 ### 한도를 다 쓴 대화 이어가기
 
@@ -85,7 +86,7 @@ aam omp-broker connect && aam omp-bridge connect
 
 ### 직접 다시 설치한 뒤
 
-- **Mac:** `Ojak.app`만 바꾸면 실행 중인 서비스는 예전 버전일 수 있어요. 앱을 열고 버전 불일치 안내에서 **서비스 다시 시작**을 누르세요. 안전 재시작은 관리 세션이 진행 중이거나 종료가 불확실하면 멈추고, 최근 omp 사용이 있으면 경고해요. CLI에서는 `aam service restart`를 쓰고 `aam service status` 또는 `aam setup --check`의 `serviceVersionMismatch`로 확인할 수 있어요.
+- **Mac:** `Ojak.app`만 바꾸면 실행 중인 서비스는 예전 버전일 수 있어요. 앱을 열고 버전 불일치 안내에서 **서비스 다시 시작**을 누르세요. 다시 시작하기 전에 끊길 작업(진행 중인 omp 응답, Claude·Codex 터미널 대화)을 목록으로 보여 주고 먼저 물어봐요. 쓰는 작업이 없으면 바로 다시 시작해요. omp 응답은 끊기고 터미널 대화는 계속돼요. CLI에서는 `aam service restart`(같은 목록을 보여 주고 멈춤, 진행하려면 `--force`)를 쓰고 `aam service status` 또는 `aam setup --check`의 `serviceVersionMismatch`로 확인할 수 있어요.
 - **Windows:** 같은 일반 사용자로 setup.exe를 실행하세요. 세션 검사 → 앱 소유 서비스 종료 → 파일 교체·확인 뒤, 로그인 자동 실행으로 등록돼 있었다면 서비스를 다시 켭니다. Orca·omp는 먼저 종료하세요.
 
 운영자가 Mac 서비스를 직접 재시작할 때는 `launchctl kickstart -k gui/$(id -u)/ai.aam.service` 다음에 `aam integration install`을 실행합니다. 이 방법은 안전 재시작과 달리 **관리 세션을 먼저 검사하지 않아요.**

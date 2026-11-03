@@ -149,9 +149,9 @@ fn service_missing_failure() -> VerifyFailure {
 fn service_version_failure(service: Option<&str>) -> VerifyFailure {
     let shown = service.unwrap_or("");
     let text = if service.is_some() {
-        format!("실행 중인 서비스(버전 {shown})가 앱(버전 {})과 달라요. 쓰는 중인 세션이 없을 때 `aam service restart`를 실행하거나 앱의 [서비스 다시 시작]을 눌러 주세요.", service_version::APP_VERSION)
+        format!("실행 중인 서비스(버전 {shown})가 앱(버전 {})과 달라요. `aam service restart`를 실행하거나 앱의 [서비스 다시 시작]을 눌러 주세요. 쓰는 작업이 있으면 끊길 목록을 보여 주고 먼저 확인해요.", service_version::APP_VERSION)
     } else {
-        format!("실행 중인 서비스가 버전을 알리지 못하는 예전 서비스예요. 앱은 {} 버전이에요. 쓰는 중인 세션이 없을 때 `aam service restart`를 실행하거나 앱의 [서비스 다시 시작]을 눌러 주세요.", service_version::APP_VERSION)
+        format!("실행 중인 서비스가 버전을 알리지 못하는 예전 서비스예요. 앱은 {} 버전이에요. `aam service restart`를 실행하거나 앱의 [서비스 다시 시작]을 눌러 주세요. 쓰는 작업이 있으면 끊길 목록을 보여 주고 먼저 확인해요.", service_version::APP_VERSION)
     };
     notice(
         "service-version-mismatch",

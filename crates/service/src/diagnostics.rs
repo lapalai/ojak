@@ -18,7 +18,7 @@ fn category<'a>(input: &str, allowed: &'a [&'a str]) -> &'a str {
 }
 
 fn tool(input: &str) -> &str {
-    category(input, &["claude", "codex", "omp"])
+    category(input, &["claude", "codex", "omp", "api"])
 }
 
 fn provider(input: &str) -> &str {
@@ -33,6 +33,7 @@ fn verification(input: &str) -> &str {
             "configured",
             "preflight-verified",
             "request-verified",
+            "api-key",
         ],
     )
 }

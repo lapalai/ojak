@@ -193,6 +193,18 @@ impl ExtraUsageState {
             && now.saturating_sub(self.observed_at) <= freshness
     }
 }
+/// Ojak에 등록한 Claude Console API 키 계정(`tool == "api"`)의 이번 달 추정 사용액. 키 값은 담지 않는다.
+/// 금액은 Ojak이 응답 usage와 공개 단가로 계산한 추정치이며 Console 청구액과 다를 수 있다.
+#[derive(Debug, Clone, Serialize, Deserialize, Default, PartialEq)]
+#[serde(rename_all = "camelCase")]
+pub struct ApiCreditState {
+    /// 집계 기간(UTC 달력월) 시작 시각(ms).
+    pub period_start: i64,
+    pub used_usd: f64,
+    /// usage를 읽지 못해 금액에 넣지 못한 요청 수. 0이 아니면 실제 사용액이 더 클 수 있다.
+    pub unmetered_requests: u64,
+    pub updated_at: i64,
+}
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, PartialOrd, Ord)]
 #[serde(rename_all = "camelCase")]
 pub struct OmpCredentialPin {
@@ -230,6 +242,9 @@ pub struct Account {
     /// 원본 OMP usage identity의 scope/case를 보존한 관측용 digest입니다.
     #[serde(default)]
     pub omp_credential_pins: Vec<OmpCredentialPin>,
+    /// `tool == "api"` 계정의 이번 달 추정 사용액. 구독 계정에는 없다.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub api_credit: Option<ApiCreditState>,
 }
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
 #[serde(rename_all = "camelCase")]
@@ -284,6 +299,110 @@ pub enum AllocationMode {
     #[default]
     Smart,
     Priority,
+    /// 곧 사라질 허용량(구독 주간 한도·사용자가 확인한 API 크레딧 기간)을 새 대화에서 먼저 쓴다. 진행 중 대화·고정 계정·안전 장치는 그대로다.
+    #[serde(rename = "expiry-balanced")]
+    ExpiryBalanced,
+}
+/// 사용자가 직접 확인해 입력한 API 크레딧 허용 기간·예산(모든 API 키가 같은 Console 조직 잔액을 나눠 쓰는 하나의 합산 풀).
+/// Anthropic Console 잔액을 조회한 값이 아니다. `budget_usd`는 저장 시점에 사용자가 확인한 남은 금액이고, Ojak은 저장 뒤
+/// 자신이 기록한 추정 사용액만 뺀다. 정본은 항상 Console이며 auto-reload가 꺼져 있어야 한다.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+#[serde(rename_all = "camelCase")]
+pub struct ApiCreditGrant {
+    pub id: String,
+    pub budget_usd: f64,
+    pub starts_at: i64,
+    pub expires_at: i64,
+    pub confirmed_at: i64,
+    #[serde(default = "manual_source")]
+    pub source: String,
+    /// 만료일의 근거. 저장된 값이 없으면(이전 버전) 직접 확인한 정확한 날짜(`exact`)다.
+    #[serde(default)]
+    pub expiry_source: ExpirySource,
+    /// `expiry_source == billing-estimate`일 때 추정에 쓴 결제 정보. 이후 결제 정보가 바뀌어도 이 값과 `expires_at`은 그대로다.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub billing_estimate: Option<ApiCreditBillingBasis>,
+}
+fn manual_source() -> String {
+    "manual".into()
+}
+/// 허용 기간 만료일의 근거. `billing-estimate`는 Console에서 확인한 날짜가 아니라 구독 결제일에서 추정한 값이다.
+#[derive(Debug, Clone, Copy, Default, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "kebab-case")]
+pub enum ExpirySource {
+    #[default]
+    Exact,
+    BillingEstimate,
+}
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "lowercase")]
+pub enum BillingCycle {
+    Monthly,
+    Annual,
+}
+/// 사용자가 직접 입력한 구독 결제 정보(Anthropic 구독 계정 하나에 연결). 결제 API를 조회한 값이 아니다.
+/// 월 결제만 만료일 추정의 근거가 되며, 연 결제의 갱신일은 월 크레딧 만료일로 쓰지 않는다.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub struct ApiCreditBilling {
+    pub account_id: String,
+    pub cycle: BillingCycle,
+    pub next_billing_at: i64,
+    pub updated_at: i64,
+}
+/// 추정 만료일을 만들 때 쓴 결제 정보(계정·다음 결제 시각).
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub struct ApiCreditBillingBasis {
+    pub account_id: String,
+    pub next_billing_at: i64,
+}
+/// 스냅샷의 결제 정보 상태. `estimated_expires_at`은 월 결제이고 다음 결제일이 미래일 때만 있으며, 서비스는 날짜를 굴려 앞으로 옮기지 않는다.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub struct ApiCreditBillingStatus {
+    pub account_id: String,
+    pub cycle: BillingCycle,
+    pub next_billing_at: i64,
+    pub estimated_expires_at: Option<i64>,
+    /// 추정 만료일이 없는 이유: `ANNUAL`·`DATE_PASSED`·`ACCOUNT_INVALID`.
+    pub estimate_blocked_by: Option<String>,
+}
+/// 서비스가 계산하는 허용 기간 상태. 저장하지 않고 스냅샷마다 다시 계산한다.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+#[serde(rename_all = "camelCase")]
+pub struct ApiCreditGrantStatus {
+    pub id: Option<String>,
+    #[serde(default)]
+    pub expiry_source: ExpirySource,
+    #[serde(default)]
+    pub billing_estimate: Option<ApiCreditBillingBasis>,
+    /// 추정 만료일의 근거가 된 결제 정보가 지금 저장된 결제 정보와 달라졌다. 허용 기간 자체는 바뀌지 않는다.
+    #[serde(default)]
+    pub estimate_drift: bool,
+    #[serde(default)]
+    pub billing: Option<ApiCreditBillingStatus>,
+    pub source: String,
+    /// `unknown`(입력 없음)·`upcoming`·`active`·`exhausted`·`expired`.
+    pub state: String,
+    pub budget_usd: Option<f64>,
+    pub used_usd: f64,
+    pub remaining_usd: Option<f64>,
+    pub starts_at: Option<i64>,
+    pub expires_at: Option<i64>,
+    pub unmetered_requests: u64,
+    /// 사용량을 읽지 못한 요청이 있어 남은 금액을 믿을 수 없다. 선제 사용은 막힌다.
+    pub unmetered: bool,
+    pub per_day_usd: Option<f64>,
+    pub monthly_limit_reached: bool,
+    pub proactive: ApiCreditProactive,
+}
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+#[serde(rename_all = "camelCase")]
+pub struct ApiCreditProactive {
+    pub allowed: bool,
+    /// `MODE`·`OPT_IN_OFF`·`GRANT_NONE`·`GRANT_PENDING`·`GRANT_EXPIRED`·`GRANT_EXHAUSTED`·`GRANT_UNMETERED`·`NO_KEY`·`MONTHLY_LIMIT`·`AHEAD_OF_PACE`.
+    pub blocked_by: Option<String>,
 }
 /// 구버전 저장 정책에는 이 필드가 없습니다. 자동 인계를 기본값으로 읽습니다.
 fn enabled() -> bool {
@@ -327,6 +446,37 @@ pub struct Policy {
     /// 구독 한도가 남은 계정이 하나라도 있으면 켜져 있어도 추가 사용량 계정은 고르지 않는다.
     #[serde(default)]
     pub use_extra_usage_after_limit: bool,
+    /// 구독 한도를 모두 쓴 뒤 Ojak에 등록한 Claude Console API 키(월 API 크레딧)로 이어 쓸지. 기본 꺼짐.
+    /// omp 브릿지 요청과 비대화형 `claude -p`에만 쓴다. 대화형 Claude Code에는 크레딧이 적용되지 않아 쓰지 않는다.
+    #[serde(default)]
+    pub use_api_credit_after_limit: bool,
+    /// API 크레딧 fallback의 월(UTC 달력월) 추정 사용액 상한(USD). Ojak의 보조 장치이며 실제 청구 상한이 아니다.
+    #[serde(default = "default_api_credit_monthly_limit_usd")]
+    pub api_credit_monthly_limit_usd: f64,
+    /// 사용자가 확인한 API 크레딧 허용 기간·예산. 없으면 기간을 모르는 상태이며 선제 사용은 없다.
+    #[serde(default)]
+    pub api_credit_grant: Option<ApiCreditGrant>,
+    /// 소비 균형 모드에서 구독이 남아 있어도 새 대화에 API 크레딧을 선제적으로 쓸지. 기본 꺼짐.
+    /// `use_api_credit_after_limit`·유효한 허용 기간·모델 단가·사용량 확인이 모두 필요하다.
+    #[serde(default)]
+    pub balance_api_credit: bool,
+    /// 사용자가 직접 입력한 구독 결제 정보. 없으면 결제일 기반 추정 만료일은 없다. 이 값을 바꿔도 저장된 허용 기간은 바뀌지 않는다.
+    #[serde(default)]
+    pub api_credit_billing: Option<ApiCreditBilling>,
+    /// 구독 한도를 모두 쓴 뒤 Ojak에 등록한 OpenAI API 키로 이어 쓸지. 기본 꺼짐. Claude의 `use_api_credit_after_limit`와 따로다.
+    /// OpenAI API 사용은 포함 크레딧 없이 실제 요금이 청구된다. omp 브릿지(`ojak-codex`)와 비대화형 `codex exec`·`codex review`에만 쓰고
+    /// 대화형 `codex`에는 쓰지 않는다. 구독이 남아 있으면(선제·소비 균형 사용 없음) 켜져 있어도 쓰지 않는다.
+    #[serde(default)]
+    pub use_openai_api_after_limit: bool,
+    /// OpenAI API 키 fallback의 월(UTC 달력월) 추정 사용액 상한(USD). Ojak의 보조 장치이며 OpenAI가 강제하는 청구 상한이 아니다.
+    #[serde(default = "default_openai_api_monthly_limit_usd")]
+    pub openai_api_monthly_limit_usd: f64,
+}
+fn default_api_credit_monthly_limit_usd() -> f64 {
+    200.0
+}
+fn default_openai_api_monthly_limit_usd() -> f64 {
+    50.0
 }
 fn default_expiring_window_hours() -> u32 {
     48
@@ -352,6 +502,13 @@ impl Default for Policy {
             expiring_min_percent: default_expiring_min_percent(),
             use_credits_after_limit: false,
             use_extra_usage_after_limit: false,
+            use_api_credit_after_limit: false,
+            api_credit_monthly_limit_usd: default_api_credit_monthly_limit_usd(),
+            api_credit_grant: None,
+            api_credit_billing: None,
+            balance_api_credit: false,
+            use_openai_api_after_limit: false,
+            openai_api_monthly_limit_usd: default_openai_api_monthly_limit_usd(),
         }
     }
 }
@@ -489,6 +646,16 @@ pub struct Snapshot {
     /// 서비스가 계산한 계정 그룹별 한도 요약. 특정 실행의 허용 여부는 route.explain으로 확인한다.
     #[serde(default)]
     pub quota_summaries: Vec<AccountQuotaSummary>,
+    /// 연결을 해제한 API 키(`tool == "api"`)가 이번 달(UTC 달력월)에 쓴 추정 사용액의 원장. 키를 지워도 월 상한 합계에서 빠지지 않게 서비스가
+    /// 계정 행과 따로 보관한다. 계정 목록의 `apiCredit` 합계에 더해 쓴다. 값이 없으면(이전 서비스·지운 키 없음) 0으로 본다.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub api_credit_removed: Option<ApiCreditState>,
+    /// 연결을 해제한 OpenAI API 키가 이번 달(UTC 달력월)에 쓴 추정 사용액의 원장(`api_credit_removed`와 같은 뜻, 공급자만 다르다).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub openai_api_removed: Option<ApiCreditState>,
+    /// 서비스가 계산한 API 크레딧 허용 기간 상태. 입력이 없으면 `state: "unknown"`.
+    #[serde(default)]
+    pub api_credit_grant: Option<ApiCreditGrantStatus>,
     /// 서비스 실행 파일의 버전. 이 필드가 없던 이전 서비스는 `None`이라 앱이 '알 수 없음'(재시작 필요)으로 본다.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub service_version: Option<String>,
@@ -512,6 +679,27 @@ pub struct AccountQuotaSummary {
     /// Claude 추가 사용량(USD) 표시용 사실. 구독 한도를 쓰는 중이면 `active`가 false다.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub extra_usage: Option<ExtraUsageSummary>,
+    /// API 키(`tool == "api"`) 묶음의 표시 사실. 공급자는 `provider`가 가린다. kind는 `api-credit`(지금 배정 중) 또는 `available`(대기).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub api_credit: Option<ApiCreditSummary>,
+}
+/// API 키 표시 사실. 금액은 Ojak 추정치(USD)다.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+#[serde(rename_all = "camelCase")]
+pub struct ApiCreditSummary {
+    /// 이 키 묶음의 공급자(`anthropic`·`openai`). 이전 서비스는 없으므로 `anthropic`으로 읽는다.
+    #[serde(default = "anthropic_provider")]
+    pub provider: String,
+    /// 구독 한도가 모두 소진돼 지금 새 요청이 이 키로 배정되는 상태.
+    pub active: bool,
+    pub used_usd: f64,
+    pub limit_usd: f64,
+    pub limit_reached: bool,
+    /// 금액에 넣지 못한 요청이 있어 실제 사용액이 더 클 수 있는지.
+    pub unmetered: bool,
+}
+fn anthropic_provider() -> String {
+    "anthropic".into()
 }
 /// 신선한 관측에서 켜져 있는 Claude 추가 사용량의 표시 사실. 금액은 USD뿐이다.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
@@ -561,6 +749,9 @@ pub struct LaunchIntent {
     /// 원래 계정과 같은 실제 계정은 배정에서 뺀다. 대화 기록 복사는 실행기가 한다.
     #[serde(default)]
     pub continue_elsewhere: bool,
+    /// 실행기가 확인한 비대화형 실행(`claude -p` 등). API 크레딧 fallback은 이 값이 true일 때만 고른다.
+    #[serde(default)]
+    pub non_interactive: bool,
 }
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
@@ -592,6 +783,9 @@ pub struct LeaseGrant {
     /// 구독 한도가 남은 계정이 없어 추가 사용량 fallback으로 배정했는지.
     #[serde(default)]
     pub extra_usage_fallback: bool,
+    /// 구독 한도가 남은 계정이 없어 Ojak에 등록한 API 키(월 API 크레딧)로 배정했는지.
+    #[serde(default)]
+    pub api_credit_fallback: bool,
 }
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]

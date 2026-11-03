@@ -32,7 +32,7 @@ jobs:
           set -eu
           swift --version
           swift --version | python3 -c 'import re,sys; text=sys.stdin.read(); match=re.search(r"Swift version (\d+)",text); sys.exit(0 if match and int(match.group(1)) >= 6 else "Swift 6 or newer is required")'
-          curl -fsSL https://bun.sh/install | bash -s 'bun-v1.4.3'
+          curl -fsSL https://bun.sh/install | bash -s 'bun-v1.4.4'
           echo "$HOME/.bun/bin" >> "$GITHUB_PATH"
           corepack enable
           brew install sevenzip

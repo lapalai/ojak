@@ -237,6 +237,7 @@ pub fn run_cli(paths: &Paths, tool: &str, args: Vec<OsString>) -> Result<ExitSta
         native_session_id: None,
         adopted: false,
         continue_elsewhere: false,
+        non_interactive: arguments::non_interactive(tool, &args),
     };
     run_inner(paths, intent, args.clone(), Some(args))
 }
@@ -726,7 +727,8 @@ fn run_once(
         std::env::remove_var("AAM_PARENT_CAPABILITY");
         Some(run_inner(paths, intent, native_args, original_args).map(RunStep::Finished))
     };
-    let intent = intent_checked(intent)?;
+    let mut intent = intent_checked(intent)?;
+    intent.non_interactive = arguments::non_interactive(&intent.tool, &native_args);
     // 관리 실행이 불가능해도 사용자의 실행을 막지 않기 위해 원본 인수를 남겨 둡니다.
     let fallback = original_args
         .clone()
@@ -762,14 +764,35 @@ fn run_once(
         }
         (Err(error), _) => return retry_unparented(&error).unwrap_or(Err(error)),
     };
+    let api_grant = grant.api_credit_fallback;
+    // API 키 grant는 그 키의 공급자 도구(Claude 키 → claude, OpenAI 키 → codex)에만 쓴다.
+    let key_tool = aam_adapters::api_credit::ApiProvider::of(&grant.account.provider).map(|provider| provider.tool());
+    let tool_matches = if api_grant {
+        grant.account.tool == aam_adapters::api_credit::API_TOOL && key_tool == Some(intent.tool.as_str())
+    } else {
+        grant.account.tool == intent.tool
+    };
     if grant.session.state == "PREPARED"
-        && grant.account.tool == intent.tool
+        && api_grant
+        && tool_matches
+        && !intent.account_id.as_ref().is_some_and(|id| id != &grant.account.id)
+        && !intent.non_interactive
+    {
+        // API 키는 비대화형 실행에만 쓴다. 서비스가 잘못 배정했어도 키를 넣지 않고 예약을 풀어 준다.
+        abort(paths, &grant, "api-credit-interactive-refused");
+        return Err(ApiError::new(
+            "INVALID_PARAMS",
+            "API 키는 비대화형 실행(claude -p, codex exec·codex review)에만 쓸 수 있어요. 실행하지 않았어요.",
+        ));
+    }
+    if grant.session.state == "PREPARED"
+        && tool_matches
         && !intent.account_id.as_ref().is_some_and(|id| id != &grant.account.id)
     {
         announce_chosen_account(paths, &intent, &grant);
     }
     if grant.session.state != "PREPARED"
-        || grant.account.tool != intent.tool
+        || !tool_matches
         || intent
             .account_id
             .as_ref()
@@ -781,6 +804,9 @@ fn run_once(
         ));
     }
     let prepared = (|| {
+        if api_grant {
+            return prepare_api_credit(paths, &intent, &grant);
+        }
         // 서비스 응답의 binary_path를 그대로 실행하지 않는다. 이 사용자가 `aam integration install`로
         // 기록한 원본 CLI(integration.json)와 같은 실행 파일일 때만 계획을 세우고 identity 확인을 한다.
         let registered = install::registered_native(paths, &intent.tool)?;
@@ -913,7 +939,8 @@ fn run_once(
         ));
     }
     // cmux가 기록하는 PID는 supervisor가 아니라 exec 후에도 유지되는 실제 native PID입니다.
-    let mut command = if intent.tool == "claude" && std::env::var_os("CMUX_CLAUDE_PID").is_some() {
+    // API 크레딧 실행에는 구독 wrapper 문맥(AAM_CLAUDE_ROOT_*)이 없어 cmux 재실행 경로를 쓰지 않는다.
+    let mut command = if intent.tool == "claude" && !api_grant && std::env::var_os("CMUX_CLAUDE_PID").is_some() {
         let launcher = std::env::current_exe().map_err(exec_error)?;
         let mut command = Command::new(launcher);
         command.arg("--claude-native-exec").arg(program);
@@ -998,6 +1025,14 @@ fn run_once(
                     .flatten()
             });
             let tree_confirmed = outcome.background_processes.as_ref().is_some_and(Vec::is_empty);
+            if grant.api_credit_fallback {
+                // 키로 나간 요청의 정확한 사용량은 읽지 않는다(stdout을 가로채지 않는다). 미확인 실행으로만 센다.
+                // OpenAI 키는 미확인 실행이 하나라도 있으면 이번 달 더는 쓰지 않는다(서비스 판정). 실패해도 다른 키·계정으로 재시도하지 않는다.
+                let model = if intent.model.is_empty() { NATIVE_DEFAULT_MODEL } else { intent.model.as_str() };
+                if lifecycle_call(paths, "apiCredit.record", json!({"sessionId":grant.session.id,"capability":grant.capability,"accountId":grant.account.id,"model":model,"usage":null})).is_err() {
+                    eprintln!("aam: API 키 사용을 기록하지 못했어요. 이 실행은 월 누적액에 반영되지 않았을 수 있어요.");
+                }
+            }
             let released = lifecycle_call(paths, "lease.release", json!({"sessionId":grant.session.id,"capability":grant.capability,"exitCode":code,"reason":reason,"sessionPersisted":session_persisted,"backgroundProcesses":outcome.background_processes,"nativeSessionId":discovered}))
                 .and_then(decode::<Session>);
             if released.is_err() {
@@ -1036,6 +1071,83 @@ fn run_once(
             Err(failure.error)
         }
     }
+}
+
+/// API 키 실행 계획(키는 인수로 받는다). Keychain·파일시스템·서비스를 건드리지 않아 단위 시험이 된다.
+/// 사용자 환경·설정 검사는 호출자가 부모 환경에 대해 먼저 한다. Claude 키는 `claude -p`, OpenAI 키는 `codex exec`·`codex review`에만 쓴다.
+fn api_credit_plan(
+    account: &Account,
+    intent: &LaunchIntent,
+    cwd: &str,
+    native_session_id: Option<&str>,
+    registered: &Path,
+    key: &str,
+) -> Result<(aam_protocol::LaunchPlan, aam_protocol::IdentityEvidence), ApiError> {
+    let provider = aam_adapters::api_credit::ApiProvider::of(&account.provider);
+    if account.tool != aam_adapters::api_credit::API_TOOL || provider.is_none_or(|provider| provider.tool() != intent.tool) || !intent.non_interactive {
+        return Err(ApiError::new(
+            "INVALID_PARAMS",
+            "API 키는 비대화형 실행(claude -p, codex exec·codex review)에만 쓸 수 있어요. 실행하지 않았어요.",
+        ));
+    }
+    let mut native_intent = intent.clone();
+    native_intent.cwd = cwd.to_owned();
+    native_intent.resume_session_id = intent
+        .resume_session_id
+        .as_ref()
+        .and_then(|_| native_session_id.map(str::to_owned));
+    let (mut plan, evidence) = aam_adapters::build_api_credit_plan(account, &native_intent, registered, key)?;
+    // `--session-id`는 Claude에만 있다. Codex는 시작 때 대화 ID를 정하지 않는다.
+    if intent.tool == "claude" && intent.resume_session_id.is_none() {
+        if let Some(native_id) = native_session_id {
+            plan.args.extend(["--session-id".into(), native_id.to_owned()]);
+        }
+    }
+    Ok((plan, evidence))
+}
+
+/// 키 계정 grant의 실행 준비. 구독 프로필·identity probe는 쓰지 않고 키 지문으로 확인한다.
+/// 사용자 환경의 인증 재정의(`ANTHROPIC_API_KEY`·`OPENAI_API_KEY`·`CODEX_API_KEY` 등)와 기본 프로필 설정은 키를 읽기 전에 부모 환경에 대해 검사한다.
+/// 충돌이 있으면 고치지 않고 `AUTH_OVERRIDE_CONFLICT`로 멈춘다. Codex 키는 `CODEX_API_KEY`로 이 자식 프로세스에만 넣고 `~/.codex/auth.json`은 읽지도 바꾸지도 않는다.
+fn prepare_api_credit(
+    paths: &Paths,
+    intent: &LaunchIntent,
+    grant: &LeaseGrant,
+) -> Result<(aam_protocol::LaunchPlan, PathBuf, ProcessIdentity, aam_protocol::IdentityEvidence), ApiError> {
+    let provider = aam_adapters::api_credit::ApiProvider::of(&grant.account.provider)
+        .filter(|provider| provider.tool() == intent.tool)
+        .ok_or_else(|| ApiError::new("ACCOUNT_MISMATCH", "이 API 키는 이 도구에 쓸 수 없어요. 실행하지 않았어요."))?;
+    let registered = install::registered_native(paths, provider.tool())?;
+    let home = aam_protocol::user_home()
+        .ok_or_else(|| ApiError::new("HOME_MISSING", "원본 CLI의 기본 프로필 위치를 확인하지 못했어요."))?;
+    let profile = match provider {
+        aam_adapters::api_credit::ApiProvider::Anthropic => home.join(".claude"),
+        // 사용자가 CODEX_HOME을 지정했으면 그 폴더가 이 실행의 프로필이다(check_inherited_profile이 같은 값으로 확인한다).
+        aam_adapters::api_credit::ApiProvider::OpenAi => std::env::var_os("CODEX_HOME").filter(|value| !value.is_empty()).map(PathBuf::from).unwrap_or_else(|| home.join(".codex")),
+    };
+    // 부모 환경의 인증·엔드포인트 재정의가 있으면 키를 읽기 전에 멈춘다(자식 환경에서 지우고 진행하지 않는다).
+    aam_adapters::check_api_credit_env(provider)?;
+    aam_adapters::check_api_credit_context(provider, &profile, Path::new(&grant.session.cwd))?;
+    let key = aam_adapters::api_credit::load_key(&grant.account.id)?.ok_or_else(|| {
+        ApiError::new("API_KEY_MISSING", "등록한 API 키를 시스템 보안 저장소에서 찾지 못했어요. 키를 다시 등록해 주세요.")
+    })?;
+    let (plan, evidence) = api_credit_plan(
+        &grant.account,
+        intent,
+        &grant.session.cwd,
+        grant.session.native_session_id.as_deref(),
+        &registered,
+        &key,
+    )?;
+    let program = install::native_program(Path::new(&plan.program))?;
+    if program != registered || plan.account.id != grant.account.id {
+        return Err(ApiError::new(
+            "IDENTITY_MISMATCH",
+            "실행 계획이 선택한 계정 또는 등록된 원본 CLI와 일치하지 않습니다.",
+        ));
+    }
+    let supervisor = process_identity(std::process::id())?;
+    Ok((plan, program, supervisor, evidence))
 }
 
 fn next_handoff(paths: &Paths, grant: &LeaseGrant, chain: &handoff::Chain) -> Result<LaunchIntent, ApiError> {
@@ -1081,6 +1193,7 @@ pub fn continue_elsewhere(paths: &Paths, tool: Option<String>, session: Option<S
         native_session_id: None,
         adopted: false,
         continue_elsewhere: false,
+        non_interactive: false,
     };
     let snapshot = fresh_snapshot(paths)?;
     let original = match session {
@@ -1392,6 +1505,10 @@ enum LaunchNotice {
     Credits,
     /// 구독 한도가 남은 계정이 없어 Claude 추가 사용량(API 요금)으로 배정했다.
     ExtraUsage,
+    /// 구독 한도가 남은 계정이 없어 등록한 Claude API 키(월 API 크레딧)로 실행한다.
+    ApiCredit,
+    /// 구독 한도가 남은 계정이 없어 등록한 OpenAI API 키로 `codex exec`·`codex review`를 실행한다. 실제 요금이 청구된다.
+    OpenAiApi,
 }
 
 /// 앱이 보여주는 계정 이름. 가림이 켜져 있으면 이메일을 넣지 않는다.
@@ -1469,6 +1586,8 @@ fn launch_announcement(label: &str, email: Option<&str>, masked: bool, notice: L
         LaunchNotice::PinFallback => " 직접 고른 계정을 쓸 수 없어 바꿨어요.",
         LaunchNotice::Credits => " 구독 한도를 다 써서 크레딧을 쓰고 있어요. 과금될 수 있어요.",
         LaunchNotice::ExtraUsage => " 구독 한도를 다 써서 추가 사용량(API 요금)을 쓰고 있어요. 과금될 수 있어요.",
+        LaunchNotice::ApiCredit => " Claude 구독 한도를 모두 써서 등록한 API 키(월 API 크레딧)로 실행해요. Console의 auto-reload가 꺼져 있어야 추가 과금이 없어요.",
+        LaunchNotice::OpenAiApi => " Codex 구독 한도를 모두 써서 등록한 OpenAI API 키로 실행해요. OpenAI API 사용은 포함 크레딧 없이 실제 요금이 청구돼요.",
     };
     format!("aam: {name} 계정으로 실행해요.{why}")
 }
@@ -1489,10 +1608,19 @@ fn privacy_masked(paths: &Paths) -> bool {
 }
 
 fn announce_chosen_account(paths: &Paths, intent: &LaunchIntent, grant: &LeaseGrant) {
-    if !user_terminal() {
+    // 과금 경로가 바뀌는 안내는 stdout이 파이프여도 stderr가 터미널이면 보여 준다(stdout을 건드리지 않는다).
+    let api_notice = grant.api_credit_fallback && {
+        use std::io::IsTerminal;
+        std::io::stderr().is_terminal()
+    };
+    if !user_terminal() && !api_notice {
         return;
     }
-    let notice = if grant.credits_fallback {
+    let notice = if grant.api_credit_fallback && grant.account.provider == "openai" {
+        LaunchNotice::OpenAiApi
+    } else if grant.api_credit_fallback {
+        LaunchNotice::ApiCredit
+    } else if grant.credits_fallback {
         LaunchNotice::Credits
     } else if grant.extra_usage_fallback {
         LaunchNotice::ExtraUsage
@@ -1768,6 +1896,122 @@ mod bridge_tests {
             select_continue(&tied, &intent).unwrap_err().code,
             "CONTINUE_AMBIGUOUS"
         );
+    }
+
+    const TEST_KEY: &str = "sk-ant-api03-AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA";
+    const OTHER_KEY: &str = "sk-ant-api03-BBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBB";
+    const OPENAI_KEY: &str = "sk-proj-CCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCC";
+
+    fn key_account(key: &str) -> Account {
+        Account {
+            id: "api-key-account".into(),
+            tool: aam_adapters::api_credit::API_TOOL.into(),
+            provider: "anthropic".into(),
+            identity_key: Some(aam_adapters::api_credit::identity_key(aam_adapters::api_credit::ApiProvider::Anthropic, key)),
+            auth_status: "authenticated".into(),
+            verification: "api-key".into(),
+            can_launch: true,
+            enabled: true,
+            ..Account::default()
+        }
+    }
+
+    fn openai_key_account(key: &str) -> Account {
+        Account {
+            provider: "openai".into(),
+            identity_key: Some(aam_adapters::api_credit::identity_key(aam_adapters::api_credit::ApiProvider::OpenAi, key)),
+            ..key_account(key)
+        }
+    }
+
+    fn print_intent(non_interactive: bool) -> LaunchIntent {
+        LaunchIntent { tool: "claude".into(), model: NATIVE_DEFAULT_MODEL.into(), non_interactive, ..LaunchIntent::default() }
+    }
+
+    fn exec_intent(non_interactive: bool) -> LaunchIntent {
+        LaunchIntent { tool: "codex".into(), model: "gpt-6.1-sol".into(), non_interactive, ..LaunchIntent::default() }
+    }
+
+    #[test]
+    fn api_credit_plan_puts_the_key_only_in_the_child_env() {
+        let (plan, evidence) =
+            api_credit_plan(&key_account(TEST_KEY), &print_intent(true), "/tmp", Some("0d6c2f3e-7c5b-4f53-9d51-5b8d1b1b9f10"), Path::new("/native/claude"), TEST_KEY).unwrap();
+        assert_eq!(plan.env.get("ANTHROPIC_API_KEY").map(String::as_str), Some(TEST_KEY));
+        assert!(!plan.env.contains_key("CLAUDE_CONFIG_DIR"));
+        assert!(!plan.env.keys().any(|key| key.starts_with("CLAUDE_CODE_") || key.starts_with("AAM_")));
+        assert_eq!(plan.program, "/native/claude");
+        assert_eq!(plan.args, ["--session-id", "0d6c2f3e-7c5b-4f53-9d51-5b8d1b1b9f10"]);
+        assert_eq!(evidence.tier, "preflight-verified");
+        // 증거와 계획의 계정에는 키 값이 없다.
+        let shown = format!("{evidence:?}{:?}", plan.account);
+        assert!(!shown.contains(TEST_KEY), "{shown}");
+    }
+
+    #[test]
+    fn api_credit_plan_refuses_interactive_runs_subscription_accounts_and_a_different_key() {
+        let account = key_account(TEST_KEY);
+        let program = Path::new("/native/claude");
+        let interactive = api_credit_plan(&account, &print_intent(false), "/tmp", None, program, TEST_KEY).unwrap_err();
+        assert_eq!(interactive.code, "INVALID_PARAMS");
+        let mut subscription = key_account(TEST_KEY);
+        subscription.tool = "claude".into();
+        let refused = api_credit_plan(&subscription, &print_intent(true), "/tmp", None, program, TEST_KEY).unwrap_err();
+        assert_eq!(refused.code, "INVALID_PARAMS");
+        let drift = api_credit_plan(&account, &print_intent(true), "/tmp", None, program, OTHER_KEY).unwrap_err();
+        assert_eq!(drift.code, "IDENTITY_MISMATCH");
+        for error in [&interactive, &refused, &drift] {
+            assert!(!error.message.contains(TEST_KEY) && !error.message.contains(OTHER_KEY));
+        }
+        // Claude 키는 Codex 실행에 쓰이지 않는다.
+        let mut codex = print_intent(true);
+        codex.tool = "codex".into();
+        assert!(api_credit_plan(&account, &codex, "/tmp", None, program, TEST_KEY).is_err());
+    }
+
+    /// OpenAI 키: `codex exec`·`codex review`(비대화형)에만 `CODEX_API_KEY`로, 그 자식 환경에만 들어간다. 프로필·저장된 로그인은 건드리지 않고,
+    /// 대화형·이어 하기·다른 공급자 도구·다른 키에는 쓰이지 않는다.
+    #[test]
+    fn openai_key_plan_injects_codex_api_key_only_for_one_shot_codex_runs() {
+        let account = openai_key_account(OPENAI_KEY);
+        let program = Path::new("/native/codex");
+        let (plan, evidence) = api_credit_plan(&account, &exec_intent(true), "/tmp", None, program, OPENAI_KEY).unwrap();
+        assert_eq!(plan.env.get("CODEX_API_KEY").map(String::as_str), Some(OPENAI_KEY));
+        // 사용자 홈의 저장된 ChatGPT 로그인을 가리키거나 바꾸는 값은 넣지 않는다. Claude 키 변수도 넣지 않는다.
+        for name in ["OPENAI_API_KEY", "ANTHROPIC_API_KEY", "CODEX_HOME", "CODEX_ACCESS_TOKEN", "OPENAI_BASE_URL"] {
+            assert!(!plan.env.contains_key(name), "{name}");
+        }
+        assert_eq!(plan.program, "/native/codex");
+        assert_eq!(plan.args, ["--model", "gpt-6.1-sol"]);
+        assert_eq!(evidence.tier, "preflight-verified");
+        assert!(evidence.identity_key.starts_with("openai-apikey:"));
+        let shown = format!("{evidence:?}{:?}", plan.account);
+        assert!(!shown.contains(OPENAI_KEY), "{shown}");
+        // 대화형 `codex`에는 키를 넣지 않는다.
+        let interactive = api_credit_plan(&account, &exec_intent(false), "/tmp", None, program, OPENAI_KEY).unwrap_err();
+        assert_eq!(interactive.code, "INVALID_PARAMS");
+        // 이어 하기(`codex exec resume`)는 구독 계정의 대화 기록이 필요하므로 거절한다.
+        let resume = LaunchIntent { resume_session_id: Some("0d6c2f3e-7c5b-4f53-9d51-5b8d1b1b9f10".into()), ..exec_intent(true) };
+        let refused = api_credit_plan(&account, &resume, "/tmp", Some("0d6c2f3e-7c5b-4f53-9d51-5b8d1b1b9f10"), program, OPENAI_KEY).unwrap_err();
+        assert_eq!(refused.code, "INVALID_PARAMS");
+        // OpenAI 키는 Claude 실행에 쓰이지 않고, 다른 키 값이면 지문이 어긋나 멈춘다.
+        assert!(api_credit_plan(&account, &print_intent(true), "/tmp", None, Path::new("/native/claude"), OPENAI_KEY).is_err());
+        let drift = api_credit_plan(&account, &exec_intent(true), "/tmp", None, program, TEST_KEY).unwrap_err();
+        assert!(matches!(drift.code.as_str(), "IDENTITY_MISMATCH" | "API_KEY_FORMAT"), "{}", drift.code);
+        for error in [&interactive, &refused, &drift] {
+            assert!(!error.message.contains(OPENAI_KEY) && !error.message.contains(TEST_KEY));
+        }
+        // Claude 키 계정은 Codex 실행에 쓰이지 않는다.
+        assert!(api_credit_plan(&key_account(TEST_KEY), &exec_intent(true), "/tmp", None, program, TEST_KEY).is_err());
+    }
+
+    #[test]
+    fn api_credit_announcement_names_the_billing_path() {
+        let text = launch_announcement("크레딧", None, true, LaunchNotice::ApiCredit);
+        assert!(text.contains("API 키") && text.contains("auto-reload"), "{text}");
+        assert!(!text.contains("sk-ant"), "{text}");
+        let openai = launch_announcement("OpenAI 키", None, true, LaunchNotice::OpenAiApi);
+        assert!(openai.contains("OpenAI") && openai.contains("요금"), "{openai}");
+        assert!(!openai.contains("auto-reload") && !openai.contains("sk-"), "{openai}");
     }
 
     fn intent(tool: &str) -> LaunchIntent {

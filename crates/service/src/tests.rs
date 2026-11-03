@@ -1,6 +1,8 @@
 mod account_remove;
 mod allocation;
+mod api_credit;
 mod credits;
+mod expiry_balanced;
 mod routing;
 mod takeover;
 use super::*;
@@ -26,7 +28,12 @@ impl Fixture {
         }
     }
     fn save(&self, account: &Account) {
-        save_account(&self.service.lock().unwrap().connection, account).unwrap();
+        let store = self.service.lock().unwrap();
+        save_account(&store.connection, account).unwrap();
+        // 사용액은 계정 행이 아니라 원장이 정본이다. 테스트 계정의 `api_credit`은 원장에 심는다.
+        if let Some(state) = account.api_credit.as_ref().filter(|_| account.tool == aam_adapters::api_credit::API_TOOL) {
+            store::seed_api_credit(&store.connection, &account.id, &account.provider, state);
+        }
     }
 }
 impl Drop for Fixture {
@@ -280,6 +287,35 @@ fn stopped_recovery_preserves_uncertain_reservations_and_the_admission_barrier()
     assert_eq!(fixture.service.acquire(request("must-stay-blocked"), now).unwrap_err().code, "ADMISSION_DISABLED");
     fixture.service.dispatch("service.cancelUninstall", serde_json::json!({"permit":"held-permit"})).unwrap();
     fixture.service.finish(abort(&grant), true, now).unwrap();
+}
+
+/// 사용자가 끊김에 동의한 서비스 재시작은 점유 lease가 있어도 새 배정만 닫는다. 기본 호출은 그대로 거절하고, 어느 쪽도 lease 기록을 바꾸지 않는다.
+#[test]
+fn restart_prepare_closes_admission_without_touching_held_leases() {
+    let fixture = Fixture::new();
+    let now = now_ms();
+    fixture.save(&account_fixture("held-for-restart", now));
+    let grant = fixture.service.acquire(request("held-before-restart"), now).unwrap();
+    let state = || lease(&fixture.service.lock().unwrap().connection, &grant.session.id).unwrap().session;
+    let permit_stored = || metadata::<Option<String>>(&fixture.service.lock().unwrap().connection, "uninstallPermit").unwrap().flatten();
+    let admission = |id: &str| fixture.service.acquire(request(id), now).err().map(|failure| failure.code);
+    let before = state();
+    assert_eq!(before.state, "PREPARED");
+    assert_eq!(fixture.service.dispatch("service.prepareUninstall", serde_json::json!({})).unwrap_err().code, "SESSION_BUSY");
+    assert_eq!(permit_stored(), None, "거절된 기본 호출은 배정을 닫지 않는다");
+    assert_ne!(admission("not-closed"), Some("ADMISSION_DISABLED".to_owned()));
+    let prepared = fixture.service.dispatch("service.prepareUninstall", serde_json::json!({"restart": true})).unwrap();
+    assert_eq!(prepared["safe"], true);
+    let permit = prepared["permit"].as_str().unwrap().to_owned();
+    assert_eq!(permit_stored().as_deref(), Some(permit.as_str()));
+    assert_eq!(admission("closed-for-restart"), Some("ADMISSION_DISABLED".to_owned()));
+    let held = state();
+    assert_eq!((held.state.as_str(), held.updated_at), (before.state.as_str(), before.updated_at), "lease를 풀거나 상태를 바꾸지 않는다");
+    // 같은 호출을 되풀이해도 같은 승인이고, 재개하면 배정이 다시 열린다.
+    assert_eq!(fixture.service.dispatch("service.prepareUninstall", serde_json::json!({"restart": true})).unwrap()["permit"], permit);
+    fixture.service.dispatch("service.resumeAdmission", serde_json::json!({})).unwrap();
+    assert_eq!(permit_stored(), None);
+    assert_eq!(state().state, "PREPARED");
 }
 
 
@@ -774,7 +810,7 @@ fn refresh_progress_exposes_account_updates_without_completing_or_staling_other_
     assert_eq!(snapshot.last_refresh_at, None);
     assert_eq!(snapshot.accounts.iter().find(|account| account.id == "native").unwrap().buckets[0].used_percent, Some(55.0));
     assert_eq!(snapshot.accounts.iter().find(|account| account.id == "observed").unwrap().buckets[0].status, "known");
-    fixture.service.update_account(AccountUpdate { id: native.id.clone(), enabled: Some(false), max_concurrency: None }).unwrap();
+    fixture.service.update_account(AccountUpdate { id: native.id.clone(), enabled: Some(false), max_concurrency: None, label: None }).unwrap();
     incoming.buckets[0].used_percent = Some(65.0);
     fixture.service.apply_scan(vec![published, observed.clone()], aam_adapters::ScanResult {
         accounts: vec![incoming, observed], tools: vec![], notices: vec![], merged_observation_ids: vec![],
@@ -894,7 +930,7 @@ fn final_merge_keeps_observation_rows_the_user_changed_or_reregistered_during_th
     }
     let before = vec![excluded.clone(), registered.clone(), untouched.clone()];
     // 조회 중 사용자가 제외하고, 다른 쪽은 재등록한다.
-    fixture.service.update_account(AccountUpdate { id: excluded.id.clone(), enabled: Some(false), max_concurrency: None }).unwrap();
+    fixture.service.update_account(AccountUpdate { id: excluded.id.clone(), enabled: Some(false), max_concurrency: None, label: None }).unwrap();
     let mut reregistered = registered.clone();
     reregistered.identity_key = Some("new-registration".into());
     reregistered.last_checked_at = now + 5;
@@ -930,7 +966,7 @@ fn uninstall_and_admission_are_atomic_and_permit_is_required_to_cancel() {
     let uninstall_barrier = Arc::clone(&barrier);
     let uninstall = std::thread::spawn(move || {
         uninstall_barrier.wait();
-        service.prepare_uninstall()
+        service.prepare_uninstall(serde_json::json!({}))
     });
     barrier.wait();
     let grant = acquire.join().unwrap();
