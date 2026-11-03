@@ -257,12 +257,17 @@ jobs:
           manifest_version=$(node -e 'console.log(JSON.parse(require("fs").readFileSync(process.argv[1],"utf8")).version)' "$RUNNER_TEMP/dist/omp-compatible-v2.json")
           [ "$manifest_version" = "$version" ] || { echo "Manifest version $manifest_version does not match $version."; exit 1; }
           if gh release view "$tag" --repo "$GITHUB_REPOSITORY" > /dev/null 2>&1; then echo "Release $tag already exists; bump the fork revision."; exit 1; fi
+          # The tag must already exist, be annotated (made by an Admin), and point at exactly the commit that was built.
+          # Never create it here: `--verify-tag` below refuses to make one, so a lightweight or reused tag cannot slip in.
+          ref=$(gh api "repos/$GITHUB_REPOSITORY/git/ref/tags/$tag" 2>/dev/null) || { echo "Tag $tag does not exist. An Admin must create the annotated tag on $GITHUB_SHA first."; exit 1; }
+          [ "$(printf '%s' "$ref" | jq -r .object.type)" = "tag" ] || { echo "Tag $tag is lightweight; an annotated tag is required."; exit 1; }
+          peeled=$(gh api "repos/$GITHUB_REPOSITORY/git/tags/$(printf '%s' "$ref" | jq -r .object.sha)" --jq '.object | select(.type=="commit") | .sha')
+          [ "$peeled" = "$GITHUB_SHA" ] || { echo "Tag $tag points at ${peeled:-a non-commit}, not the built commit $GITHUB_SHA."; exit 1; }
           cd "$RUNNER_TEMP/dist"
           sha256sum omp-v2-darwin-arm64 omp-v2-windows-x64.exe omp-compatible-v2.json > SHA256SUMS
           test -s SHA256SUMS
           gh release create "$tag" --repo "$GITHUB_REPOSITORY" \
-            --draft --latest=false \
-            --target "$GITHUB_SHA" \
+            --draft --latest=false --verify-tag \
             --title "omp ${version}" \
             --notes "Ojak-patched omp ${version}. Requires the Ojak service version in omp-compatible-v2.json (minimumOjakService). Published by an Admin only after the checks in docs/release-policy.md; never marked latest." \
             omp-v2-darwin-arm64 omp-v2-windows-x64.exe omp-compatible-v2.json SHA256SUMS
