@@ -290,6 +290,12 @@ code { font-family: var(--mono); font-size: .92em; letter-spacing: 0; }
 .grant-expiry legend { padding: 0; margin-bottom: 4px; font-size: 12px; font-weight: 550; }
 .grant-form .grant-radio { display: flex; align-items: center; gap: 6px; font-weight: 400; }
 .grant-form .grant-estimate { grid-column: 1 / -1; margin: 0; padding: 8px 10px; border: 1px solid var(--line); border-left: 3px solid var(--warning); border-radius: 6px; font-size: var(--fs-meta); line-height: 1.6; color: var(--secondary); }
+.grant-pools { margin: 0; padding: 0; list-style: none; display: grid; gap: 8px; }
+.grant-pool { display: grid; gap: 6px; padding: 8px 10px; border: 1px solid var(--line); border-radius: 6px; }
+.grant-pool-head { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; font-size: 13px; }
+.grant-billing-row { grid-template-columns: minmax(0, 1fr) auto; align-items: center; font-size: var(--fs-meta); }
+.grant-form .grant-keys { grid-column: 1 / -1; display: grid; gap: 6px; margin: 0; padding: 0; border: 0; min-width: 0; }
+.grant-keys legend { padding: 0; margin-bottom: 4px; font-size: 12px; font-weight: 550; }
 .grant-balance.rule { grid-template-columns: minmax(0, 1fr) auto; padding-inline: 0; border-top: 1px solid var(--line); background: none; }
 .grant-balance .t { grid-area: 1 / 1; }
 .grant-balance .ctl { grid-area: 1 / 2; }

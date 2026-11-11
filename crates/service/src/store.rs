@@ -251,6 +251,31 @@ pub(crate) fn policy(connection: &Connection) -> Result<Policy, ApiError> {
                 object.insert("providerPins".into(), serde_json::Value::Object(pins));
             }
         }
+        // 0.23 이전의 단일 허용 기간(`apiCreditGrant`, 모든 Anthropic 키가 공유)은 그 키들을 담은 풀 하나로, 단일 결제 정보는 길이 1 목록으로 옮긴다.
+        // 같은 id를 유지하므로 `api_credit_grant_usage`의 사용액이 이어진다. 키가 하나도 없으면 풀은 만들 수 없어 버린다(입력이 무의미하다).
+        if let Some(legacy) = object.remove("apiCreditGrant") {
+            if !object.contains_key("apiCreditGrants") {
+                let keys: Vec<serde_json::Value> = raw_accounts(connection)?
+                    .into_iter()
+                    .filter(|account| aam_adapters::api_credit::ApiProvider::Anthropic.owns(account))
+                    .map(|account| serde_json::Value::String(account.id))
+                    .collect();
+                let pools = match legacy {
+                    serde_json::Value::Object(mut grant) if !keys.is_empty() => {
+                        grant.insert("accountIds".into(), serde_json::Value::Array(keys));
+                        vec![serde_json::Value::Object(grant)]
+                    }
+                    _ => Vec::new(),
+                };
+                object.insert("apiCreditGrants".into(), serde_json::Value::Array(pools));
+            }
+        }
+        if let Some(legacy) = object.remove("apiCreditBilling") {
+            if !object.contains_key("apiCreditBillings") {
+                let list = if legacy.is_object() { vec![legacy] } else { Vec::new() };
+                object.insert("apiCreditBillings".into(), serde_json::Value::Array(list));
+            }
+        }
     }
     serde_json::from_value(raw).map_err(|_| {
         ApiError::new("STATE_CORRUPT", "저장된 정책을 해석하지 못했습니다.")
@@ -351,6 +376,24 @@ pub(crate) fn save_account(connection: &Connection, account: &Account) -> Result
     connection.execute("INSERT INTO accounts(id,body) VALUES (?1,?2) ON CONFLICT(id) DO UPDATE SET body=excluded.body", params![account.id, body]).map_err(db_error)?;
     Ok(())
 }
+/// 지운 API 키의 비밀 없는 식별자(`identity_key`) → 그 키 계정의 원래 id. 같은 키를 다시 등록하면 같은 계정 id를 이어 써서
+/// 이번 달 사용액(원장 행)과 풀 소속이 그대로 따라오게 한다(키를 지웠다 다시 등록해 키별 월 상한을 우회하지 못하게 한다). 키 값은 저장하지 않는다.
+/// 다른 키는 식별자가 달라 이 기록과 만나지 않으므로 새 id·0에서 시작한다.
+fn api_key_tombstone_key(identity: &str) -> String {
+    format!("apiKeyTombstone:{identity}")
+}
+/// 다시 등록하는 키가 이어 쓸 계정 id. 기록이 없거나 그 id의 계정이 이미 있으면 `None`(새 id).
+pub(crate) fn reusable_api_key_id(connection: &Connection, identity: &str) -> Result<Option<String>, ApiError> {
+    let Some(id) = metadata::<String>(connection, &api_key_tombstone_key(identity))? else { return Ok(None) };
+    match account(connection, &id) {
+        Err(error) if error.code == "ACCOUNT_NOT_FOUND" => Ok(Some(id)),
+        Ok(_) => Ok(None),
+        Err(error) => Err(error),
+    }
+}
+pub(crate) fn set_api_key_tombstone(connection: &Connection, identity: &str, account_id: &str) -> Result<(), ApiError> {
+    set_metadata(connection, &api_key_tombstone_key(identity), &account_id)
+}
 pub(crate) fn ledger_knows(connection: &Connection, account_id: &str) -> Result<bool, ApiError> {
     connection
         .query_row("SELECT EXISTS(SELECT 1 FROM api_credit_usage WHERE account_id=?1)", [account_id], |row| row.get(0))
@@ -379,8 +422,9 @@ pub(crate) fn retain_api_credit_ledger(connection: &Connection, account: &Accoun
 /// API 키 계정의 이번 달 추정 사용액에 한 요청을 더한다. `cost`가 `None`이면 usage를 못 읽은 요청으로 센다.
 /// 사용액은 계정 행이 아니라 원장에 쌓는다. 기간(UTC 달력월)이 바뀌면 새 행에서 0부터 다시 센다. 같은 트랜잭션 안에서 더해 동시 요청의 덧셈이 사라지지 않게 한다.
 /// 이미 지운 키 계정(원장에 행이 있는 ID)의 늦은 기록도 받는다. 모르는 ID는 `ACCOUNT_NOT_FOUND`, API 키가 아닌 계정은 기록하지 않는다.
-/// 허용 기간(grant) 합산 원장은 Claude 크레딧의 개념이라 Anthropic 키만 더한다.
-pub(crate) fn record_api_credit(connection: &mut Connection, account_id: &str, cost: Option<f64>, now: i64) -> Result<(), ApiError> {
+/// 풀 원장은 Claude 크레딧의 개념이라 Anthropic 키만 더한다. `pool`은 요청이 **입장할 때** 그 키가 속했던 풀 id다(호출자가 캡처).
+/// 요청 도중 키를 다른 풀로 옮기거나 풀에서 빼도 시작한 풀에 쌓는다. 그 풀이 지금 없으면(삭제) 기간 원장에는 더하지 않는다.
+pub(crate) fn record_api_credit(connection: &mut Connection, account_id: &str, pool: Option<&str>, cost: Option<f64>, now: i64) -> Result<(), ApiError> {
     let tx = connection.transaction_with_behavior(rusqlite::TransactionBehavior::Immediate).map_err(db_error)?;
     let provider = match account(&tx, account_id) {
         Ok(found) if found.tool != aam_adapters::api_credit::API_TOOL => return Ok(()),
@@ -404,10 +448,11 @@ pub(crate) fn record_api_credit(connection: &mut Connection, account_id: &str, c
         params![account_id, aam_adapters::api_credit::period_start(now), spent, unmetered, now, provider],
     )
     .map_err(db_error)?;
-    // 현재 허용 기간이 있고 요청이 그 기간 안에 끝났으면 같은 금액을 그 기간의 합산 원장에도 더한다(키 계정과 무관, 같은 트랜잭션).
-    // 기간 밖(시작 전·만료 뒤) 사용은 허용 기간 예산에 넣지 않는다. 월 상한 합계에는 위에서 이미 들어갔다.
-    if provider == aam_adapters::api_credit::ApiProvider::Anthropic.id() {
-        if let Some(grant) = policy(&tx)?.api_credit_grant.filter(|grant| (grant.starts_at..grant.expires_at).contains(&now)) {
+    // 입장 때의 풀이 아직 있고 요청이 그 풀의 기간 안에 끝났으면 같은 금액을 그 풀의 원장에도 더한다(같은 트랜잭션).
+    // 기간 밖(시작 전·만료 뒤) 사용은 풀 예산에 넣지 않는다. 월 상한 합계에는 위에서 이미 들어갔다.
+    if let Some(pool) = pool.filter(|_| provider == aam_adapters::api_credit::ApiProvider::Anthropic.id()) {
+        let policy = policy(&tx)?;
+        if let Some(grant) = policy.api_credit_grants.iter().find(|grant| grant.id == pool).filter(|grant| (grant.starts_at..grant.expires_at).contains(&now)) {
             tx.execute(
                 "INSERT INTO api_credit_grant_usage(grant_id,used_usd,unmetered_requests,updated_at) VALUES (?1,?2,?3,?4)
                  ON CONFLICT(grant_id) DO UPDATE SET
@@ -421,22 +466,23 @@ pub(crate) fn record_api_credit(connection: &mut Connection, account_id: &str, c
     }
     tx.commit().map_err(db_error)
 }
-/// 판정에 쓰는 API 크레딧 원장 값: 지운 키의 이번 달 사용액(공급자별)과 현재 허용 기간(Claude)의 합산 사용액·미확인 요청 수.
+/// 판정에 쓰는 API 크레딧 원장 값: 지운 키의 이번 달 사용액(공급자별)과 풀별(Claude) 사용액·미확인 요청 수.
 pub(crate) fn api_ledger(connection: &Connection, policy: &Policy, now: i64) -> Result<crate::scheduler::ApiLedger, ApiError> {
     use aam_adapters::api_credit::ApiProvider;
     let removed_usd = api_credit_removed(connection, ApiProvider::Anthropic, now)?.used_usd;
     let openai_removed = api_credit_removed(connection, ApiProvider::OpenAi, now)?;
-    let (grant_used_usd, grant_unmetered) = match &policy.api_credit_grant {
-        Some(grant) => connection
+    let mut grants = std::collections::BTreeMap::new();
+    for grant in &policy.api_credit_grants {
+        let usage = connection
             .query_row("SELECT used_usd,unmetered_requests FROM api_credit_grant_usage WHERE grant_id=?1", [&grant.id], |row| {
-                Ok((row.get::<_, f64>(0)?, row.get::<_, i64>(1)?.max(0) as u64))
+                Ok(crate::scheduler::GrantUsage { used_usd: row.get::<_, f64>(0)?, unmetered: row.get::<_, i64>(1)?.max(0) as u64 })
             })
             .optional()
             .map_err(db_error)?
-            .unwrap_or((0.0, 0)),
-        None => (0.0, 0),
-    };
-    Ok(crate::scheduler::ApiLedger { removed_usd, openai_removed_usd: openai_removed.used_usd, openai_removed_unmetered: openai_removed.unmetered_requests, grant_used_usd, grant_unmetered })
+            .unwrap_or_default();
+        grants.insert(grant.id.clone(), usage);
+    }
+    Ok(crate::scheduler::ApiLedger { removed_usd, openai_removed_usd: openai_removed.used_usd, openai_removed_unmetered: openai_removed.unmetered_requests, grants })
 }
 /// 지운 API 키 계정(계정 행이 없는 원장 행)이 `now`가 속한 달에 쓴 추정 사용액의 합. 해당 공급자의 월 상한 합계와 화면 합계는 남아 있는 키의 합계에 이 값을 더한다.
 pub(crate) fn api_credit_removed(connection: &Connection, provider: aam_adapters::api_credit::ApiProvider, now: i64) -> Result<aam_protocol::ApiCreditState, ApiError> {

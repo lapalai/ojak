@@ -82,10 +82,12 @@ export interface HostConnections {
 
 export type AllocationMode = "smart" | "priority" | "expiry-balanced";
 
-/// 사용자가 확인했다고 입력한 API 크레딧. `budgetUsd`는 저장 시점에 남아 있다고 확인한 금액이고, 사용액은 `confirmedAt`부터 센다.
+/// 사용자가 확인했다고 입력한 API 크레딧 풀. 풀 = 같은 Console 조직 잔액을 나눠 쓰는 API 키 묶음(`accountIds`)과 그 금액·기간이다. 키 하나는 풀 하나에만 속한다.
+/// `budgetUsd`는 저장 시점에 남아 있다고 확인한 금액이고, 사용액은 `confirmedAt`부터 센다. 같은 `id`로 다시 저장하면 사용액이 이어진다.
 /// `expirySource`가 없으면(이전 입력) 사용자가 정확한 만료일을 직접 입력한 것(`exact`)이다. `billing-estimate`는 구독 결제일에서 추정한 만료이고 `billingEstimate`가 그 근거다.
 export interface ApiCreditGrantPolicy {
   id: string;
+  accountIds: string[];
   budgetUsd: number;
   startsAt: number;
   expiresAt: number;
@@ -114,31 +116,31 @@ export interface ApiCreditBillingStatus {
   estimateBlockedBy: EstimateBlock | null;
 }
 
-export type ApiCreditGrantState = "unknown" | "upcoming" | "active" | "exhausted" | "expired";
+export type ApiCreditGrantState = "upcoming" | "active" | "exhausted" | "expired";
 export type ProactiveBlock = "OPT_IN_OFF" | "MODE" | "NO_KEY" | "GRANT_NONE" | "GRANT_PENDING" | "GRANT_EXPIRED" | "GRANT_EXHAUSTED" | "GRANT_UNMETERED" | "MONTHLY_LIMIT" | "AHEAD_OF_PACE";
 
-/// 서비스가 매 스냅샷마다 계산한 API 크레딧 입력값 상태. 사용액은 Ojak 추정치이며 Console 잔액이 아니다.
+/// 서비스가 매 스냅샷마다 계산한 API 크레딧 풀 상태(`policy.apiCreditGrants`와 같은 순서·같은 id). 사용액은 Ojak 추정치이며 Console 잔액이 아니다.
 export interface ApiCreditGrantStatus {
-  id: string | null;
+  id: string;
+  accountIds: string[];
   source: "manual";
   state: ApiCreditGrantState;
-  budgetUsd: number | null;
+  budgetUsd: number;
   usedUsd: number;
-  remainingUsd: number | null;
-  startsAt: number | null;
-  expiresAt: number | null;
+  remainingUsd: number;
+  startsAt: number;
+  expiresAt: number;
   unmeteredRequests: number;
   /// true면 일부 요청의 사용액을 읽지 못했다. 미리 쓰기는 막힌다.
   unmetered: boolean;
   perDayUsd: number | null;
+  /// 풀에 쓸 수 있는 키가 있지만 모두 각자의 월 상한(키당)에 닿았다. 키 하나만 닿은 것으로는 켜지지 않는다.
   monthlyLimitReached: boolean;
   proactive: { allowed: boolean; blockedBy: ProactiveBlock | null };
-  /// 이 필드들이 없는 이전 서비스는 `exact`·근거 없음·어긋남 없음·결제 정보 없음으로 본다.
   expirySource?: ExpirySource;
   billingEstimate?: { accountId: string; nextBillingAt: number } | null;
   /// 추정 만료의 근거가 된 결제일이 지금 저장된 결제 정보와 다르다. 입력값은 바뀌지 않았다.
   estimateDrift?: boolean;
-  billing?: ApiCreditBillingStatus | null;
 }
 
 export interface Policy {
@@ -165,7 +167,7 @@ export interface Policy {
   useExtraUsageAfterLimit?: boolean;
   /// 모든 Claude 구독 계정이 한도를 다 쓴 뒤 등록한 API 키(Max 플랜 월 API 크레딧)로 omp·`claude -p` 요청을 보낸다. 기본 꺼짐.
   useApiCreditAfterLimit?: boolean;
-  /// API 크레딧 월(UTC 달력월) 추정 사용액 상한(USD). Ojak의 보조 장치이며 실제 청구 상한이 아니다. 기본 200.
+  /// Claude API 키 **하나당** 월(UTC 달력월) 추정 사용액 상한(USD). 키마다 따로 적용하며 합계에 걸리지 않는다. Ojak의 보조 장치이며 실제 청구 상한이 아니다. 기본 200.
   apiCreditMonthlyLimitUsd?: number;
   /// 모든 Codex 구독 계정이 한도를 다 쓴 뒤 등록한 OpenAI API 키로 omp·비대화형 `codex exec`/`codex review` 요청을 보낸다. 실제 요금이 청구된다. Claude 설정과 별개이며 기본 꺼짐.
   useOpenaiApiAfterLimit?: boolean;
@@ -173,10 +175,10 @@ export interface Policy {
   openaiApiMonthlyLimitUsd?: number;
   /// `expiry-balanced` 모드에서 곧 사라질 API 크레딧을 새 omp 세션에 미리 쓰도록 허용한다. 기본 꺼짐. `useApiCreditAfterLimit`도 켜져 있어야 한다.
   balanceApiCredit?: boolean;
-  /// 사용자가 직접 확인해 입력한 API 크레딧 사용 가능 금액·기간(등록한 모든 키가 함께 쓰는 하나의 풀). Console 잔액을 읽은 값이 아니다. 없으면 모른다.
-  apiCreditGrant?: ApiCreditGrantPolicy | null;
-  /// 사용자가 직접 입력한 구독 계정의 결제 주기·다음 결제일. 월 결제일은 만료 추정에 미리 채울 수만 있고 그 자체가 만료는 아니다. 없으면 모른다.
-  apiCreditBilling?: ApiCreditBillingPolicy | null;
+  /// 사용자가 직접 확인해 입력한 API 크레딧 풀 목록(풀마다 같은 Console 조직 잔액을 쓰는 키 묶음 + 금액·기간). Console 잔액을 읽은 값이 아니다. 없으면 빈 목록이다.
+  apiCreditGrants?: ApiCreditGrantPolicy[];
+  /// 사용자가 직접 입력한 구독 계정별 결제 주기·다음 결제일(계정당 최대 하나). 월 결제일은 만료 추정에 미리 채울 수만 있고 그 자체가 만료는 아니다. 없으면 빈 목록이다.
+  apiCreditBillings?: ApiCreditBillingPolicy[];
 }
 
 export interface ProcessIdentity {
@@ -271,8 +273,10 @@ export interface Snapshot {
   apiCreditRemoved?: ApiCreditState | null;
   /// 연결을 해제한 OpenAI API 키의 이번 달 추정 사용액 원장. OpenAI 월 상한 합계에만 더한다. 없으면 0.
   openaiApiRemoved?: ApiCreditState | null;
-  /// 직접 입력한 API 크레딧의 상태. 서비스가 항상 보내며(입력이 없으면 `state: "unknown"`), 이 필드가 없는 이전 서비스는 모르는 것으로 본다.
-  apiCreditGrant?: ApiCreditGrantStatus | null;
+  /// 직접 입력한 API 크레딧 풀별 상태(`policy.apiCreditGrants`와 같은 순서). 서비스가 계산하며, 이 필드가 없는 이전 서비스는 모르는 것으로 본다.
+  apiCreditGrants?: ApiCreditGrantStatus[];
+  /// 구독 계정별 결제일 기반 만료 추정(`policy.apiCreditBillings`와 같은 순서).
+  apiCreditBillings?: ApiCreditBillingStatus[];
   /// 서비스 실행 파일의 버전. 이 필드가 없는 이전 서비스는 알 수 없음으로 본다.
   serviceVersion?: string;
 }
@@ -291,6 +295,7 @@ export interface AccountQuotaSummary {
   /// Claude 추가 사용량(USD, API 요금). 신선한 관측에서 켜져 있을 때만 있다. `limitReached`면 쓸 수 없다.
   extraUsage?: { active: boolean; usedUsd: number; limitUsd: number | null; limitReached: boolean } | null;
   /// API 키(`tool === "api"`) 묶음. 금액은 Ojak 추정치(USD)다. `active`는 지금 새 요청이 이 키로 배정되는 상태. `provider`가 없으면 Claude(anthropic)다.
+  /// Claude: `usedUsd`는 이 묶음 키의 사용액, `limitUsd`는 키당 상한, `limitReached`는 묶음의 쓸 수 있는 키가 모두 각자의 상한에 닿은 상태다. OpenAI: 같은 공급자 모든 키 합계 기준이다.
   apiCredit?: { active: boolean; usedUsd: number; limitUsd: number; limitReached: boolean; unmetered: boolean; provider?: ApiKeyProvider } | null;
 }
 

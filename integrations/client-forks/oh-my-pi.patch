@@ -350,7 +350,7 @@ index 73bda3ed23..d4819c806e 100644
  		"agent",
 diff --git a/packages/coding-agent/src/cli/ojak-update.ts b/packages/coding-agent/src/cli/ojak-update.ts
 new file mode 100644
-index 0000000000..aa13b8cb32
+index 0000000000..9a66b21ace
 --- /dev/null
 +++ b/packages/coding-agent/src/cli/ojak-update.ts
 @@ -0,0 +1,389 @@
@@ -591,7 +591,7 @@ index 0000000000..aa13b8cb32
 +export function describeUpstream(report: UpstreamReport): string {
 +	switch (report.status) {
 +		case "compatibility-pending":
-+			return `Upstream latest is ${report.upstreamVersion}; the newest Ojak-compatible release is ${report.compatibleVersion}. Compatibility build, verification and publication for the newer upstream are still pending. Upstream latest is not installed.`;
++			return `Upstream latest is ${report.upstreamVersion}; the newest published Ojak-compatible release is ${report.compatibleVersion}. The compatible release channel is behind upstream; compatibility build, verification and publication are still pending.`;
 +		case "current":
 +			return `The Ojak-compatible release ${report.compatibleVersion} includes upstream latest ${report.upstreamVersion}.`;
 +		case "unknown":
@@ -744,7 +744,7 @@ index 0000000000..aa13b8cb32
 +	);
 +}
 diff --git a/packages/coding-agent/src/cli/update-cli.ts b/packages/coding-agent/src/cli/update-cli.ts
-index 49d398897c..21dc819795 100644
+index 49d398897c..679d21d27c 100644
 --- a/packages/coding-agent/src/cli/update-cli.ts
 +++ b/packages/coding-agent/src/cli/update-cli.ts
 @@ -15,7 +15,6 @@ import {
@@ -1371,7 +1371,7 @@ index 49d398897c..21dc819795 100644
 +	const upstream = await (deps.readUpstreamLatest ?? (() => fetchUpstreamLatest(deps.fetchImpl)))().catch(() => undefined);
 +	console.log(chalk.dim(describeUpstream(classifyUpstream(upstream, build.version))));
 +	if (!opts.force && compareVersions(build.version, current) <= 0) {
-+		console.log(`Installed omp ${current} is the newest Ojak-compatible release; this is not a statement about upstream.`);
++		console.log(`No newer Ojak-compatible release is available for installed omp ${current}; this is not a statement about upstream.`);
 +		return { kind: "current" };
 +	}
 +	// Fail closed before anything is downloaded or resolved: a newer omp must never run against an older Ojak service.

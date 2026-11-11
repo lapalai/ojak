@@ -68,6 +68,18 @@ test("popover notes map each provider to its own card with its own total", () =>
   assert.notEqual(both[0].reasonKey, both[1].reasonKey);
 });
 
+test("popover Claude note never divides summed key spend by the per-key cap, while OpenAI keeps its combined cap", () => {
+  const accounts = [key("c1", "anthropic", 150), key("c2", "anthropic", 140), key("o1", "openai", 20), key("o2", "openai", 25)];
+  const notes = apiCreditNotes({
+    accounts, generatedAt: NOW, apiCreditRemoved: state(80), openaiApiRemoved: null,
+    quotaSummaries: [summary("c1", "anthropic", "available", 150, 200), summary("c2", "anthropic", "api-credit", 140, 200), summary("o1", "openai", "api-credit", 20, 50), summary("o2", "openai", "api-credit", 25, 50)],
+  });
+  const claude = notes.find(note => note.provider === "anthropic");
+  assert.match(claude?.label ?? "", /\$140\.00 \/ \$200/);
+  assert.doesNotMatch(claude?.label ?? "", /\$370|\$290/);
+  assert.match(notes.find(note => note.provider === "openai")?.label ?? "", /\$45\.00 \/ \$50/);
+});
+
 const form = (patch: Partial<PaidForm> = {}): PaidForm => ({ credits: false, extra: false, apiEnabled: false, apiLimit: "200", openaiEnabled: false, openaiLimit: "50", ...patch });
 const base = { revision: 3 } as Policy;
 

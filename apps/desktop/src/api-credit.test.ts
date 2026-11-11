@@ -1,6 +1,6 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { apiAccountUsage, apiCreditAmount, apiCreditLabel, apiCreditOverview, apiCreditUsage, subscriptionAccounts, utcPeriodStart } from "./api-credit.ts";
+import { apiAccountUsage, apiCreditAmount, apiCreditLabel, apiCreditOverview, apiCreditUsage, apiKeyCap, subscriptionAccounts, utcPeriodStart } from "./api-credit.ts";
 import { dictionaries } from "./i18n.ts";
 import type { Account, AccountQuotaSummary } from "./types.ts";
 
@@ -19,10 +19,10 @@ test("api-credit summary text shows the estimated amount in the current language
 test("api-credit label is hidden while the key is idle, and names the cap once reached", () => {
   assert.equal(apiCreditLabel({ ...credit({ active: false }), kind: "available" }), null);
   assert.equal(apiCreditLabel(undefined), null);
-  assert.match(apiCreditLabel(credit({ active: false, limitReached: true, usedUsd: 200 })) ?? "", /API credit cap reached · \$200\.00 \/ \$200/);
+  assert.match(apiCreditLabel(credit({ active: false, limitReached: true, usedUsd: 200 })) ?? "", /API credit cap reached on every key · \$200\.00 \/ \$200/);
 });
 
-test("with several keys the status line shows the combined amount and prefers the key in use", () => {
+test("with several Claude keys each key is shown against its own cap, never the summed spend against one cap", () => {
   const start = utcPeriodStart(NOW);
   const key = (id: string, usedUsd: number) => ({ id, tool: "api", apiCredit: { periodStart: start, usedUsd, unmeteredRequests: 0, updatedAt: NOW } });
   const summary = (id: string, kind: string, usedUsd: number, limitReached = false): AccountQuotaSummary => ({
@@ -30,11 +30,27 @@ test("with several keys the status line shows the combined amount and prefers th
     apiCredit: { active: kind === "api-credit", usedUsd, limitUsd: 200, limitReached, unmetered: false },
   } as AccountQuotaSummary);
   const accounts = [key("a", 150), key("b", 40), { id: "s", tool: "claude", apiCredit: null }];
+  // 합계 190은 어느 키의 상한과도 비교하지 않는다: 쓰는 중인 키 b의 사용액과 키당 상한이 보인다.
   const view = apiCreditOverview(accounts, [summary("a", "available", 150), summary("b", "api-credit", 40)], NOW);
   assert.equal(view.active, true);
-  assert.equal(view.label, `${dictionaries.en["usage.verdict.api-credit"]} · $190.00 / $200 (est.)`);
-  const capped = apiCreditOverview([key("a", 150), key("b", 150)], [summary("a", "resting", 150, true), summary("b", "resting", 150, true)], NOW);
-  assert.match(capped.label ?? "", /cap reached · \$300\.00 \/ \$200/);
+  assert.equal(view.label, `${dictionaries.en["usage.verdict.api-credit"]} · $40.00 / $200 (est.)`);
+  // 두 키가 합쳐서 $300이어도 각자 $150이면 상한 도달이 아니다.
+  assert.equal(apiCreditOverview([key("a", 150), key("b", 150)], [summary("a", "available", 150), summary("b", "available", 150)], NOW).label, null);
+  // 키 하나만 상한에 닿고 다른 키가 남았으면 상한 도달을 말하지 않는다.
+  assert.equal(apiCreditOverview([key("a", 200), key("b", 10)], [summary("a", "resting", 200, true), summary("b", "available", 10)], NOW).label, null);
+  // 쓸 수 있는 키가 모두 각자의 상한에 닿았을 때만 말한다.
+  const capped = apiCreditOverview([key("a", 210), key("b", 200)], [summary("a", "resting", 210, true), summary("b", "resting", 200, true)], NOW);
+  assert.match(capped.label ?? "", /cap reached on every key · \$210\.00 \/ \$200/);
+});
+
+test("per-key cap is independent: a capped key does not cap another, and the cap is used < limit like the service", () => {
+  const start = utcPeriodStart(NOW);
+  const key = (usedUsd: number) => ({ apiCredit: { periodStart: start, usedUsd, unmeteredRequests: 0, updatedAt: NOW } });
+  assert.deepEqual(apiKeyCap(key(199.99), 200, NOW), { usedUsd: 199.99, unmeteredRequests: 0, limitUsd: 200, reached: false });
+  assert.equal(apiKeyCap(key(200), 200, NOW).reached, true);
+  assert.equal(apiKeyCap(key(40), 200, NOW).reached, false);
+  assert.equal(apiKeyCap({ apiCredit: { periodStart: Date.UTC(2026, 8, 1), usedUsd: 500, unmeteredRequests: 0, updatedAt: NOW } }, 200, NOW).reached, false);
+  assert.equal(apiKeyCap({ apiCredit: null }, 200, NOW).usedUsd, 0);
 });
 
 test("api key accounts are kept out of subscription lists", () => {
@@ -52,15 +68,16 @@ test("monthly usage restarts when the recorded period is not the current UTC mon
   assert.deepEqual(apiCreditUsage([key(start, 1.5, 1), key(start, 2.25), { tool: "claude", apiCredit: null }], NOW), { usedUsd: 3.75, unmeteredRequests: 1 });
 });
 
-test("removed keys' spend this month stays in the displayed total, other months do not", () => {
+test("removed keys' spend this month stays in the reported total, other months do not", () => {
   const start = utcPeriodStart(NOW);
   const key = { id: "b", tool: "api", apiCredit: { periodStart: start, usedUsd: 60, unmeteredRequests: 0, updatedAt: NOW } };
   const removed = { periodStart: start, usedUsd: 150, unmeteredRequests: 2, updatedAt: NOW };
   assert.deepEqual(apiCreditUsage([key], NOW, removed), { usedUsd: 210, unmeteredRequests: 2 });
   assert.deepEqual(apiCreditUsage([key], NOW, { ...removed, periodStart: Date.UTC(2026, 8, 1) }), { usedUsd: 60, unmeteredRequests: 0 });
   assert.deepEqual(apiCreditUsage([key], NOW, null), { usedUsd: 60, unmeteredRequests: 0 });
-  const summary = { accountIds: ["b"], kind: "resting", until: null, models: [], label: null, rate: false, apiCredit: { active: false, usedUsd: 60, limitUsd: 200, limitReached: true, unmetered: false } } as AccountQuotaSummary;
-  assert.match(apiCreditOverview([key], [summary], NOW, removed).label ?? "", /cap reached · \$210\.00 \/ \$200/);
+  // 지운 키의 원장은 남은 키의 상한 판정·표시에 들어가지 않는다: 키 b는 $60 / $200 그대로다.
+  const summary = { accountIds: ["b"], kind: "api-credit", until: null, models: [], label: null, rate: false, apiCredit: { active: true, usedUsd: 60, limitUsd: 200, limitReached: false, unmetered: false } } as AccountQuotaSummary;
+  assert.match(apiCreditOverview([key], [summary], NOW, removed).label ?? "", /· \$60\.00 \/ \$200 \(est\.\)$/);
 });
 
 test("every API credit key exists in en, ko and id with the same placeholders", () => {

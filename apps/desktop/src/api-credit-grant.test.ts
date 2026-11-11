@@ -1,12 +1,12 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { billingAccounts, billingFormFrom, billingPatch, estimateView, grantFormFrom, grantPatch, grantView, localInputToMs, msToLocalInput, proactiveBlockKey } from "./api-credit-grant.ts";
+import { billingAccounts, billingFormFrom, billingPatch, estimateView, grantFormFrom, grantPatch, localInputToMs, msToLocalInput, poolOfKey, proactiveBlockKey, ungroupedKeys } from "./api-credit-grant.ts";
 import { allocationModeOf } from "./allocation-mode.ts";
 import type { ApiCreditBillingStatus, ApiCreditGrantPolicy } from "./types.ts";
 
 const NOW = new Date(2026, 9, 31, 12, 0).getTime();
 const DAY = 86_400_000;
-const form = (patch: Partial<Parameters<typeof grantPatch>[0]> = {}) => ({ budget: "120.5", startsAt: msToLocalInput(NOW - DAY), expiresAt: msToLocalInput(NOW + 20 * DAY), confirmed: true, expiryMode: "exact" as const, estimateConfirmedFor: null as number | null, ...patch });
+const form = (patch: Partial<Parameters<typeof grantPatch>[0]> = {}) => ({ id: null as string | null, accountIds: ["api-1"], billingAccountId: null as string | null, budget: "120.5", startsAt: msToLocalInput(NOW - DAY), expiresAt: msToLocalInput(NOW + 20 * DAY), confirmed: true, expiryMode: "exact" as const, estimateConfirmedFor: null as number | null, ...patch });
 
 test("unknown or future modes fall back to smart, known modes pass through", () => {
   assert.equal(allocationModeOf(undefined), "smart");
@@ -15,14 +15,20 @@ test("unknown or future modes fall back to smart, known modes pass through", () 
   assert.equal(allocationModeOf("expiry-balanced"), "expiry-balanced");
 });
 
-test("a valid grant becomes a confirmed patch without an id, so spend restarts at zero", () => {
-  const result = grantPatch(form(), NOW);
+test("a new pool is sent without an id and with its keys, so its spend starts at zero", () => {
+  const result = grantPatch(form({ accountIds: ["api-1", "api-2"] }), NOW);
   assert.ok(result.ok);
   if (!result.ok) return;
   assert.equal(result.patch.budgetUsd, 120.5);
   assert.equal(result.patch.confirmed, true);
+  assert.deepEqual(result.patch.accountIds, ["api-1", "api-2"]);
   assert.equal("id" in result.patch, false);
   assert.equal(result.patch.expiresAt, localInputToMs(msToLocalInput(NOW + 20 * DAY)));
+});
+
+test("a pool without any chosen key is rejected before reaching the service", () => {
+  const result = grantPatch(form({ accountIds: [] }), NOW);
+  assert.deepEqual(result, { ok: false, error: "keys" });
 });
 
 test("grant input is rejected the same way the service rejects it", () => {
@@ -42,31 +48,51 @@ test("grant input is rejected the same way the service rejects it", () => {
   assert.equal(error({ confirmed: false }), "confirm");
 });
 
-test("the form refills from the saved grant with the remaining estimate and asks for confirmation again", () => {
-  const grant: ApiCreditGrantPolicy = { id: "g1", budgetUsd: 100, startsAt: NOW - 5 * DAY, expiresAt: NOW + 10 * DAY, confirmedAt: NOW - 5 * DAY, source: "manual" };
-  const status = { id: "g1", source: "manual" as const, state: "active" as const, budgetUsd: 100, usedUsd: 12.4, remainingUsd: 87.6, startsAt: grant.startsAt, expiresAt: grant.expiresAt, unmeteredRequests: 0, unmetered: false, perDayUsd: 8, monthlyLimitReached: false, proactive: { allowed: false, blockedBy: "OPT_IN_OFF" as const } };
-  const filled = grantFormFrom(grant, status, NOW);
-  assert.equal(filled.budget, "87.6");
+const pool = (over: Partial<ApiCreditGrantPolicy> = {}): ApiCreditGrantPolicy => ({ id: "g1", accountIds: ["api-1", "api-2"], budgetUsd: 100, startsAt: NOW - 5 * DAY, expiresAt: NOW + 10 * DAY, confirmedAt: NOW - 5 * DAY, source: "manual", ...over });
+
+test("editing a pool keeps its id and its saved budget, never the remaining amount, so spend is not subtracted twice", () => {
+  // 저장 100 중 12.4를 이미 썼어도 폼에는 남은 87.6이 아니라 저장된 100을 채워야 한다. 같은 id 저장은 서비스가 사용액을 또 빼기 때문이다.
+  const filled = grantFormFrom(pool(), [], NOW, ["api-1", "api-2"]);
+  assert.equal(filled.id, "g1");
+  assert.equal(filled.budget, "100");
   assert.equal(filled.confirmed, false);
-  assert.equal(grantFormFrom(grant, null, NOW).budget, "100");
-  assert.equal(grantFormFrom(null, null, NOW).budget, "");
+  const result = grantPatch({ ...filled, confirmed: true }, NOW);
+  assert.ok(result.ok);
+  if (result.ok) { assert.equal(result.patch.id, "g1"); assert.equal(result.patch.budgetUsd, 100); assert.deepEqual(result.patch.accountIds, ["api-1", "api-2"]); }
+  // 새 풀 폼은 id 없이 비어 있다.
+  const blank = grantFormFrom(null, [], NOW, ["api-1"]);
+  assert.equal(blank.id, null);
+  assert.deepEqual(blank.accountIds, []);
+  assert.equal(blank.budget, "");
 });
 
-test("editing a future grant preserves its start through form refill and patch", () => {
-  const grant: ApiCreditGrantPolicy = { id: "future", budgetUsd: 100, startsAt: NOW + 3 * DAY, expiresAt: NOW + 20 * DAY, confirmedAt: NOW, source: "manual" };
-  const form = grantFormFrom(grant, null, NOW);
-  const result = grantPatch({ ...form, budget: "80", expiresAt: msToLocalInput(NOW + 21 * DAY), confirmed: true }, NOW);
+test("editing a pool never sends a removed key's id, which the service would reject", () => {
+  const filled = grantFormFrom(pool({ accountIds: ["api-1", "gone"] }), [], NOW, ["api-1", "api-2"]);
+  assert.deepEqual(filled.accountIds, ["api-1"]);
+  // 등록된 키가 하나도 안 남았으면 키 미선택으로 막힌다.
+  const empty = grantFormFrom(pool({ accountIds: ["gone"] }), [], NOW, ["api-1"]);
+  const result = grantPatch({ ...empty, confirmed: true }, NOW);
+  assert.deepEqual(result, { ok: false, error: "keys" });
+});
+
+test("a key in another pool is blocked, but the pool being edited keeps its own keys", () => {
+  const grants = [pool({ id: "g1", accountIds: ["api-1"] }), pool({ id: "g2", accountIds: ["api-2"] })];
+  assert.equal(poolOfKey(grants, "api-2", "g1"), "g2");
+  assert.equal(poolOfKey(grants, "api-1", "g1"), null);
+  assert.equal(poolOfKey(grants, "api-2", null), "g2");
+  assert.equal(poolOfKey(grants, "api-3", null), null);
+  assert.deepEqual(ungroupedKeys([{ id: "api-1" }, { id: "api-3" }], grants), [{ id: "api-3" }]);
+});
+
+test("editing a future pool preserves its start through form refill and patch", () => {
+  const grant = pool({ id: "future", startsAt: NOW + 3 * DAY, expiresAt: NOW + 20 * DAY, confirmedAt: NOW });
+  const filled = grantFormFrom(grant, [], NOW, ["api-1", "api-2"]);
+  const result = grantPatch({ ...filled, budget: "80", expiresAt: msToLocalInput(NOW + 21 * DAY), confirmed: true }, NOW);
   assert.ok(result.ok);
   if (!result.ok) return;
   assert.equal(result.patch.startsAt, grant.startsAt);
   assert.equal(result.patch.expiresAt, NOW + 21 * DAY);
   assert.equal(result.patch.budgetUsd, 80);
-});
-
-test("a service without grant status is shown as unknown and never allowed to spend ahead", () => {
-  const view = grantView(undefined);
-  assert.equal(view.state, "unknown");
-  assert.equal(view.proactive.allowed, false);
 });
 
 test("an unknown proactive block code from a newer service has no dedicated text, known ones do", () => {
@@ -75,13 +101,12 @@ test("an unknown proactive block code from a newer service has no dedicated text
   assert.equal(proactiveBlockKey(null), null);
 });
 
-
 const billing = (over: Partial<ApiCreditBillingStatus> = {}): ApiCreditBillingStatus => ({ accountId: "claude-1", cycle: "monthly", nextBillingAt: NOW + 12 * DAY, estimatedExpiresAt: NOW + 12 * DAY, estimateBlockedBy: null, ...over });
-const estimateForm = (over: Partial<Parameters<typeof grantPatch>[0]> = {}) => form({ expiresAt: "", expiryMode: "billing-estimate", estimateConfirmedFor: NOW + 12 * DAY, ...over });
-const errorOf = (input: Parameters<typeof grantPatch>[0], status?: ApiCreditBillingStatus | null) => { const result = grantPatch(input, NOW, status); return result.ok ? null : result.error; };
+const estimateForm = (over: Partial<Parameters<typeof grantPatch>[0]> = {}) => form({ expiresAt: "", expiryMode: "billing-estimate", billingAccountId: "claude-1", estimateConfirmedFor: NOW + 12 * DAY, ...over });
+const errorOf = (input: Parameters<typeof grantPatch>[0], status?: ApiCreditBillingStatus | null) => { const result = grantPatch(input, NOW, status ? [status] : []); return result.ok ? null : result.error; };
 
-test("a monthly billing estimate sends the service's estimated expiry with its source and the separate consent", () => {
-  const result = grantPatch(estimateForm(), NOW, billing());
+test("a monthly billing estimate sends the chosen billing account's estimated expiry with its source and the separate consent", () => {
+  const result = grantPatch(estimateForm(), NOW, [billing()]);
   assert.ok(result.ok);
   if (!result.ok) return;
   assert.equal(result.patch.expiresAt, NOW + 12 * DAY);
@@ -91,11 +116,24 @@ test("a monthly billing estimate sends the service's estimated expiry with its s
 });
 
 test("a manually typed exact expiry keeps the old patch shape, so it is never labeled an estimate", () => {
-  const result = grantPatch(form(), NOW, billing());
+  const result = grantPatch(form(), NOW, [billing()]);
   assert.ok(result.ok);
   if (!result.ok) return;
   assert.equal("expirySource" in result.patch, false);
   assert.equal("estimateConfirmed" in result.patch, false);
+  assert.equal("billingAccountId" in result.patch, false);
+});
+
+test("with several billing accounts the estimate uses the selected account's expiry, not another's", () => {
+  const billings = [billing({ accountId: "claude-1", estimatedExpiresAt: NOW + 12 * DAY }), billing({ accountId: "claude-2", nextBillingAt: NOW + 20 * DAY, estimatedExpiresAt: NOW + 20 * DAY })];
+  const second = grantPatch(estimateForm({ billingAccountId: "claude-2", estimateConfirmedFor: NOW + 20 * DAY }), NOW, billings);
+  assert.ok(second.ok);
+  if (second.ok) { assert.equal(second.patch.expiresAt, NOW + 20 * DAY); assert.equal(second.patch.billingAccountId, "claude-2"); }
+  // 다른 계정의 추정에 동의한 채 계정을 바꾸면 동의가 맞지 않아 저장되지 않는다.
+  assert.equal(grantPatch(estimateForm({ billingAccountId: "claude-2" }), NOW, billings).ok, false);
+  // 선택한 계정에 결제 정보가 없으면 다른 계정 것으로 대신하지 않는다.
+  assert.deepEqual(grantPatch(estimateForm({ billingAccountId: "claude-3" }), NOW, billings), { ok: false, error: "estimateNone" });
+  assert.deepEqual(grantPatch(estimateForm({ billingAccountId: null }), NOW, billings), { ok: false, error: "estimateNone" });
 });
 
 test("the estimate needs the balance confirmation and its own consent for the exact estimate being shown", () => {
@@ -131,20 +169,21 @@ test("estimateView reports why a billing date cannot be used", () => {
   assert.equal(estimateView(undefined, NOW).blockedBy, "NONE");
 });
 
-test("refilling a billing-estimate grant never copies the estimate into the exact date box, and keeps a future start", () => {
-  const grant: ApiCreditGrantPolicy = { id: "e1", budgetUsd: 50, startsAt: NOW + 2 * DAY, expiresAt: NOW + 12 * DAY, confirmedAt: NOW, source: "manual", expirySource: "billing-estimate", billingEstimate: { accountId: "claude-1", nextBillingAt: NOW + 12 * DAY } };
-  const status = { id: "e1", source: "manual" as const, state: "upcoming" as const, budgetUsd: 50, usedUsd: 0, remainingUsd: 50, startsAt: grant.startsAt, expiresAt: grant.expiresAt, unmeteredRequests: 0, unmetered: false, perDayUsd: null, monthlyLimitReached: false, proactive: { allowed: false, blockedBy: "GRANT_PENDING" as const }, billing: billing() };
-  const usable = grantFormFrom(grant, status, NOW);
+test("refilling a billing-estimate pool never copies the estimate into the exact date box, keeps a future start and the billing account", () => {
+  const grant = pool({ id: "e1", budgetUsd: 50, startsAt: NOW + 2 * DAY, expiresAt: NOW + 12 * DAY, confirmedAt: NOW, expirySource: "billing-estimate", billingEstimate: { accountId: "claude-1", nextBillingAt: NOW + 12 * DAY } });
+  const keyIds = ["api-1", "api-2"];
+  const usable = grantFormFrom(grant, [billing()], NOW, keyIds);
   assert.equal(usable.expiryMode, "billing-estimate");
+  assert.equal(usable.billingAccountId, "claude-1");
   assert.equal(usable.expiresAt, "");
   assert.equal(usable.estimateConfirmedFor, null);
   assert.equal(usable.startsAt, msToLocalInput(grant.startsAt));
-  const annual = grantFormFrom(grant, { ...status, billing: billing({ cycle: "annual", estimatedExpiresAt: null, estimateBlockedBy: "ANNUAL" }) }, NOW);
+  const annual = grantFormFrom(grant, [billing({ cycle: "annual", estimatedExpiresAt: null, estimateBlockedBy: "ANNUAL" })], NOW, keyIds);
   assert.equal(annual.expiryMode, "exact");
   assert.equal(annual.expiresAt, "");
   // 정확한 날짜 입력은 이전처럼 채운다.
-  assert.equal(grantFormFrom({ ...grant, expirySource: "exact" }, null, NOW).expiresAt, msToLocalInput(grant.expiresAt));
-  assert.equal(grantFormFrom({ ...grant, expirySource: undefined }, null, NOW).expiryMode, "exact");
+  assert.equal(grantFormFrom({ ...grant, expirySource: "exact" }, [], NOW, keyIds).expiresAt, msToLocalInput(grant.expiresAt));
+  assert.equal(grantFormFrom({ ...grant, expirySource: undefined }, [], NOW, keyIds).expiryMode, "exact");
 });
 
 const accounts = [

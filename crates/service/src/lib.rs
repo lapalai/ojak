@@ -151,6 +151,8 @@ pub struct Service {
     suspect_ms: i64,
     /// 백그라운드 시작 뒤에만 생긴다. 테스트용 서비스는 브릿지를 띄우지 않는다.
     bridge: OnceLock<Arc<bridge::Bridge>>,
+    /// API 키 추가와 계정 삭제를 직렬화해 재등록 시 같은 Keychain 항목의 쓰기·정리가 겹치지 않게 한다.
+    api_key_add_gate: parking_lot::Mutex<()>,
     /// 테스트에서만 API 키 확인 요청을 공급자별 로컬 서버로 돌린다. 릴리스에는 필드 자체가 없어 사용자가 바꿀 수 없다.
     #[cfg(test)]
     api_base_override: parking_lot::Mutex<std::collections::HashMap<String, String>>,
@@ -222,20 +224,12 @@ struct PolicyUpdate {
     balance_api_credit: Option<bool>,
     use_openai_api_after_limit: Option<bool>,
     openai_api_monthly_limit_usd: Option<f64>,
-    /// 없으면 변경 없음, `null`이면 삭제, 객체면 새 허용 기간(또는 같은 id의 수정).
-    #[serde(default, deserialize_with = "present")]
-    api_credit_grant: Option<Option<GrantInput>>,
-    /// 없으면 변경 없음, `null`이면 삭제, 객체면 저장(직접 입력한 결제 정보). 저장된 허용 기간은 바꾸지 않는다.
-    #[serde(default, deserialize_with = "present")]
-    api_credit_billing: Option<Option<BillingInput>>,
-}
-/// `null`과 "필드 없음"을 구분한다.
-fn present<'de, D, T>(deserializer: D) -> Result<Option<Option<T>>, D::Error>
-where
-    D: serde::Deserializer<'de>,
-    T: Deserialize<'de>,
-{
-    Option::<T>::deserialize(deserializer).map(Some)
+    /// 풀 하나 추가(`id` 생략) 또는 같은 `id` 수정.
+    api_credit_grant: Option<GrantInput>,
+    api_credit_grant_remove: Option<String>,
+    /// 구독 계정 하나의 결제 정보 추가·수정(직접 입력). 저장된 풀은 바꾸지 않는다.
+    api_credit_billing: Option<BillingInput>,
+    api_credit_billing_remove: Option<String>,
 }
 #[derive(Deserialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
@@ -247,6 +241,8 @@ struct BillingInput {
 #[derive(Deserialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 struct GrantInput {
+    /// 이 풀의 잔액을 쓰는 Anthropic API 키 계정 ID(같은 Console 조직의 키). 다른 풀에 있는 키는 넣을 수 없다.
+    account_ids: Vec<String>,
     budget_usd: f64,
     starts_at: i64,
     expires_at: i64,
@@ -261,6 +257,9 @@ struct GrantInput {
     /// 만료일이 결제일에서 추정한 값임을 사용자가 이해하고 동의했다는 표시.
     #[serde(default)]
     estimate_confirmed: bool,
+    /// `billing-estimate`일 때 근거로 쓸 결제 정보의 구독 계정 ID.
+    #[serde(default)]
+    billing_account_id: Option<String>,
 }
 #[derive(Deserialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
@@ -417,11 +416,12 @@ fn reject_api_account(account: &Account) -> Result<(), ApiError> {
     Ok(())
 }
 fn forget_account(policy: &mut Policy, id: &str) -> bool {
-    // 결제 정보는 연결한 구독 계정이 사라지면 근거를 잃는다. 이미 저장된 허용 기간은 그대로 둔다(추정 근거는 `estimate_drift`로 드러난다).
-    let billing = policy.api_credit_billing.as_ref().is_some_and(|billing| billing.account_id == id);
-    if billing {
-        policy.api_credit_billing = None;
-    }
+    // 결제 정보는 연결한 구독 계정이 사라지면 근거를 잃는다. 이미 저장된 풀은 그대로 둔다(추정 근거는 `estimate_drift`로 드러난다).
+    let billings = policy.api_credit_billings.len();
+    policy.api_credit_billings.retain(|billing| billing.account_id != id);
+    let billing = billings != policy.api_credit_billings.len();
+    // 풀은 건드리지 않는다: 지운 키로 늦게 끝나는 요청도 그 풀의 잔액을 쓴 것이라 같은 풀에 계속 더한다. 화면은 없는 키를 표시하고,
+    // 다음 수정 때 등록된 키만 다시 보내므로 그때 빠진다.
     let preferred = policy.provider_pins.len();
     policy.provider_pins.retain(|_, value| value != id);
     let priority = policy.account_priority.len();
@@ -478,6 +478,7 @@ impl Service {
             prepared_ms: config_ms("AAM_PREPARED_TIMEOUT_MS", 30_000, 1_000, 300_000),
             suspect_ms: config_ms("AAM_SUSPECT_THRESHOLD_MS", 45_000, 10_000, 600_000),
             bridge: OnceLock::new(),
+            api_key_add_gate: parking_lot::Mutex::new(()),
             #[cfg(test)]
             api_base_override: parking_lot::Mutex::new(Default::default()),
             #[cfg(windows)]
@@ -573,7 +574,8 @@ impl Service {
             })
             .collect();
         let quota_summaries = quota_summary::summaries_with(&accounts, &policy, bridge.as_ref().map_or(&[], |status| status.blocks.as_slice()), now, &ledger);
-        let api_credit_grant = scheduler::grant_status(&policy, &ledger, &accounts, now);
+        let api_credit_grants = scheduler::grant_statuses(&policy, &ledger, &accounts, now);
+        let api_credit_billings = scheduler::billing_statuses(&policy, &accounts, now);
         Ok(Snapshot {
             version: PROTOCOL_VERSION,
             generated_at: now,
@@ -590,7 +592,8 @@ impl Service {
             quota_summaries,
             api_credit_removed: (api_removed.used_usd > 0.0 || api_removed.unmetered_requests > 0).then_some(api_removed),
             openai_api_removed: (openai_removed.used_usd > 0.0 || openai_removed.unmetered_requests > 0).then_some(openai_removed),
-            api_credit_grant: Some(api_credit_grant),
+            api_credit_grants,
+            api_credit_billings,
             service_version: Some(env!("CARGO_PKG_VERSION").to_owned()),
         })
     }
@@ -824,125 +827,153 @@ impl Service {
         if let Some(balance) = request.balance_api_credit {
             current.balance_api_credit = balance;
         }
-        // 결제 정보는 허용 기간보다 먼저 처리해 한 번의 요청에서 같이 보낸 값으로 추정 만료일을 검증한다.
-        // 결제 정보를 바꿔도 이미 저장된 허용 기간(만료일·예산·사용액)은 건드리지 않는다.
-        if let Some(change) = request.api_credit_billing {
-            let now = now_ms();
-            current.api_credit_billing = match change {
-                None => None,
-                Some(input) => {
-                    let linked = account(&tx, &input.account_id)?;
-                    if !scheduler::is_billing_account(&linked) {
-                        return Err(ApiError::new("INVALID_PARAMS", "결제 정보는 Anthropic 구독(Claude) 계정에만 연결할 수 있어요."));
-                    }
-                    let horizon_days: i64 = match input.cycle {
-                        aam_protocol::BillingCycle::Monthly => 35,
-                        aam_protocol::BillingCycle::Annual => 367,
-                    };
-                    if input.next_billing_at <= now || input.next_billing_at > now.saturating_add(horizon_days * 86_400_000) {
-                        return Err(ApiError::new(
-                            "INVALID_PARAMS",
-                            "다음 결제일은 지금 이후여야 하고 월 결제는 35일, 연 결제는 367일 안이어야 해요.",
-                        ));
-                    }
-                    Some(aam_protocol::ApiCreditBilling {
-                        account_id: input.account_id,
-                        cycle: input.cycle,
-                        next_billing_at: input.next_billing_at,
-                        updated_at: now,
-                    })
-                }
-            };
+        // 결제 정보는 풀보다 먼저 처리해 한 번의 요청에서 같이 보낸 값으로 추정 만료일을 검증한다.
+        // 결제 정보를 바꿔도 이미 저장된 풀(만료일·예산·사용액)은 건드리지 않는다.
+        if let Some(account_id) = request.api_credit_billing_remove {
+            let before = current.api_credit_billings.len();
+            current.api_credit_billings.retain(|billing| billing.account_id != account_id);
+            if current.api_credit_billings.len() == before {
+                return Err(ApiError::new("INVALID_PARAMS", "지울 결제 정보를 찾지 못했어요."));
+            }
         }
-        if let Some(change) = request.api_credit_grant {
+        if let Some(input) = request.api_credit_billing {
             let now = now_ms();
-            current.api_credit_grant = match change {
-                None => None,
-                Some(input) => {
-                    if !input.confirmed {
+            let linked = account(&tx, &input.account_id)?;
+            if !scheduler::is_billing_account(&linked) {
+                return Err(ApiError::new("INVALID_PARAMS", "결제 정보는 Anthropic 구독(Claude) 계정에만 연결할 수 있어요."));
+            }
+            let horizon_days: i64 = match input.cycle {
+                aam_protocol::BillingCycle::Monthly => 35,
+                aam_protocol::BillingCycle::Annual => 367,
+            };
+            if input.next_billing_at <= now || input.next_billing_at > now.saturating_add(horizon_days * 86_400_000) {
+                return Err(ApiError::new(
+                    "INVALID_PARAMS",
+                    "다음 결제일은 지금 이후여야 하고 월 결제는 35일, 연 결제는 367일 안이어야 해요.",
+                ));
+            }
+            let saved = aam_protocol::ApiCreditBilling { account_id: input.account_id, cycle: input.cycle, next_billing_at: input.next_billing_at, updated_at: now };
+            match current.api_credit_billings.iter_mut().find(|billing| billing.account_id == saved.account_id) {
+                Some(existing) => *existing = saved,
+                None => current.api_credit_billings.push(saved),
+            }
+        }
+        if let Some(id) = request.api_credit_grant_remove {
+            let before = current.api_credit_grants.len();
+            current.api_credit_grants.retain(|grant| grant.id != id);
+            if current.api_credit_grants.len() == before {
+                return Err(ApiError::new("INVALID_PARAMS", "지울 API 크레딧 풀을 찾지 못했어요."));
+            }
+        }
+        if let Some(input) = request.api_credit_grant {
+            let now = now_ms();
+            if !input.confirmed {
+                return Err(ApiError::new(
+                    "API_CREDIT_GRANT_CONFIRM_REQUIRED",
+                    "Console에서 남은 크레딧과 만료일을 직접 확인했다고 표시해야 저장할 수 있어요.",
+                ));
+            }
+            const MAX_SPAN_MS: i64 = 366 * 86_400_000;
+            if !input.budget_usd.is_finite() || !(0.01..=1_000_000.0).contains(&input.budget_usd) {
+                return Err(ApiError::new("INVALID_PARAMS", "API 크레딧 예산은 0.01~1,000,000달러여야 해요."));
+            }
+            if input.starts_at < 0
+                || input.expires_at <= input.starts_at
+                || input.expires_at <= now
+                || input.expires_at - input.starts_at > MAX_SPAN_MS
+                || input.starts_at > now.saturating_add(MAX_SPAN_MS)
+            {
+                return Err(ApiError::new(
+                    "INVALID_PARAMS",
+                    "API 크레딧 기간은 아직 끝나지 않았고 시작이 만료보다 앞서며 366일을 넘지 않아야 해요.",
+                ));
+            }
+            // 같은 id는 기존 풀의 수정이라 쓴 금액을 이어 간다. id를 생략하면 새 풀이고 0부터 센다.
+            let id = match input.id {
+                Some(id) if current.api_credit_grants.iter().any(|grant| grant.id == id) => id,
+                Some(_) => return Err(ApiError::new("INVALID_PARAMS", "수정할 API 크레딧 풀을 찾지 못했어요. 새로 입력해 주세요.")),
+                None => new_id(),
+            };
+            let mut account_ids = input.account_ids;
+            account_ids.sort();
+            account_ids.dedup();
+            if account_ids.is_empty() {
+                return Err(ApiError::new("INVALID_PARAMS", "풀에 넣을 API 키를 하나 이상 골라 주세요."));
+            }
+            let all = accounts(&tx)?;
+            for key in &account_ids {
+                if !all.iter().any(|account| &account.id == key && aam_adapters::api_credit::ApiProvider::Anthropic.owns(account)) {
+                    return Err(ApiError::new("INVALID_PARAMS", "풀에는 등록된 Anthropic API 키만 넣을 수 있어요."));
+                }
+                // 같은 잔액을 두 풀에서 세지 않도록 키 하나는 풀 하나에만 둔다.
+                if current.api_credit_grants.iter().any(|grant| grant.id != id && grant.account_ids.contains(key)) {
+                    return Err(ApiError::new("API_CREDIT_KEY_IN_OTHER_POOL", "이미 다른 API 크레딧 풀에 들어 있는 키예요. 그 풀에서 먼저 빼 주세요."));
+                }
+            }
+            let revised = current.api_credit_grants.iter().find(|grant| grant.id == id);
+            let billing_estimate = match input.expiry_source {
+                aam_protocol::ExpirySource::Exact => {
+                    // 추정 만료일이 사용자 확인 없이 정확한 날짜로 바뀌지 않게, 날짜를 그대로 둔 채 근거만 바꾸는 수정은 거절한다.
+                    if revised.is_some_and(|grant| {
+                        grant.expiry_source == aam_protocol::ExpirySource::BillingEstimate && grant.expires_at == input.expires_at
+                    }) {
                         return Err(ApiError::new(
-                            "API_CREDIT_GRANT_CONFIRM_REQUIRED",
-                            "Console에서 남은 크레딧과 만료일을 직접 확인했다고 표시해야 저장할 수 있어요.",
+                            "API_CREDIT_EXPIRY_SOURCE_REQUIRED",
+                            "추정한 만료일을 그대로 확정할 수 없어요. Console에서 확인한 만료일로 바꿔 입력하거나 추정으로 다시 동의해 주세요.",
                         ));
                     }
-                    const MAX_SPAN_MS: i64 = 366 * 86_400_000;
-                    if !input.budget_usd.is_finite() || !(0.01..=1_000_000.0).contains(&input.budget_usd) {
-                        return Err(ApiError::new("INVALID_PARAMS", "API 크레딧 예산은 0.01~1,000,000달러여야 해요."));
+                    None
+                }
+                aam_protocol::ExpirySource::BillingEstimate => {
+                    let unavailable = || ApiError::new(
+                        "API_CREDIT_ESTIMATE_UNAVAILABLE",
+                        "월 결제 구독 계정의 미래 결제일이 저장돼 있어야 추정할 수 있어요. 연 결제 갱신일은 월 크레딧 만료일로 쓰지 않아요.",
+                    );
+                    let billing = input
+                        .billing_account_id
+                        .as_deref()
+                        .and_then(|account_id| current.api_credit_billings.iter().find(|billing| billing.account_id == account_id))
+                        .ok_or_else(unavailable)?;
+                    if scheduler::billing_estimate_block(billing, &all, now).is_some() {
+                        return Err(unavailable());
                     }
-                    if input.starts_at < 0
-                        || input.expires_at <= input.starts_at
-                        || input.expires_at <= now
-                        || input.expires_at - input.starts_at > MAX_SPAN_MS
-                        || input.starts_at > now.saturating_add(MAX_SPAN_MS)
-                    {
+                    if !input.estimate_confirmed {
                         return Err(ApiError::new(
-                            "INVALID_PARAMS",
-                            "API 크레딧 기간은 아직 끝나지 않았고 시작이 만료보다 앞서며 366일을 넘지 않아야 해요.",
+                            "API_CREDIT_ESTIMATE_CONFIRM_REQUIRED",
+                            "만료일이 결제일에서 추정한 값임을 확인하고 동의해야 저장할 수 있어요.",
                         ));
                     }
-                    let previous = current.api_credit_grant.as_ref();
-                    // 같은 id는 기존 허용 기간의 수정이라 쓴 금액을 이어 간다. id를 생략하면 새 기간이고 0부터 센다.
-                    let id = match input.id {
-                        Some(id) if previous.is_some_and(|grant| grant.id == id) => id,
-                        Some(_) => return Err(ApiError::new("INVALID_PARAMS", "수정할 API 크레딧 기간을 찾지 못했어요. 새로 입력해 주세요.")),
-                        None => new_id(),
-                    };
-                    let revised = previous.filter(|grant| grant.id == id);
-                    let billing_estimate = match input.expiry_source {
-                        aam_protocol::ExpirySource::Exact => {
-                            // 추정 만료일이 사용자 확인 없이 정확한 날짜로 바뀌지 않게, 날짜를 그대로 둔 채 근거만 바꾸는 수정은 거절한다.
-                            if revised.is_some_and(|grant| {
-                                grant.expiry_source == aam_protocol::ExpirySource::BillingEstimate && grant.expires_at == input.expires_at
-                            }) {
-                                return Err(ApiError::new(
-                                    "API_CREDIT_EXPIRY_SOURCE_REQUIRED",
-                                    "추정한 만료일을 그대로 확정할 수 없어요. Console에서 확인한 만료일로 바꿔 입력하거나 추정으로 다시 동의해 주세요.",
-                                ));
-                            }
-                            None
-                        }
-                        aam_protocol::ExpirySource::BillingEstimate => {
-                            let unavailable = || ApiError::new(
-                                "API_CREDIT_ESTIMATE_UNAVAILABLE",
-                                "월 결제 구독 계정의 미래 결제일이 저장돼 있어야 추정할 수 있어요. 연 결제 갱신일은 월 크레딧 만료일로 쓰지 않아요.",
-                            );
-                            let billing = current.api_credit_billing.as_ref().ok_or_else(unavailable)?;
-                            if scheduler::billing_estimate_block(billing, &accounts(&tx)?, now).is_some() {
-                                return Err(unavailable());
-                            }
-                            if !input.estimate_confirmed {
-                                return Err(ApiError::new(
-                                    "API_CREDIT_ESTIMATE_CONFIRM_REQUIRED",
-                                    "만료일이 결제일에서 추정한 값임을 확인하고 동의해야 저장할 수 있어요.",
-                                ));
-                            }
-                            if input.expires_at != billing.next_billing_at {
-                                return Err(ApiError::new("INVALID_PARAMS", "추정 만료일은 저장된 다음 결제 시각과 같아야 해요."));
-                            }
-                            Some(aam_protocol::ApiCreditBillingBasis {
-                                account_id: billing.account_id.clone(),
-                                next_billing_at: billing.next_billing_at,
-                            })
-                        }
-                    };
-                    Some(ApiCreditGrant {
-                        id,
-                        budget_usd: input.budget_usd,
-                        starts_at: input.starts_at,
-                        expires_at: input.expires_at,
-                        confirmed_at: now,
-                        source: "manual".into(),
-                        expiry_source: input.expiry_source,
-                        billing_estimate,
-                    })
+                    if input.expires_at != billing.next_billing_at {
+                        return Err(ApiError::new("INVALID_PARAMS", "추정 만료일은 저장된 다음 결제 시각과 같아야 해요."));
+                    }
+                    Some(aam_protocol::ApiCreditBillingBasis { account_id: billing.account_id.clone(), next_billing_at: billing.next_billing_at })
                 }
             };
-            // 현재 허용 기간이 아닌 기간의 합산 사용액은 더 쓰이지 않는다. 지금 기간의 행은 새 기간이면 0으로 시작하도록 비워 둔다.
-            let cleared = match &current.api_credit_grant {
-                Some(grant) => tx.execute("DELETE FROM api_credit_grant_usage WHERE grant_id<>?1", [&grant.id]),
-                None => tx.execute("DELETE FROM api_credit_grant_usage", rusqlite::params![]),
+            let saved = ApiCreditGrant {
+                id: id.clone(),
+                account_ids,
+                budget_usd: input.budget_usd,
+                starts_at: input.starts_at,
+                expires_at: input.expires_at,
+                confirmed_at: now,
+                source: "manual".into(),
+                expiry_source: input.expiry_source,
+                billing_estimate,
             };
-            cleared.map_err(db_error)?;
+            match current.api_credit_grants.iter_mut().find(|grant| grant.id == id) {
+                Some(existing) => *existing = saved,
+                None => current.api_credit_grants.push(saved),
+            }
+        }
+        // 지금 풀 목록에 없는 풀의 사용액은 더 쓰이지 않는다(삭제한 풀). 새 풀은 행이 없어 0부터 센다.
+        let live: Vec<&str> = current.api_credit_grants.iter().map(|grant| grant.id.as_str()).collect();
+        let stale: Vec<String> = {
+            let mut statement = tx.prepare("SELECT grant_id FROM api_credit_grant_usage").map_err(db_error)?;
+            let rows = statement.query_map([], |row| row.get::<_, String>(0)).map_err(db_error)?;
+            rows.collect::<Result<Vec<_>, _>>().map_err(db_error)?.into_iter().filter(|id| !live.contains(&id.as_str())).collect()
+        };
+        for id in stale {
+            tx.execute("DELETE FROM api_credit_grant_usage WHERE grant_id=?1", [&id]).map_err(db_error)?;
         }
         if let Some(boost) = request.expiring_boost {
             current.expiring_boost = boost;
@@ -1155,6 +1186,9 @@ impl Service {
     /// 지운 프로필은 `dismissedProfiles`에 남겨 자동 탐색이 다시 연결하지 않게 하고, 같은 경로의 명시적 등록만 이를 푼다.
     /// 용량을 쥔 세션(불확실 상태 포함)이 있으면 슬롯을 유지하려고 거절한다.
     fn remove_account(&self, request: AccountRemove) -> Result<Value, ApiError> {
+        // 키 재등록은 기존 id를 이어 쓰므로, DB 삭제부터 Keychain 삭제까지 추가 요청과 직렬화한다.
+        // 계정 존재 여부를 읽기 전 잠가, 삭제된 id가 재등록되는 사이의 경쟁도 막는다. 잠금 순서는 gate → store다.
+        let _api_key_gate = self.api_key_add_gate.lock();
         let mut store = self.lock()?;
         let tx = store
             .connection
@@ -1177,8 +1211,12 @@ impl Service {
             ));
         }
         if removed.tool == aam_adapters::api_credit::API_TOOL {
-            // 키를 지워도 이번 달 사용액은 월 상한 합계에 남는다. 원장 행을 확인해 두고(없으면 0으로 만들어), 계정 행만 지운다.
+            // 키를 지워도 이번 달 사용액은 원장에 남는다. 원장 행을 확인해 두고(없으면 0으로 만들어), 계정 행만 지운다.
+            // 같은 키를 다시 등록하면 같은 계정 id·사용액·풀 소속을 이어 받도록 식별자 → id를 남긴다(키별 월 상한 우회 방지).
             store::retain_api_credit_ledger(&tx, &removed, now_ms())?;
+            if let Some(identity) = removed.identity_key.as_deref() {
+                store::set_api_key_tombstone(&tx, identity, &removed.id)?;
+            }
         }
         tx.execute("DELETE FROM accounts WHERE id=?1", [&removed.id]).map_err(db_error)?;
         let mut current_policy = policy(&tx)?;
@@ -1601,6 +1639,10 @@ impl Service {
             background_processes: None,
             parent_session_id: request.intent.parent_session_id,
             continued_from,
+            // 입장 때의 풀을 고정한다. 실행 중 키를 다른 풀로 옮기거나 풀을 다시 만들어도 이 세션의 사용액은 시작한 풀에 쌓는다.
+            api_credit_pool: api_credit_fallback
+                .then(|| scheduler::pool_of(&policy, &account.id).map(|grant| grant.id.clone()))
+                .flatten(),
         };
         let record = LeaseRecord {
             session,

@@ -1,6 +1,6 @@
 use aam_adapters::api_credit::ApiProvider;
 use aam_protocol::{
-    project_allowed, Account, AllocationMode, ApiError, Candidate, Decision, LaunchIntent, Policy,
+    project_allowed, Account, AllocationMode, ApiCreditGrant, ApiError, Candidate, Decision, LaunchIntent, Policy,
     QuotaBucket, Session, NATIVE_DEFAULT_MODEL,
 };
 use std::{
@@ -152,15 +152,20 @@ pub(crate) fn api_credit_used(account: &Account, now: i64) -> f64 {
 }
 
 /// API 크레딧 사용액 원장 중 판정에 필요한 값. `removed_usd`·`openai_removed_usd`는 지운 키의 이번 달(UTC) 추정 사용액(공급자별),
-/// `grant_*`는 현재 허용 기간(`Policy.api_credit_grant`, Claude 전용)에 기록된 합산 추정 사용액과 금액을 읽지 못한 요청 수다(키와 무관하게 허용 기간 id로 쌓는다).
-#[derive(Debug, Clone, Copy, Default, PartialEq)]
+/// `grants`는 풀 id별(`Policy.api_credit_grants`, Claude 전용) 추정 사용액과 금액을 읽지 못한 요청 수다(그 풀의 키로 보낸 요청만 쌓는다).
+#[derive(Debug, Clone, Default, PartialEq)]
 pub struct ApiLedger {
     pub removed_usd: f64,
     pub openai_removed_usd: f64,
     /// 지운 OpenAI 키가 이번 달에 남긴 "금액을 읽지 못한 요청" 수. 하나라도 있으면 OpenAI 키는 이번 달 더는 쓰지 않는다.
     pub openai_removed_unmetered: u64,
-    pub grant_used_usd: f64,
-    pub grant_unmetered: u64,
+    pub grants: std::collections::BTreeMap<String, GrantUsage>,
+}
+/// 풀 하나의 원장 값.
+#[derive(Debug, Clone, Copy, Default, PartialEq)]
+pub struct GrantUsage {
+    pub used_usd: f64,
+    pub unmetered: u64,
 }
 
 impl ApiLedger {
@@ -174,8 +179,14 @@ impl ApiLedger {
 }
 
 /// 이 공급자 키 전체의 이번 달 추정 사용액 합계(지운 키 포함). 다른 공급자의 키는 섞지 않는다.
+/// OpenAI는 이 합계를 상한과 비교한다. Anthropic 키는 상한을 키마다 따로 적용하므로(`api_key_under_cap`) 이 합계는 표시용이다.
 pub(crate) fn api_total_used(accounts: &[Account], provider: aam_adapters::api_credit::ApiProvider, removed_usd: f64, now: i64) -> f64 {
     removed_usd + accounts.iter().filter(|account| provider.owns(account)).map(|account| api_credit_used(account, now)).sum::<f64>()
+}
+
+/// Anthropic API 키 하나의 이번 달 추정 사용액이 월 상한(키마다 따로 적용) 미만인지. 다른 키의 사용액·지운 키의 원장은 보지 않는다.
+pub(crate) fn api_key_under_cap(account: &Account, limit_usd: f64, now: i64) -> bool {
+    api_credit_used(account, now) < limit_usd
 }
 
 /// 이번 달에 금액을 읽지 못한 요청(미계량)이 있는 키가 이 공급자에 하나라도 있는지(지운 키 포함). OpenAI 키는 미계량이 하나라도 있으면 이번 달 더는 쓰지 않는다
@@ -207,7 +218,7 @@ impl GrantState {
     }
 }
 
-/// 사용자가 확인한 API 크레딧 허용 기간을 `now` 기준으로 읽은 값. 저장하지 않고 매번 다시 계산한다.
+/// 사용자가 확인한 크레딧 풀을 `now` 기준으로 읽은 값. 저장하지 않고 매번 다시 계산한다.
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub(crate) struct GrantView {
     pub state: GrantState,
@@ -220,30 +231,10 @@ pub(crate) struct GrantView {
     pub effective_start: i64,
     pub unmetered: u64,
 }
-/// 허용 기간 입력의 복사 가능한 값. 브릿지가 요청마다 `now`로 상태를 다시 계산할 수 있게 한다.
-#[derive(Debug, Clone, Copy, PartialEq)]
-pub(crate) struct GrantTerms {
-    pub budget_usd: f64,
-    pub starts_at: i64,
-    pub expires_at: i64,
-    pub confirmed_at: i64,
-}
-impl GrantTerms {
-    pub(crate) fn of(policy: &Policy) -> Option<Self> {
-        policy.api_credit_grant.as_ref().map(|grant| Self {
-            budget_usd: grant.budget_usd,
-            starts_at: grant.starts_at,
-            expires_at: grant.expires_at,
-            confirmed_at: grant.confirmed_at,
-        })
-    }
-}
 impl GrantView {
-    pub(crate) fn of(policy: &Policy, ledger: &ApiLedger, now: i64) -> Option<Self> {
-        GrantTerms::of(policy).map(|terms| Self::at(terms, ledger, now))
-    }
-    pub(crate) fn at(grant: GrantTerms, ledger: &ApiLedger, now: i64) -> Self {
-        let used = if ledger.grant_used_usd.is_finite() { ledger.grant_used_usd.max(0.0) } else { 0.0 };
+    pub(crate) fn of(grant: &ApiCreditGrant, ledger: &ApiLedger, now: i64) -> Self {
+        let usage = ledger.grants.get(&grant.id).copied().unwrap_or_default();
+        let used = if usage.used_usd.is_finite() { usage.used_usd.max(0.0) } else { 0.0 };
         let remaining = (grant.budget_usd - used).max(0.0);
         let state = if now >= grant.expires_at {
             GrantState::Expired
@@ -262,7 +253,7 @@ impl GrantView {
             starts_at: grant.starts_at,
             expires_at: grant.expires_at,
             effective_start: grant.starts_at.max(grant.confirmed_at),
-            unmetered: ledger.grant_unmetered,
+            unmetered: usage.unmetered,
         }
     }
     fn hours_left(&self, now: i64) -> f64 {
@@ -276,25 +267,29 @@ impl GrantView {
     }
 }
 
-/// 허용 기간이 있으면 진행 중(`Active`)이어야 한도 뒤 API fallback도 열린다. 입력이 없으면 기존 동작 그대로 열려 있다.
-pub(crate) fn grant_allows_fallback(policy: &Policy, ledger: &ApiLedger, now: i64) -> Result<(), GrantState> {
-    match GrantView::of(policy, ledger, now) {
+/// 이 키 계정이 속한 풀. 키 하나는 풀 하나에만 속한다.
+pub(crate) fn pool_of<'a>(policy: &'a Policy, account_id: &str) -> Option<&'a ApiCreditGrant> {
+    policy.api_credit_grants.iter().find(|grant| grant.account_ids.iter().any(|id| id == account_id))
+}
+
+/// 키가 풀에 속하면 그 풀이 진행 중(`Active`)이어야 한도 뒤 API fallback도 열린다. 풀에 없는 키는 기존 동작 그대로 열려 있다.
+pub(crate) fn grant_allows_fallback(policy: &Policy, ledger: &ApiLedger, account_id: &str, now: i64) -> Result<(), GrantState> {
+    match pool_of(policy, account_id).map(|grant| GrantView::of(grant, ledger, now)) {
         None => Ok(()),
         Some(view) if view.state == GrantState::Active => Ok(()),
         Some(view) => Err(view.state),
     }
 }
 
-/// 소비 균형 모드에서 API를 구독 대신 선제적으로 쓰는 정책 조건(모드·옵트인·허용 기간·사용량 확인)을 만족하는지.
+/// 소비 균형 모드에서 풀 하나를 구독 대신 선제적으로 쓰는 정책 조건(모드·옵트인·기간·사용량 확인)을 만족하는지.
 /// 막힌 이유를 `blockedBy` 코드로 돌려준다. 키 유무·월 상한은 호출자가 이어서 본다.
-pub(crate) fn proactive_block(policy: &Policy, view: Option<&GrantView>) -> Option<&'static str> {
+pub(crate) fn proactive_block(policy: &Policy, view: &GrantView) -> Option<&'static str> {
     if policy.allocation_mode != AllocationMode::ExpiryBalanced {
         return Some("MODE");
     }
     if !(policy.balance_api_credit && policy.use_api_credit_after_limit) {
         return Some("OPT_IN_OFF");
     }
-    let Some(view) = view else { return Some("GRANT_NONE") };
     match view.state {
         GrantState::Upcoming => Some("GRANT_PENDING"),
         GrantState::Expired => Some("GRANT_EXPIRED"),
@@ -322,65 +317,75 @@ pub(crate) fn is_billing_account(account: &Account) -> bool {
     account.provider == "anthropic" && account.tool == "claude"
 }
 
-/// 스냅샷의 허용 기간 상태. 키 유무·월 상한까지 합쳐 선제 사용 가능 여부를 설명한다.
-pub(crate) fn grant_status(policy: &Policy, ledger: &ApiLedger, accounts: &[Account], now: i64) -> aam_protocol::ApiCreditGrantStatus {
-    let view = GrantView::of(policy, ledger, now);
-    let claude = aam_adapters::api_credit::ApiProvider::Anthropic;
-    let monthly_total = api_total_used(accounts, claude, ledger.removed_usd, now);
-    let monthly_limit_reached = !(monthly_total < policy.api_credit_monthly_limit_usd);
-    let has_key = accounts
+/// 결제 정보별 추정 가능 여부.
+pub(crate) fn billing_statuses(policy: &Policy, accounts: &[Account], now: i64) -> Vec<aam_protocol::ApiCreditBillingStatus> {
+    policy
+        .api_credit_billings
         .iter()
-        .any(|account| claude.owns(account) && account.enabled && account.auth_status == "authenticated");
-    let blocked = proactive_block(policy, view.as_ref())
-        .or(if !has_key { Some("NO_KEY") } else { None })
-        .or(if monthly_limit_reached { Some("MONTHLY_LIMIT") } else { None })
-        .or(match &view {
-            Some(view) if view.pace(now) < 1.0 => Some("AHEAD_OF_PACE"),
-            _ => None,
-        });
-    let grant = policy.api_credit_grant.as_ref();
-    let billing = policy.api_credit_billing.as_ref().map(|billing| {
-        let blocked = billing_estimate_block(billing, accounts, now);
-        aam_protocol::ApiCreditBillingStatus {
-            account_id: billing.account_id.clone(),
-            cycle: billing.cycle,
-            next_billing_at: billing.next_billing_at,
-            estimated_expires_at: blocked.is_none().then_some(billing.next_billing_at),
-            estimate_blocked_by: blocked.map(str::to_owned),
-        }
-    });
-    let estimate_drift = grant.is_some_and(|grant| {
-        grant.expiry_source == aam_protocol::ExpirySource::BillingEstimate
-            && grant.billing_estimate.as_ref().is_none_or(|basis| {
-                policy.api_credit_billing.as_ref().is_none_or(|billing| {
-                    billing.cycle != aam_protocol::BillingCycle::Monthly
-                        || billing.account_id != basis.account_id
-                        || billing.next_billing_at != basis.next_billing_at
+        .map(|billing| {
+            let blocked = billing_estimate_block(billing, accounts, now);
+            aam_protocol::ApiCreditBillingStatus {
+                account_id: billing.account_id.clone(),
+                cycle: billing.cycle,
+                next_billing_at: billing.next_billing_at,
+                estimated_expires_at: blocked.is_none().then_some(billing.next_billing_at),
+                estimate_blocked_by: blocked.map(str::to_owned),
+            }
+        })
+        .collect()
+}
+
+/// 스냅샷의 풀별 상태. 키 유무·월 상한까지 합쳐 선제 사용 가능 여부를 설명한다.
+/// 월 상한은 키마다 따로 적용한다. `monthly_limit_reached`는 풀에 쓸 수 있는 키가 있지만 모두 각자의 상한에 닿았다는 뜻이다.
+pub(crate) fn grant_statuses(policy: &Policy, ledger: &ApiLedger, accounts: &[Account], now: i64) -> Vec<aam_protocol::ApiCreditGrantStatus> {
+    let claude = aam_adapters::api_credit::ApiProvider::Anthropic;
+    policy
+        .api_credit_grants
+        .iter()
+        .map(|grant| {
+            let view = GrantView::of(grant, ledger, now);
+            let (has_key, has_available_key) = accounts
+                .iter()
+                .filter(|account| {
+                    claude.owns(account) && account.enabled && account.auth_status == "authenticated" && grant.account_ids.contains(&account.id)
                 })
-            })
-    });
-    aam_protocol::ApiCreditGrantStatus {
-        id: grant.map(|grant| grant.id.clone()),
-        expiry_source: grant.map_or_else(Default::default, |grant| grant.expiry_source),
-        billing_estimate: grant.and_then(|grant| grant.billing_estimate.clone()),
-        estimate_drift,
-        billing,
-        source: "manual".into(),
-        state: view.as_ref().map_or("unknown", |view| view.state.as_str()).into(),
-        budget_usd: view.as_ref().map(|view| view.budget),
-        used_usd: view.as_ref().map_or(0.0, |view| view.used),
-        remaining_usd: view.as_ref().map(|view| view.remaining),
-        starts_at: view.as_ref().map(|view| view.starts_at),
-        expires_at: view.as_ref().map(|view| view.expires_at),
-        unmetered_requests: ledger.grant_unmetered,
-        unmetered: view.is_some() && ledger.grant_unmetered > 0,
-        per_day_usd: view
-            .as_ref()
-            .filter(|view| view.state == GrantState::Active)
-            .map(|view| view.remaining / (view.hours_left(now) / 24.0).max(1.0 / 24.0)),
-        monthly_limit_reached,
-        proactive: aam_protocol::ApiCreditProactive { allowed: blocked.is_none(), blocked_by: blocked.map(str::to_owned) },
-    }
+                .fold((false, false), |(_, available), account| {
+                    (true, available || api_key_under_cap(account, policy.api_credit_monthly_limit_usd, now))
+                });
+            let monthly_limit_reached = has_key && !has_available_key;
+            let blocked = proactive_block(policy, &view)
+                .or(if !has_key { Some("NO_KEY") } else { None })
+                .or(if monthly_limit_reached { Some("MONTHLY_LIMIT") } else { None })
+                .or(if view.pace(now) < 1.0 { Some("AHEAD_OF_PACE") } else { None });
+            let estimate_drift = grant.expiry_source == aam_protocol::ExpirySource::BillingEstimate
+                && grant.billing_estimate.as_ref().is_none_or(|basis| {
+                    !policy.api_credit_billings.iter().any(|billing| {
+                        billing.cycle == aam_protocol::BillingCycle::Monthly
+                            && billing.account_id == basis.account_id
+                            && billing.next_billing_at == basis.next_billing_at
+                    })
+                });
+            aam_protocol::ApiCreditGrantStatus {
+                id: grant.id.clone(),
+                account_ids: grant.account_ids.clone(),
+                expiry_source: grant.expiry_source,
+                billing_estimate: grant.billing_estimate.clone(),
+                estimate_drift,
+                source: "manual".into(),
+                state: view.state.as_str().into(),
+                budget_usd: view.budget,
+                used_usd: view.used,
+                remaining_usd: view.remaining,
+                starts_at: view.starts_at,
+                expires_at: view.expires_at,
+                unmetered_requests: view.unmetered,
+                unmetered: view.unmetered > 0,
+                per_day_usd: (view.state == GrantState::Active).then(|| view.remaining / (view.hours_left(now) / 24.0).max(1.0 / 24.0)),
+                monthly_limit_reached,
+                proactive: aam_protocol::ApiCreditProactive { allowed: blocked.is_none(), blocked_by: blocked.map(str::to_owned) },
+            }
+        })
+        .collect()
 }
 
 /// 한도를 다 썼다는 관측이 지금도 믿을 만한지. 신선하고 리셋 시각이 남아 있어야 한다.
@@ -508,7 +513,7 @@ pub fn decide(
 }
 
 /// `decide`와 같지만 기본 모델 설정과 API 크레딧 원장(지운 키의 이번 달 사용액·허용 기간 합산 사용액)을 미리 받는다. 서비스 잠금 안에서는 이 함수를 쓴다.
-/// 지운 키는 후보가 아니고 월 상한 합계에만 더한다. 허용 기간이 있으면 한도 뒤 API fallback도 그 기간이 진행 중일 때만 열린다.
+/// Claude 키의 월 상한은 키마다 따로 적용하고(지운 키의 원장은 다른 키를 막지 않는다), OpenAI는 지운 키를 포함한 합계로 본다. 허용 기간이 있으면 한도 뒤 API fallback도 그 기간이 진행 중일 때만 열린다.
 pub fn decide_with(
     accounts: &[Account],
     sessions: &[Session],
@@ -973,11 +978,10 @@ pub fn decide_with(
         // 공식 CLI가 모델을 정하는 실행은 Claude에서만 단가를 모른 채 허용한다(Claude는 키 실행 뒤 미계량으로 센다). OpenAI 키는 명시한 단가 있는 모델에만 쓴다.
         let priced = (!openai && default_model(&intent.model)) || aam_adapters::api_credit::priced(provider, &intent.model);
         let mut usable: Vec<(&Account, f64)> = Vec::new();
-        // 상한은 같은 공급자로 등록한 모든 키의 합계로 본다. 같은 Console·Platform 조직의 키는 크레딧 잔액을 공유하므로 키 수가 상한을 늘리지 않는다.
-        let total = api_total_used(accounts, provider, ledger.removed(provider), now);
+        // OpenAI 상한은 같은 공급자로 등록한 모든 키의 합계로 본다. Anthropic 상한은 키마다 따로 적용한다(`api_key_under_cap`, 지운 키의 원장은 다른 키를 막지 않는다).
+        // 같은 Console 조직의 키는 크레딧 잔액을 공유하지만, 그 잔액은 풀(`api_credit_grants`)의 예산이 따로 지킨다.
+        let total = if openai { api_total_used(accounts, provider, ledger.removed(provider), now) } else { 0.0 };
         let limit_usd = if openai { policy.openai_api_monthly_limit_usd } else { policy.api_credit_monthly_limit_usd };
-        // 허용 기간은 Claude 크레딧의 개념이다. OpenAI 키에는 허용 기간·선제 사용이 없다.
-        let gate = if openai { Ok(()) } else { grant_allows_fallback(policy, ledger, now) };
         // OpenAI 실행(`codex exec`)은 사용량을 읽을 수 없어 첫 실행부터 미계량이다. 금액을 모르는 사용이 있으면 상한을 지킬 수 없으므로 이번 달 더는 쓰지 않는다.
         let unmetered = openai && api_unmetered(accounts, provider, ledger.openai_removed_unmetered, now);
         for account in accounts.iter().filter(|account| provider.owns(account)) {
@@ -992,20 +996,23 @@ pub fn decide_with(
             if !priced {
                 exclusions.push(reason("MODEL_UNPRICED", "단가를 모르는 모델은 API 키로 쓰지 않아요."));
             }
-            if !(total < limit_usd) {
+            if openai && !(total < limit_usd) {
                 exclusions.push(reason(API_CREDIT_LIMIT, "등록한 API 키 전체의 이번 달 사용액이 상한에 닿았어요."));
+            } else if !openai && !api_key_under_cap(account, limit_usd, now) {
+                exclusions.push(reason(API_CREDIT_LIMIT, "이 API 키의 이번 달 사용액이 키별 상한에 닿았어요."));
             }
             if unmetered {
                 exclusions.push(reason(API_UNMETERED, "금액을 읽지 못한 사용이 있어 이번 달에는 이 API 키를 더 쓰지 않아요."));
             }
-            if let Err(state) = gate {
+            // 크레딧 풀은 Claude 크레딧의 개념이다. 키가 풀에 속하면 그 풀이 진행 중일 때만 쓴다. OpenAI 키에는 풀·선제 사용이 없다.
+            if let Err(state) = if openai { Ok(()) } else { grant_allows_fallback(policy, ledger, &account.id, now) } {
                 exclusions.push(reason(
                     match state {
                         GrantState::Upcoming => "API_GRANT_PENDING",
                         GrantState::Expired => "API_GRANT_EXPIRED",
                         _ => "API_GRANT_EXHAUSTED",
                     },
-                    "확인해 둔 API 크레딧 허용 기간이 진행 중이 아니라서 쓰지 않아요.",
+                    "이 키가 속한 API 크레딧 풀의 기간이 진행 중이 아니거나 잔액을 다 써서 쓰지 않아요.",
                 ));
             }
             if exclusions.is_empty() {

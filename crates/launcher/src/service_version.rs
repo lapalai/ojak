@@ -491,6 +491,7 @@ mod tests {
             background_processes: None,
             parent_session_id: None,
             continued_from: None,
+            api_credit_pool: None,
         }
     }
 
