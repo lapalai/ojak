@@ -1,6 +1,6 @@
 //! 격리 프로필이 사용자 기본 설정 폴더(`~/.claude`, `~/.codex`)의 인증 없는 확장을 함께 쓰게 한다.
 //! 스킬·에이전트·지침·플러그인·hooks는 링크로 공유하고, 설정 파일에서는 확장 관련 키만 복사한다.
-//! `env`·인증 키·로그인 파일(`.claude.json`, `auth.json`)은 건드리지 않는다.
+//! `env`·인증 키·로그인 파일(`.claude.json`, `auth.json`)은 건드리지 않는다. Claude의 user·local MCP는 `shared_mcp`가 실행마다 따로 덧붙인다.
 use aam_protocol::ApiError;
 use serde_json::{Map, Value};
 use std::{

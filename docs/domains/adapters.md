@@ -33,8 +33,15 @@
 - Claude `auth status [--json]`만. `auth login`·`logout`·`setup-token`은 넘기지 않는다.
 - 첫 인수가 Claude `install`/`update`/`upgrade`, Codex `update`
 - 모델 세션을 시작하지 않고 인증을 바꾸지 않는 관리 명령: Claude `mcp`·`plugin`·`plugins`·`doctor`·`help`, Codex `mcp`·`plugin`·`doctor`·`completion`·`features`·`help`
-  - `mcp`·`plugin`·`plugins`·`features`는 Ojak 계정을 고르지 않는다. 상속된 `CLAUDE_CONFIG_DIR`/`CODEX_HOME`은 이 실행에서만 지우고, 공식 CLI 기본 설정 폴더에서 실행한다. stderr에 한 줄로 알리며 환경 변수 값은 출력하지 않는다. Codex의 MCP·플러그인·기능은 다음 관리 실행이 기본 폴더에서 계정 프로필로 가져온다. Claude 사용자 MCP는 복사하지 않고, Unix에서는 플러그인 폴더만 계정 세션과 연결한다.
+  - `mcp`·`plugin`·`plugins`·`features`는 Ojak 계정을 고르지 않는다. 상속된 `CLAUDE_CONFIG_DIR`/`CODEX_HOME`은 이 실행에서만 지우고, 공식 CLI 기본 설정 폴더에서 실행한다. stderr에 한 줄로 알리며 환경 변수 값은 출력하지 않는다. 그래서 `claude mcp add`는 평소처럼 기본 위치(`~/.claude.json`)에 한 번만 등록하면 된다. Codex의 MCP·플러그인·기능은 다음 관리 실행이 기본 폴더에서 계정 프로필로 가져오고, Claude의 user·local MCP는 아래 `shared_mcp`가 다음 관리 실행부터 모든 계정에 덧붙인다. Unix에서는 Claude 플러그인 폴더도 계정 세션과 연결한다.
   - `config`·`settings`·`profile`은 키마다 인증 여부를 가를 수 없어 넘기지 않는다. `login`·`resume`처럼 세션을 시작하는 명령도 넘기지 않는다.
+
+## Claude MCP 공유 (`src/shared_mcp.rs`, 0.24.0)
+- `.claude.json`은 로그인·신뢰·기록이 섞여 있어 복사·링크하지 않는다. 관리 Claude 실행마다 `~/.claude.json`의 user `mcpServers`와 이 작업 폴더 프로젝트의 local `projects[<키>].mcpServers`만 뽑아 `AAM_HOME/mcp/<id>.json`(사용자 전용 권한, Unix 0600)에 쓰고 공식 `--mcp-config=<파일>`로 넘긴다. 파일은 정상 종료 때 지운다. launcher가 강제 종료되면 살아 있는 Claude가 자기 재실행에 쓸 수 있으므로 남은 파일을 시간이나 잠금만으로 지우지 않는다. `--strict-mcp-config`는 붙이지 않으며, 공식 기본 프로필(`~/.claude`)은 CLI가 직접 읽으므로 덧붙이지 않는다.
+- 우선순위(2.1.322 실측): `--mcp-config` 서버는 같은 이름의 user·project 서버를 이기고 local에는 진다. 따라서 기본 user 등록은 계정의 user·local 및 프로젝트 `.mcp.json`과 이름이 겹치면 덧붙이지 않는다. 단, 계정의 명시적 `disabledMcpjsonServers`로 거부된 project 서버는 원본처럼 같은 이름의 user 등록으로 돌아간다. 거부는 계정 `settings.json`·계정 `.claude.json`의 프로젝트 항목·cwd의 `.claude/settings{,.local}.json`·git 루트의 `.claude/settings.local.json`만 읽고, 기본 계정이나 중간·상위 폴더의 승인 설정을 이식하지 않는다. 기본 local 등록은 계정 local만 우선하며 user·project보다 앞선다. 기본 설정이나 계정 프로필에서 끈 `disabledMcpServers`는 모두 제외한다. 프로젝트 정의·승인·거부 파일은 읽기만 한다. 프로젝트 키는 git 저장소 루트(워크트리는 원본 저장소, 서브모듈은 자기 폴더), 없으면 작업 폴더이며 Windows의 드라이브 문자 대소문자·짧은 경로 철자는 유지한다.
+- 덧붙이지 않는 경우: `--strict-mcp-config`·`--safe-mode` 실행(할당량·신원 조회 포함), 관리 설정에 `disableSideloadFlags: true` 또는 `managed-mcp.json`이 있을 때(조직이 MCP를 독점 관리), 연결할 서버가 없을 때. 기본 설정을 읽지 못하면 경고(`SHARED_MCP_FAILED`, 서버 정의 없음)만 하고 MCP 없이 실행한다.
+- 실제 CLI 2.1.322와 로컬 stdio JSON-RPC 서버로 두 프로필의 `connected` 및 `server/discover`·`initialize`·`tools/list` 왕복, 등록 변경·삭제, 프로젝트 범위 분리, 동시 실행별 파일 수명, 공백 경로를 확인했다. 프로젝트 서버의 명시적 거부는 print·실제 TUI 모두 프로세스 시작 표식으로 확인했다. 미승인 프로젝트 서버를 print 모드가 바로 실행하는 것은 원본도 동일하므로 승인 보장으로 표현하지 않는다. `oauthAccount`와 `.credentials.json` 해시는 유지됐다. 조직 `allowedMcpServers`·`deniedMcpServers` 정책의 실설정은 없어서 네이티브 정책 동작까지 실측한 것은 아니다.
+- 공유하는 것은 서버 등록 정의이며 MCP 서버 자체의 OAuth 로그인·토큰 저장소를 옮기지는 않는다. 서버가 별도 인증을 요구하면 공식 CLI의 인증 절차를 따른다.
 
 ## identity (`src/native.rs`)
 - Claude: `authMethod=claude.ai`, `apiProvider=firstParty` 필수. `identity_key = anthropic|subject:<id>|workspace:<orgId>` (`native.rs:54-61`).
