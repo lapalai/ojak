@@ -1,6 +1,6 @@
 import { createHash } from 'node:crypto';
 import { mkdtempSync, readFileSync, renameSync, rmSync, writeFileSync } from 'node:fs';
-import { tmpdir, devNull } from 'node:os';
+import { tmpdir } from 'node:os';
 import { dirname, join, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { spawnSync } from 'node:child_process';
@@ -37,7 +37,8 @@ export function compareTags(a, b) {
 }
 
 function git(args, cwd, { allowFail = false, binary = false } = {}) {
-  const result = spawnSync('git', ['-c', 'core.autocrlf=false', '-c', 'core.safecrlf=false', '-c', `core.hooksPath=${devNull}`, '-c', 'core.fsmonitor=false', ...args], {
+  // Git for Windows understands /dev/null, but rejects Node's \\.\nul device path as a config file.
+  const result = spawnSync('git', ['-c', 'core.autocrlf=false', '-c', 'core.safecrlf=false', '-c', 'core.hooksPath=/dev/null', '-c', 'core.fsmonitor=false', ...args], {
     cwd,
     encoding: binary ? 'buffer' : 'utf8',
     maxBuffer: 512 * 1024 * 1024,
@@ -45,7 +46,7 @@ function git(args, cwd, { allowFail = false, binary = false } = {}) {
     env: {
       ...process.env,
       GIT_CONFIG_NOSYSTEM: '1',
-      GIT_CONFIG_GLOBAL: devNull,
+      GIT_CONFIG_GLOBAL: '/dev/null',
       GIT_TERMINAL_PROMPT: '0',
       GIT_AUTHOR_NAME: 'ojak-omp-update', GIT_AUTHOR_EMAIL: 'omp-update@invalid',
       GIT_COMMITTER_NAME: 'ojak-omp-update', GIT_COMMITTER_EMAIL: 'omp-update@invalid',

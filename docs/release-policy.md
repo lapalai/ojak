@@ -109,6 +109,15 @@ npx tauri signer generate -w "$HOME/.tauri/ojak.key"
 
 `Client verification`은 고정된 omp·Orca 수정본을 별도 Mac runner에서 빌드한다. omp 실행 파일의 실제 버전 출력, Orca 전체 Mac 설치 파일(9개 원격 대상 포함), 격리 HOME의 실제 원격 터미널 왕복을 검사한다. 결과는 `verification-only-mac-clients`에만 보관하며 upstream이나 Ojak Release로 게시하지 않는다. 공식 네이티브 입력은 고정 SHA-256과 원본 템플릿 봉인 검증을 모두 통과해야 가져온다. 작업 실행·성공 여부는 각 Actions run의 실제 결과로 확인한다.
 
+## 2026-11-12 omp 원본 추적·18.18.9 로컬 검증
+
+- 원본 stable `v18.18.9`(`50da2d357039404a81d7c64622740ce13e4c54b4`)로 패치를 재기반했다. 최종 패치 SHA-256은 `893e79b2784f05bb93a5b4ce92797f06cdf44f2138538fb27d5340277ce0a17e`다. 원본 자동 업데이트 worker도 호환 채널 검증을 거친다.
+- 실제 native 빌드의 Mac SHA-256은 `9f73d1f50ea6ab436e41f6b9f075de5e37e0329e2d6043c537bbfc66c27fc6c6`, Windows는 `449a68889c1eff380d78ce278273de98cacd5f3e6e3020c621739772db770cb4`다. 두 OS 모두 `omp/18.18.9-ojak.1` 실행과 `18.15.0-ojak.1`에서의 실제 파일 교체·고의 버전 불일치 시 원래 바이트 복원을 `native_binary_update_and_rollback`로 확인했다. 전송은 로컬 HTTP fixture이며 공개 다운로드 검증은 아니다.
+- 검증한 Mac 바이너리를 기존 파일 백업 후 원자적으로 교체했다. 실제 설치 경로의 SHA-256·`--version`·`omp update`를 확인했으며, 공개 호환 채널은 아직 `18.15.0-ojak.1`이고 설치본은 `18.18.9-ojak.1`임을 구분해 출력하며 다운그레이드하지 않는다. 실행 중인 omp·Orca 세션은 재시작하지 않았고 Windows 설치본도 교체하지 않았다.
+- 자동 후보 준비 스크립트 17개 테스트와 현재 실제 upstream pin의 `up-to-date` 실행을 확인했다. 별도 local git smoke에서 새 브랜치 생성·동일 후보 재사용·수동 추가 커밋 보존·오래된 main 위의 수동 후보 보존을 확인했다. branch dispatch의 unsigned installer gate는 수정 전 거절을 재현하고, 수정 후 dispatch·push·PR 허용 및 태그·다른 이벤트·서명 키 주입 거절을 확인했다.
+- 사용자 승인으로 Actions의 PR 생성·승인 허용 설정을 켰고 기본 토큰 권한은 `read`로 유지했다. 워크플로에 자동 승인·병합·공개는 없다. 자동화는 PR #63의 main 반영 전이며 실제 scheduled/prepare Actions 실행은 아직 검증하지 않았다.
+- Ojak 0.23.2 앱 파일은 Mac에 설치했으나 안전한 `aam service restart`가 활성·불확실 세션 때문에 대기하여 확인 당시 서비스는 0.23.1이었다. 직접 `kickstart`하거나 `--force`로 진행하지 않았다. 18.18.9 호환판 공개 및 Windows 앱 설치는 하지 않았다.
+
 ## 2026-11-10 omp 업데이트 복구·Mac 0.23.1 반영
 
 - `omp-v18.15.0-ojak.1` draft의 Mac·Windows 바이너리를 SHA256SUMS 및 manifest와 대조했다. Mac SHA-256은 `df4d8a2f36fdb3f1cca567483e44047d296dc21fef779ad277e65f9df72c19ac`, Windows는 `ef2177c4ab470fb2f5b445b2654abfe2dbd1ddcb897a31e6aa1d54a97227d7c2`다.
