@@ -2469,10 +2469,10 @@ index 1ec93606a0..860b39301a 100644
  	/** Model registry for passing to subagents (avoids re-discovery) */
 diff --git a/packages/coding-agent/test/cli/ojak-update.test.ts b/packages/coding-agent/test/cli/ojak-update.test.ts
 new file mode 100644
-index 0000000000..a3c05414e8
+index 0000000000..f2b24ded62
 --- /dev/null
 +++ b/packages/coding-agent/test/cli/ojak-update.test.ts
-@@ -0,0 +1,683 @@
+@@ -0,0 +1,678 @@
 +import { afterEach, expect, it, spyOn } from "bun:test";
 +import * as fs from "node:fs";
 +import { mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
@@ -2486,7 +2486,6 @@ index 0000000000..a3c05414e8
 +	classifyUpstream,
 +	compareFork,
 +	compatibleAssetFetch,
-+	describeUpstream,
 +	fetchCompatibleRelease,
 +	fetchUpstreamLatest,
 +	readOjakServiceVersion,
@@ -3042,10 +3041,6 @@ index 0000000000..a3c05414e8
 +		upstreamVersion: null,
 +		compatibleVersion: "18.18.9-ojak.1",
 +	});
-+	expect(describeUpstream(classifyUpstream("18.18.9", "18.15.0-ojak.1"))).toMatch(/pending.*not installed/i);
-+	expect(describeUpstream(classifyUpstream(undefined, "18.15.0-ojak.1"))).toContain(
-+		"does not imply upstream is current",
-+	);
 +});
 +it.each([
 +	["v18.18.9", false, false, "18.18.9"],
