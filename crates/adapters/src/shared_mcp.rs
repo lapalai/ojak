@@ -326,7 +326,7 @@ mod tests {
     /// Windows `canonicalize`의 `\\?\` 경로는 `..`을 해석하지 않아 `commondir`의 상대 경로를 이어 붙일 수 없다.
     fn plain_path(path: &Path) -> PathBuf {
         if cfg!(windows) {
-            PathBuf::from(strip_verbatim(&path.to_string_lossy()))
+            PathBuf::from(windows_key(&path.to_string_lossy()))
         } else {
             path.to_path_buf()
         }

@@ -6,6 +6,7 @@
 
 - Claude MCP를 등록할 때 Ojak 계정 프로필을 따로 고를 필요가 없어집니다. 평소 `claude mcp add`로 등록한 사용자 범위와 현재 프로젝트의 로컬 범위 서버를, 다음 관리 실행부터 배정된 Claude 계정에 연결합니다. 등록 변경·삭제도 다음 실행에 반영됩니다.
 - 로그인 정보가 섞인 `.claude.json`을 복사하지 않습니다. MCP 정의만 실행 전용 비공개 파일로 전달하며 계정별 인증, 프로젝트 `.mcp.json` 승인·거부, 조직 관리 정책은 그대로 둡니다. MCP를 끄는 `--strict-mcp-config`·`--safe-mode` 실행에는 공유 설정을 넣지 않습니다.
+- 지원이 종료된 GitHub Actions macOS 14 runner를 macOS 15 Apple silicon으로 교체하고 필수 상태 검사 이름도 함께 옮깁니다. 양 OS 검증·strict 검사·리뷰 승인 조건은 유지합니다.
 
 ## 0.23.2 (2026-11-12)
 

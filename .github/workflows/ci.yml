@@ -21,8 +21,8 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        # macos-14 is Apple silicon, the only Mac target. windows-latest is x64.
-        os: [macos-14, windows-latest]
+        # macos-15 is Apple silicon, the only Mac target. windows-latest is x64.
+        os: [macos-15, windows-latest]
     runs-on: ${{ matrix.os }}
     timeout-minutes: 90
     steps:
