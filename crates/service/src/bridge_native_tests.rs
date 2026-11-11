@@ -172,6 +172,8 @@ fn serve(source: &Arc<Source>, request_deadline: Duration) -> (SocketAddr, mpsc:
             let done = done_tx.clone();
             std::thread::spawn(move || {
                 let mut stream = stream;
+                // macOS accept는 listener의 nonblocking 모드를 물려받는다. 운영 listener처럼 본문을 기다리는 연결로 바꾼다.
+                stream.set_nonblocking(false).unwrap();
                 let (request, mut rest) = super::super::read_head(&mut stream, Instant::now() + Duration::from_secs(5)).unwrap();
                 let length: usize = request.header("content-length").and_then(|v| v.parse().ok()).unwrap_or(0);
                 let mut chunk = [0u8; 4096];
