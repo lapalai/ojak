@@ -5,14 +5,23 @@
 # `/releases?per_page=30` and pick the newest published, non-draft, non-prerelease release tagged
 # `omp-vX.Y.Z-ojak.N` whose `omp-compatible-v2.json` version equals the tag version.
 #
-# This file has two jobs, both manual or read-only:
-#   watch  daily (and on demand): reports a newer stable can1357/oh-my-pi release as a GitHub issue, saying whether the
-#          pinned patch still applies. It never edits files, commits, pushes, or builds a release.
-#   build  on demand only: builds omp from the pinned patch on native Mac arm64 and Windows x64, runs the patch's
-#          ojak-update tests, and stages a DRAFT `omp-v<version>` release with `--latest=false`. It never publishes.
-#          An Admin publishes the unchanged draft after the checks in docs/release-policy.md (Ojak >= 0.22.2 first).
+# Actions (workflow_dispatch input `action`; the daily schedule runs `prepare`):
+#   prepare   main only. Compares the pinned upstream tag with can1357/oh-my-pi `releases/latest`. If newer, runs
+#             scripts/update-omp-fork.mjs, which 3-way merges the pinned fork patch onto the new tag with git alone (no
+#             upstream code is executed, no write token is present). A clean result becomes the deterministic branch
+#             `omp-update/<tag>` plus a pull request; a conflict or trust-boundary refusal becomes an issue and changes
+#             nothing. The candidate is then validated by explicitly dispatching `validate` and `ci.yml` on the branch,
+#             because pushes and PRs made with GITHUB_TOKEN do not start workflows by themselves.
+#   validate  only on `omp-update/*` branches and only for the exact commit given as `expected_sha`: the same native Mac
+#             arm64 + Windows x64 build and tests as `build`, read-only token, nothing staged or published.
+#   build     main only. Builds the pinned patch natively on both OSes and stages a DRAFT `omp-v<version>` release with
+#             `--latest=false`. An Admin publishes the unchanged draft after the checks in docs/release-policy.md
+#             (Ojak >= 0.22.2 first, plus the manual native replace/rollback gate). Nothing here ever publishes.
 #
-# No pull_request or pull_request_target trigger, so a fork PR cannot reach the token. Jobs refuse other repositories.
+# Privilege split: jobs that clone or build upstream code (`prepare`, `build`) hold a read-only token. Only
+# `publish-candidate` (branch push, PR, dispatch) and `report` (issues) hold write scopes, and they run only this
+# repository's own scripts plus data validated by `--check-candidate`. No pull_request or pull_request_target trigger,
+# so a fork PR cannot reach the token. Jobs refuse other repositories.
 name: omp release
 
 on:
@@ -21,12 +30,17 @@ on:
   workflow_dispatch:
     inputs:
       action:
-        description: "watch = report a newer upstream omp; build = stage a draft omp-v<pinned version> release"
+        description: "prepare = look for a newer upstream omp and open a candidate PR; validate = native-build one candidate branch commit; build = stage a draft omp-v<pinned version> release"
         type: choice
         options:
-          - watch
+          - prepare
+          - validate
           - build
-        default: watch
+        default: prepare
+      expected_sha:
+        description: "validate only: the exact 40-character candidate commit this run must be on"
+        type: string
+        required: false
 
 permissions:
   contents: read
@@ -36,13 +50,203 @@ concurrency:
   cancel-in-progress: false
 
 jobs:
-  watch:
-    if: github.repository == 'lapalai/ojak' && (github.event_name == 'schedule' || inputs.action == 'watch')
+  prepare:
+    if: github.repository == 'lapalai/ojak' && github.ref == 'refs/heads/main' && (github.event_name == 'schedule' || inputs.action == 'prepare')
+    permissions:
+      contents: read
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    env:
+      GH_TOKEN: ${{ github.token }}
+    outputs:
+      status: ${{ steps.update.outputs.status }}
+      tag: ${{ steps.update.outputs.tag }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
+        with:
+          node-version: 22
+
+      - name: Self-test the update scripts and pinned checksums
+        run: |
+          set -eu
+          node scripts/prepare-client-forks.mjs --check
+          node --test scripts/rebrand-omp-version.test.mjs scripts/update-omp-fork.test.mjs
+
+      - name: Prepare a candidate for the latest stable upstream tag
+        id: update
+        run: |
+          set -u
+          # `releases/latest` never returns drafts or prereleases.
+          latest=$(gh api repos/can1357/oh-my-pi/releases/latest --jq .tag_name)
+          printf '%s\n' "$latest" | grep -Eq '^v[0-9]+\.[0-9]+\.[0-9]+$' || { echo "Latest upstream tag $latest is not a stable vX.Y.Z tag."; exit 1; }
+          mkdir -p "$RUNNER_TEMP/candidate"
+          code=0
+          node scripts/update-omp-fork.mjs --tag "$latest" --report "$RUNNER_TEMP/candidate/report.json" || code=$?
+          # 0 = updated / up-to-date / not-newer, 10 = conflict, 11 = refused by a trust-boundary check. Anything else is a real failure.
+          case "$code" in 0|10|11) ;; *) echo "update-omp-fork failed with exit $code"; exit "$code" ;; esac
+          status=$(node -p 'JSON.parse(require("fs").readFileSync(process.argv[1],"utf8")).status' "$RUNNER_TEMP/candidate/report.json")
+          if [ "$status" = "updated" ]; then
+            cp integrations/client-forks/oh-my-pi.patch integrations/client-forks/manifest.json "$RUNNER_TEMP/candidate/"
+            # Prove the produced pin is internally consistent before anything with a write token sees it.
+            node scripts/update-omp-fork.mjs --check-candidate
+            node scripts/prepare-client-forks.mjs --check
+          fi
+          echo "status=$status" >> "$GITHUB_OUTPUT"
+          echo "tag=$latest" >> "$GITHUB_OUTPUT"
+          echo "status=$status tag=$latest"
+
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: omp-candidate
+          path: ${{ runner.temp }}/candidate
+          if-no-files-found: error
+          retention-days: 7
+
+  publish-candidate:
+    needs: prepare
+    if: needs.prepare.outputs.status == 'updated'
+    permissions:
+      contents: write
+      pull-requests: write
+      issues: write
+      actions: write
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    env:
+      GH_TOKEN: ${{ github.token }}
+      TAG: ${{ needs.prepare.outputs.tag }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
+        with:
+          node-version: 22
+
+      - uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
+        with:
+          name: omp-candidate
+          path: ${{ runner.temp }}/candidate
+
+      - name: Commit the candidate and push its branch
+        id: push
+        run: |
+          set -eu
+          printf '%s\n' "$TAG" | grep -Eq '^v[0-9]+\.[0-9]+\.[0-9]+$'
+          branch="omp-update/${TAG}"
+          # Only the two pin files are taken from the artifact, then re-validated against HEAD.
+          cp "$RUNNER_TEMP/candidate/oh-my-pi.patch" "$RUNNER_TEMP/candidate/manifest.json" integrations/client-forks/
+          node scripts/update-omp-fork.mjs --check-candidate --base HEAD
+          node scripts/prepare-client-forks.mjs --check
+          version=$(node -p 'JSON.parse(require("fs").readFileSync("integrations/client-forks/manifest.json","utf8")).clients.find(c=>c.directory==="oh-my-pi").version')
+          [ "$version" = "${TAG#v}-ojak.1" ] || { echo "Candidate version $version does not match $TAG."; exit 1; }
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git checkout -q -b "$branch"
+          git add integrations/client-forks/oh-my-pi.patch integrations/client-forks/manifest.json
+          git commit -q -m "chore(omp): rebase Ojak fork onto upstream ${TAG} (${version})"
+          sha=$(git rev-parse HEAD)
+          pushed=false
+          # The checkout keeps no credentials (persist-credentials: false); this repository's token is supplied per command only.
+          auth=$(printf 'x-access-token:%s' "$GH_TOKEN" | base64 -w0)
+          echo "::add-mask::$auth"
+          authed() { git -c "http.https://github.com/.extraheader=AUTHORIZATION: basic $auth" "$@"; }
+          remote=$(authed ls-remote origin "refs/heads/$branch" | cut -f1)
+          if [ -n "$remote" ]; then
+            authed fetch -q --depth 1 origin "refs/heads/$branch"
+            if [ "$(git rev-parse 'FETCH_HEAD^{tree}')" = "$(git rev-parse 'HEAD^{tree}')" ]; then
+              sha=$remote
+              echo "Branch $branch already holds this exact candidate ($sha)."
+            else
+              # A different tree may contain manual edits or extra commits, even when based on an older main.
+              echo "Branch $branch already exists with different content; preserving it. Reconcile it by hand."
+              exit 1
+            fi
+          fi
+          if [ "$sha" != "$remote" ]; then
+            # Create only an absent branch; the empty lease also refuses a racing branch creation.
+            authed push --force-with-lease="refs/heads/$branch:$remote" origin "HEAD:refs/heads/$branch"
+            pushed=true
+          fi
+          {
+            echo "branch=$branch"
+            echo "sha=$sha"
+            echo "version=$version"
+            echo "pushed=$pushed"
+          } >> "$GITHUB_OUTPUT"
+
+      - name: Open or update the pull request
+        id: pr
+        env:
+          BRANCH: ${{ steps.push.outputs.branch }}
+          SHA: ${{ steps.push.outputs.sha }}
+          VERSION: ${{ steps.push.outputs.version }}
+        run: |
+          set -u
+          revision=$(node -p 'JSON.parse(require("fs").readFileSync("integrations/client-forks/manifest.json","utf8")).clients.find(c=>c.directory==="oh-my-pi").revision')
+          pinned=$(git show HEAD~1:integrations/client-forks/manifest.json | node -p 'const m=JSON.parse(require("fs").readFileSync(0,"utf8")).clients.find(c=>c.directory==="oh-my-pi");m.tag+" / "+m.version')
+          {
+            echo "Automatic candidate: rebase the Ojak omp fork onto upstream \`${TAG}\` (\`${revision}\`) as \`${VERSION}\`."
+            echo
+            echo "- Was: ${pinned}"
+            echo "- Candidate commit: \`${SHA}\` (only \`oh-my-pi.patch\` and the oh-my-pi entry of \`manifest.json\` changed; the patch merged cleanly and was re-applied to the pristine tag)."
+            echo "- Version-only hunks are limited to the six files in \`scripts/rebrand-omp-version.mjs\`."
+            echo
+            echo "Validation is dispatched explicitly (workflow runs started with GITHUB_TOKEN pushes or PRs do not start themselves): \`CI\` and \`omp release\` with \`action: validate\` on this exact commit. Both must be green; \`validate\` checks \`expected_sha\` before building."
+            echo
+            echo "Before any publication, docs/release-policy.md still requires: Ojak >= minimumOjakService public, the native replace/rollback gate on Mac and Windows, an Admin-created annotated \`omp-v${VERSION}\` tag on the merged commit, the \`omp release\` \`build\` draft, and an Admin publishing it with \`--latest=false\`. Merging this PR publishes nothing."
+            echo
+            echo "Run: ${GITHUB_SERVER_URL}/${GITHUB_REPOSITORY}/actions/runs/${GITHUB_RUN_ID}"
+          } > "$RUNNER_TEMP/pr.md"
+          title="chore(omp): rebase Ojak fork onto upstream ${TAG} (${VERSION})"
+          existing=$(gh pr list --repo "$GITHUB_REPOSITORY" --head "$BRANCH" --base main --state open --json number --jq '.[0].number // empty')
+          if [ -n "$existing" ]; then
+            gh pr edit "$existing" --repo "$GITHUB_REPOSITORY" --title "$title" --body-file "$RUNNER_TEMP/pr.md"
+            echo "Updated PR #$existing"
+          elif gh pr create --repo "$GITHUB_REPOSITORY" --base main --head "$BRANCH" --title "$title" --body-file "$RUNNER_TEMP/pr.md"; then
+            :
+          else
+            echo "pr_failed=true" >> "$GITHUB_OUTPUT"
+            echo "::warning::Could not open the pull request (check Settings > Actions > 'Allow GitHub Actions to create and approve pull requests'). Opening an issue instead."
+          fi
+
+      - name: Dispatch validation on the exact candidate commit
+        if: steps.push.outputs.pushed == 'true' || github.event_name == 'workflow_dispatch'
+        env:
+          BRANCH: ${{ steps.push.outputs.branch }}
+          SHA: ${{ steps.push.outputs.sha }}
+        run: |
+          set -eu
+          # workflow_dispatch is the documented exception: runs it creates with GITHUB_TOKEN do start.
+          gh workflow run ci.yml --repo "$GITHUB_REPOSITORY" --ref "$BRANCH"
+          gh workflow run omp-release.yml --repo "$GITHUB_REPOSITORY" --ref "$BRANCH" -f action=validate -f "expected_sha=$SHA"
+
+      - name: Report a candidate that has no pull request
+        if: steps.pr.outputs.pr_failed == 'true'
+        env:
+          BRANCH: ${{ steps.push.outputs.branch }}
+        run: |
+          set -eu
+          node scripts/update-omp-fork.mjs --render-issue "$RUNNER_TEMP/candidate/report.json" --branch "$BRANCH" --pr-failed > "$RUNNER_TEMP/issue.json"
+          title=$(jq -r .title "$RUNNER_TEMP/issue.json")
+          jq -r .body "$RUNNER_TEMP/issue.json" > "$RUNNER_TEMP/issue.md"
+          existing=$(gh issue list --repo "$GITHUB_REPOSITORY" --state open --limit 100 --json number,title | jq -r --arg t "$title" '.[] | select(.title==$t) | .number' | head -n 1)
+          if [ -n "$existing" ]; then gh issue edit "$existing" --repo "$GITHUB_REPOSITORY" --body-file "$RUNNER_TEMP/issue.md"
+          else gh issue create --repo "$GITHUB_REPOSITORY" --title "$title" --body-file "$RUNNER_TEMP/issue.md"; fi
+
+  report:
+    needs: prepare
+    if: needs.prepare.outputs.status == 'conflict' || needs.prepare.outputs.status == 'refused'
     permissions:
       contents: read
       issues: write
     runs-on: ubuntu-latest
-    timeout-minutes: 30
+    timeout-minutes: 10
     env:
       GH_TOKEN: ${{ github.token }}
     steps:
@@ -54,80 +258,18 @@ jobs:
         with:
           node-version: 22
 
-      - name: Compare the pinned upstream tag with the latest stable release
-        id: compare
+      - uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
+        with:
+          name: omp-candidate
+          path: ${{ runner.temp }}/candidate
+
+      - name: Open or update the issue (nothing was changed or built)
         run: |
           set -eu
-          pinned=$(node -e 'const m=JSON.parse(require("fs").readFileSync("integrations/client-forks/manifest.json","utf8"));console.log(m.clients.find(c=>c.directory==="oh-my-pi").tag)')
-          # `releases/latest` never returns drafts or prereleases.
-          latest=$(gh api repos/can1357/oh-my-pi/releases/latest --jq .tag_name)
-          printf '%s\n' "$pinned" | grep -Eq '^v[0-9]+\.[0-9]+\.[0-9]+$' || { echo "Pinned tag $pinned is not a stable vX.Y.Z tag."; exit 1; }
-          printf '%s\n' "$latest" | grep -Eq '^v[0-9]+\.[0-9]+\.[0-9]+$' || { echo "Latest upstream tag $latest is not a stable vX.Y.Z tag."; exit 1; }
-          echo "pinned=$pinned latest=$latest"
-          newer=false
-          if [ "$pinned" != "$latest" ] && [ "$(printf '%s\n%s\n' "$pinned" "$latest" | sort -V | tail -n 1)" = "$latest" ]; then newer=true; fi
-          echo "pinned=$pinned" >> "$GITHUB_OUTPUT"
-          echo "latest=$latest" >> "$GITHUB_OUTPUT"
-          echo "newer=$newer" >> "$GITHUB_OUTPUT"
-
-      - name: Check whether the pinned patch applies to the newer tag
-        id: apply
-        if: steps.compare.outputs.newer == 'true'
-        env:
-          LATEST: ${{ steps.compare.outputs.latest }}
-        run: |
-          set -u
-          node scripts/prepare-client-forks.mjs --check
-          # Baseline: the pinned patch must still apply on the pinned base, so a failure below is about the new tag.
-          baseline=ok
-          node scripts/prepare-client-forks.mjs "$RUNNER_TEMP/pinned" > "$RUNNER_TEMP/baseline.log" 2>&1 || baseline=failed
-          result=failed
-          : > "$RUNNER_TEMP/apply.log"
-          if git clone --depth 1 --branch "$LATEST" -- https://github.com/can1357/oh-my-pi.git "$RUNNER_TEMP/upstream" >> "$RUNNER_TEMP/apply.log" 2>&1 \
-            && git -C "$RUNNER_TEMP/upstream" apply --check -- "$GITHUB_WORKSPACE/integrations/client-forks/oh-my-pi.patch" >> "$RUNNER_TEMP/apply.log" 2>&1; then
-            result=clean
-          fi
-          echo "baseline=$baseline" >> "$GITHUB_OUTPUT"
-          echo "result=$result" >> "$GITHUB_OUTPUT"
-          echo "baseline=$baseline result=$result"
-
-      - name: Open or update the issue
-        if: steps.compare.outputs.newer == 'true'
-        env:
-          PINNED: ${{ steps.compare.outputs.pinned }}
-          LATEST: ${{ steps.compare.outputs.latest }}
-          RESULT: ${{ steps.apply.outputs.result }}
-          BASELINE: ${{ steps.apply.outputs.baseline }}
-        run: |
-          set -eu
-          title="omp upstream: oh-my-pi ${LATEST} is available (pinned ${PINNED})"
-          if [ "$RESULT" = "clean" ]; then
-            verdict="The pinned patch (\`integrations/client-forks/oh-my-pi.patch\`) applies cleanly to \`${LATEST}\` (\`git apply --check\`)."
-          else
-            verdict="The pinned patch does **not** apply cleanly to \`${LATEST}\`; it must be rebased by hand."
-          fi
-          {
-            echo "Upstream \`can1357/oh-my-pi\` released stable \`${LATEST}\`; Ojak is pinned to \`${PINNED}\`."
-            echo
-            echo "- Patch on the pinned base: \`${BASELINE}\`"
-            echo "- Patch on \`${LATEST}\`: \`${RESULT}\`"
-            echo
-            echo "$verdict"
-            if [ "$RESULT" != "clean" ] && [ -s "$RUNNER_TEMP/apply.log" ]; then
-              echo
-              echo "<details><summary>git output (last 40 lines)</summary>"
-              echo
-              echo '```'
-              tail -n 40 "$RUNNER_TEMP/apply.log"
-              echo '```'
-              echo "</details>"
-            fi
-            echo
-            echo "Nothing was changed or built. To adopt it: rebase the patch, update \`manifest.json\` (tag, revision, version, sha256), run the patch's \`ojak-update\` tests, then run the \`omp release\` workflow with \`action: build\`."
-            echo
-            echo "Run: ${GITHUB_SERVER_URL}/${GITHUB_REPOSITORY}/actions/runs/${GITHUB_RUN_ID}"
-          } > "$RUNNER_TEMP/issue.md"
-          existing=$(gh issue list --repo "$GITHUB_REPOSITORY" --state open --limit 100 --json number,title | node -e 'const t=process.argv[1];const l=JSON.parse(require("fs").readFileSync(0,"utf8"));const f=l.find(i=>i.title===t);if(f)console.log(f.number)' "$title")
+          node scripts/update-omp-fork.mjs --render-issue "$RUNNER_TEMP/candidate/report.json" > "$RUNNER_TEMP/issue.json"
+          title=$(jq -r .title "$RUNNER_TEMP/issue.json")
+          { jq -r .body "$RUNNER_TEMP/issue.json"; echo; echo "Run: ${GITHUB_SERVER_URL}/${GITHUB_REPOSITORY}/actions/runs/${GITHUB_RUN_ID}"; } > "$RUNNER_TEMP/issue.md"
+          existing=$(gh issue list --repo "$GITHUB_REPOSITORY" --state open --limit 100 --json number,title | jq -r --arg t "$title" '.[] | select(.title==$t) | .number' | head -n 1)
           if [ -n "$existing" ]; then
             gh issue edit "$existing" --repo "$GITHUB_REPOSITORY" --body-file "$RUNNER_TEMP/issue.md"
             echo "Updated issue #$existing"
@@ -136,7 +278,10 @@ jobs:
           fi
 
   build:
-    if: github.repository == 'lapalai/ojak' && github.event_name == 'workflow_dispatch' && inputs.action == 'build' && github.ref == 'refs/heads/main'
+    if: >-
+      github.repository == 'lapalai/ojak' && github.event_name == 'workflow_dispatch' &&
+      ((inputs.action == 'build' && github.ref == 'refs/heads/main') ||
+       (inputs.action == 'validate' && startsWith(github.ref, 'refs/heads/omp-update/')))
     permissions:
       contents: read
     strategy:
@@ -156,10 +301,21 @@ jobs:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           persist-credentials: false
+          fetch-depth: 2
 
       - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
         with:
           node-version: 22
+
+      - name: Bind a validation run to the exact candidate commit
+        if: inputs.action == 'validate'
+        env:
+          EXPECTED_SHA: ${{ inputs.expected_sha }}
+        run: |
+          set -eu
+          printf '%s\n' "$EXPECTED_SHA" | grep -Eq '^[a-f0-9]{40}$' || { echo "validate needs a 40-character expected_sha."; exit 1; }
+          [ "$GITHUB_SHA" = "$EXPECTED_SHA" ] || { echo "Branch is at $GITHUB_SHA, not the dispatched candidate $EXPECTED_SHA."; exit 1; }
+          node scripts/update-omp-fork.mjs --check-candidate --base HEAD~1
 
       - name: Verify pinned patch checksums and packaging tests
         run: |

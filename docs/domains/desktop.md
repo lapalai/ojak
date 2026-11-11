@@ -114,7 +114,7 @@ Windows와 macOS 모두 `tauri-plugin-single-instance`를 다른 플러그인보
 - `npm run typecheck` → `tsc -b`
 - `src-tauri/binaries/`는 gitignore이며 위 스크립트만 만든다. Tauri crate는 workspace default-members에서 빠져 있다.
 - `OJAK_CONTACT_URL`은 빌드 시점 환경 변수로 `option_env!`가 읽는다(`main.rs:1204`). 예: 저장소 Issues 주소.
-- `scripts/`에는 위 두 개 외에 `bump-version.mjs`(버전 일괄 변경), `verify-signing-key.mjs`(릴리스 전 `TAURI_SIGNING_PRIVATE_KEY`가 `tauri.conf.json`의 `plugins.updater.pubkey`와 짝인지 검증), `prepare-client-forks.mjs`·`package-compatible-omp.mjs`(호환 클라이언트 포크 준비·omp 에셋 패키징, `.github/workflows/release.yml`이 호출), `service-crash-dumps.ps1`(Windows 서비스 크래시 덤프 `Status`/`Enable`/`Disable`), `import-client-native-slots.py`(node-pty 네이티브 슬롯 manifest 생성), 테스트 `install-sh.test.mjs`·`package-compatible-omp.test.mjs`가 있다.
+- `scripts/`에는 위 두 개 외에 `bump-version.mjs`(버전 일괄 변경), `verify-signing-key.mjs`(릴리스 전 `TAURI_SIGNING_PRIVATE_KEY`가 `tauri.conf.json`의 `plugins.updater.pubkey`와 짝인지 검증), `prepare-client-forks.mjs`·`package-compatible-omp.mjs`(호환 클라이언트 포크 준비·omp 에셋 패키징, `.github/workflows/release.yml`이 호출), `update-omp-fork.mjs`·`rebrand-omp-version.mjs`(upstream omp 새 stable 태그로 포크 패치·pin을 재기반하는 후보 준비와 6개 파일 버전 재적용, `.github/workflows/omp-release.yml`의 `prepare`가 호출), `service-crash-dumps.ps1`(Windows 서비스 크래시 덤프 `Status`/`Enable`/`Disable`), `import-client-native-slots.py`(node-pty 네이티브 슬롯 manifest 생성), 테스트 `install-sh.test.mjs`·`package-compatible-omp.test.mjs`·`update-omp-fork.test.mjs`·`rebrand-omp-version.test.mjs`가 있다.
 
 ## Screen Flow / Lifecycle
 <!-- screen-flows-v3: 2026-09-27, type=web-frontend -->
