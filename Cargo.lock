@@ -4,7 +4,7 @@ version = 4
 
 [[package]]
 name = "aam-adapters"
-version = "0.22.5"
+version = "0.24.1"
 dependencies = [
  "aam-protocol",
  "base64 0.22.1",
@@ -22,7 +22,7 @@ dependencies = [
 
 [[package]]
 name = "aam-launcher"
-version = "0.22.5"
+version = "0.24.1"
 dependencies = [
  "aam-adapters",
  "aam-protocol",
@@ -40,7 +40,7 @@ dependencies = [
 
 [[package]]
 name = "aam-protocol"
-version = "0.22.5"
+version = "0.24.1"
 dependencies = [
  "libc",
  "serde",
@@ -51,7 +51,7 @@ dependencies = [
 
 [[package]]
 name = "aam-service"
-version = "0.22.5"
+version = "0.24.1"
 dependencies = [
  "aam-adapters",
  "aam-protocol",
@@ -97,7 +97,7 @@ dependencies = [
 
 [[package]]
 name = "ai-account-manager"
-version = "0.22.5"
+version = "0.24.1"
 dependencies = [
  "aam-launcher",
  "aam-protocol",

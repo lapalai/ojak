@@ -16,15 +16,16 @@ const GENERATION: i64 = 1;
 const TAIL_CAP: usize = 128 * 1024;
 const HEAD_LEN: usize = 24;
 
-/// 이 API 키 계정을 이번 요청에 쓸 수 있는지: 그 공급자의 키이고, 켜져 있고 인증됐고, 같은 공급자로 등록한 **모든 키의** 이번 달(UTC 달력월) 추정 사용액 합계가
-/// 상한 미만. 같은 Console·Platform 조직의 키는 크레딧 잔액을 공유하므로 키 수가 상한을 늘리지 않는다.
-pub(crate) fn usable(provider: ApiProvider, account: &Account, total_used_usd: f64, limit_usd: f64) -> bool {
+/// 이 API 키 계정을 이번 요청에 쓸 수 있는지: 그 공급자의 키이고, 켜져 있고 인증됐고, `used_usd`가 상한 미만.
+/// Claude 키는 `used_usd`로 그 키 자신의 이번 달(UTC 달력월) 추정 사용액을 넘겨 키마다 따로 상한을 적용한다.
+/// OpenAI 키는 모든 OpenAI 키(지운 키 포함)의 합계를 넘긴다.
+pub(crate) fn usable(provider: ApiProvider, account: &Account, used_usd: f64, limit_usd: f64) -> bool {
     provider.owns(account)
         && account.enabled
         && account.auth_status == "authenticated"
         && limit_usd.is_finite()
         && limit_usd > 0.0
-        && total_used_usd < limit_usd
+        && used_usd < limit_usd
 }
 
 /// 공급자가 키 자체를 거절한 응답 문구인지. Anthropic은 `authentication_error`·`invalid x-api-key`, OpenAI는 `invalid_api_key`·`Incorrect API key provided`다.

@@ -60,7 +60,7 @@ export function apiAccountUsage(account: Pick<Account, "apiCredit">, now: number
   return { usedUsd: state.usedUsd, unmeteredRequests: state.unmeteredRequests };
 }
 
-/// 등록한 키의 이번 달 합계에 지운 키의 이번 달 원장(`removed`)을 더한다. 키를 지워도 상한 합계에서 빠지지 않는다.
+/// 등록한 키의 이번 달 합계에 지운 키의 이번 달 원장(`removed`)을 더한다. Claude는 참고용 합계, OpenAI는 합산 상한 판정용이다.
 /// 공급자마다 따로 센다: Claude는 스냅샷 `apiCreditRemoved`, OpenAI는 `openaiApiRemoved`를 넘긴다. 다른 공급자의 키는 더하지 않는다(기본은 Claude).
 export function apiCreditUsage(accounts: readonly (Pick<Account, "tool" | "apiCredit"> & { provider?: string })[], now: number, removed?: Pick<ApiCreditState, "periodStart" | "usedUsd" | "unmeteredRequests"> | null, provider: ApiKeyProvider = "anthropic"): ApiCreditUsage {
   const ledger = removed && removed.periodStart === utcPeriodStart(now) ? { usedUsd: removed.usedUsd, unmeteredRequests: removed.unmeteredRequests } : { usedUsd: 0, unmeteredRequests: 0 };
@@ -70,18 +70,31 @@ export function apiCreditUsage(accounts: readonly (Pick<Account, "tool" | "apiCr
   }, ledger);
 }
 
-/// `$12.40 / $200 (추정)`. 금액은 Ojak의 추정치라 항상 추정임을 붙인다.
+/// `$12.40 / $200 (추정)`. 금액은 Ojak의 추정치라 항상 추정임을 붙인다. 한 키의 사용액과 그 키의 상한, 또는 OpenAI 키 전체의 합계와 합계 상한에 쓴다.
 export function apiCreditAmount(usedUsd: number, limitUsd: number): string {
   return t("usage.apiCredit.amount", { used: usdUsed(usedUsd), limit: usdLimit(limitUsd) });
 }
 
-/// 요약에서 지금 말해야 할 API 문구. 지금 쓰는 중이면 `API 크레딧 사용 중 · $12.40 / $200 (추정)`(OpenAI는 `OpenAI API 사용 중 · …`), 상한에 닿았으면 그 사실. 아니면 null.
-/// 상한은 같은 공급자로 등록한 **모든 키의 합계**에 걸리므로(서비스 배정 기준), 키가 여럿이면 `totalUsedUsd`로 그 공급자의 합계를 넘긴다.
+/// `$12.40 (추정)`. 상한 없이 사용액만 보여 줄 때. Claude 키 전체의 합계는 상한이 걸리지 않는 보고용 값이라 이것으로만 보인다.
+export function apiCreditSpend(usedUsd: number): string {
+  return t("usage.apiCredit.spend", { used: usdUsed(usedUsd) });
+}
+
+/// Claude API 키 하나의 이번 달 사용액·상한 도달 여부. 상한(`apiCreditMonthlyLimitUsd`)은 키마다 따로 적용하므로 다른 키·지운 키의 사용액은 보지 않는다.
+/// 서비스 배정 기준(`api_key_under_cap`: 사용액 < 상한)과 같다. 이 판정은 표시용이며 배정은 서비스가 한다.
+export function apiKeyCap(account: Pick<Account, "apiCredit">, limitUsd: number, now: number): ApiCreditUsage & { limitUsd: number; reached: boolean } {
+  const usage = apiAccountUsage(account, now);
+  return { ...usage, limitUsd, reached: !(usage.usedUsd < limitUsd) };
+}
+
+/// 요약에서 지금 말해야 할 API 문구. 지금 쓰는 중이면 `API 크레딧 사용 중 · $150.00 / $200 (추정)`(OpenAI는 `OpenAI API 사용 중 · $12.40 / $50 (추정)`), 상한에 닿았으면 그 사실. 아니면 null.
+/// Claude 요약의 금액·상한은 그 요약(키 묶음)의 사용액과 키당 상한이다. 상한은 키마다 따로 걸리므로 다른 키의 사용액을 더해 상한으로 나누지 않는다. 키가 여럿일 때의 한 줄은 `apiCreditOverview`가 만든다.
+/// OpenAI 상한은 같은 공급자로 등록한 **모든 키의 합계**에 걸리므로(서비스 배정 기준) 키가 여럿이면 `totalUsedUsd`로 그 합계를 넘긴다.
 export function apiCreditLabel(summary: Pick<AccountQuotaSummary, "kind" | "apiCredit"> | undefined, totalUsedUsd?: number): string | null {
   const credit: ApiCreditSummaryValue | null | undefined = summary?.apiCredit;
   if (!credit) return null;
   const openai = summaryApiProvider(summary) === "openai";
-  const amount = apiCreditAmount(totalUsedUsd ?? credit.usedUsd, credit.limitUsd);
+  const amount = apiCreditAmount(openai ? totalUsedUsd ?? credit.usedUsd : credit.usedUsd, credit.limitUsd);
   if (credit.limitReached) return `${t(openai ? "usage.openaiApi.capped" : "usage.apiCredit.capped")} · ${amount}`;
   if (summary?.kind === "api-credit" || credit.active) return `${t(openai ? "usage.verdict.openai-api" : "usage.verdict.api-credit")} · ${amount}`;
   return null;
@@ -92,16 +105,27 @@ export function activeApiCredit(summaries: readonly AccountQuotaSummary[] | unde
   return summaries?.find(summary => summary.kind === "api-credit" && summary.apiCredit?.active);
 }
 
-/// 한 공급자의 키가 여럿일 때 한 줄로 말할 API 상태. 지금 배정 중인 키 묶음이 있으면 그것을, 없으면 키 묶음 하나를 고르고
-/// 금액은 그 공급자로 등록한 모든 키의 합계로 보여 준다(상한도 합계 기준이다). 다른 공급자의 키·요약은 섞지 않는다.
+/// 한 공급자의 키가 여럿일 때 한 줄로 말할 API 상태. 다른 공급자의 키·요약은 섞지 않는다.
+/// OpenAI: 지금 배정 중인 묶음이 있으면 그것을, 없으면 묶음 하나를 고르고 금액은 모든 키의 합계다(상한도 합계 기준).
+/// Claude: 상한이 키마다 따로 걸리므로 합계를 상한으로 나누지 않는다. 지금 배정 중인 키가 있으면 그중 이번 달 사용액이 가장 적은 키(서비스가 먼저 쓰는 키)의 사용액과 상한을 말하고,
+/// 없으면 쓸 수 있는 키가 **모두** 상한에 닿았을 때만 상한 도달을 말한다. 키 하나만 상한에 닿고 다른 키가 남았으면 상한 도달을 말하지 않는다.
 export function apiCreditOverview(accounts: readonly (Pick<Account, "id" | "tool" | "apiCredit"> & { provider?: string })[], summaries: readonly AccountQuotaSummary[] | undefined, now: number, removed?: Pick<ApiCreditState, "periodStart" | "usedUsd" | "unmeteredRequests"> | null, provider: ApiKeyProvider = "anthropic"): { label: string | null; active: boolean } {
   const ids = new Set(apiAccounts(accounts, provider).map(account => account.id));
   const mine = summaries?.filter(summary => summaryApiProvider(summary) === provider && summary.accountIds.some(id => ids.has(id))) ?? [];
-  const summary = mine.find(item => item.kind === "api-credit" || item.apiCredit?.active) ?? mine[0];
-  return { label: apiCreditLabel(summary, apiCreditUsage(accounts, now, removed, provider).usedUsd), active: summary?.kind === "api-credit" };
+  if (provider === "openai") {
+    const summary = mine.find(item => item.kind === "api-credit" || item.apiCredit?.active) ?? mine[0];
+    return { label: apiCreditLabel(summary, apiCreditUsage(accounts, now, removed, provider).usedUsd), active: summary?.kind === "api-credit" };
+  }
+  const used = (summary: AccountQuotaSummary) => summary.apiCredit?.usedUsd ?? 0;
+  const active = mine.filter(item => item.kind === "api-credit" || item.apiCredit?.active).sort((a, b) => used(a) - used(b))[0];
+  if (active) return { label: apiCreditLabel(active), active: active.kind === "api-credit" };
+  const usable = mine.filter(item => item.kind !== "excluded");
+  const capped = usable.length > 0 && usable.every(item => item.apiCredit?.limitReached) ? usable.sort((a, b) => used(b) - used(a))[0] : undefined;
+  return { label: apiCreditLabel(capped), active: false };
 }
 
 /// 공급자별 이번 달 합계와 월 상한. 합계는 그 공급자의 키와 지운 키 원장만 더한다(Claude 키와 OpenAI 키를 섞지 않는다).
+/// `limitUsd`의 뜻은 공급자마다 다르다: OpenAI는 모든 키 합계의 상한이고, Claude(`apiCreditMonthlyLimitUsd`)는 **키 하나당** 상한이라 `usedUsd` 합계에 걸리지 않는다(Claude 합계는 참고용 보고).
 export function apiKeyTotals(snapshot: Pick<Snapshot, "accounts" | "generatedAt" | "apiCreditRemoved" | "openaiApiRemoved" | "policy">): Record<ApiKeyProvider, ApiCreditUsage & { limitUsd: number; keys: number }> {
   const { accounts, generatedAt, policy } = snapshot;
   return {

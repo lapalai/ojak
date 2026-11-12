@@ -28,9 +28,9 @@ node --test integrations/omp/aam-observer.test.mjs integrations/omp/aam-accounts
 npm run build
 ```
 
-`cargo`가 PATH에 있으면 Mac에서도 `cargo test`로 충분합니다. CI는 macOS 14와 windows-latest에서 `cargo test --workspace --exclude ai-account-manager -- --test-threads=1`을 돌립니다. 로컬 default-members와 같은 크레이트 집합입니다.
+`cargo`가 PATH에 있으면 Mac에서도 `cargo test`로 충분합니다. CI는 macOS 15와 windows-latest에서 `cargo test --workspace --exclude ai-account-manager -- --test-threads=1`을 돌립니다. 로컬 default-members와 같은 크레이트 집합입니다.
 
-If `cargo` is on PATH, `cargo test` is enough on Mac too. CI runs `cargo test --workspace --exclude ai-account-manager -- --test-threads=1` on macOS 14 and windows-latest. That is the same crate set as local default-members.
+If `cargo` is on PATH, `cargo test` is enough on Mac too. CI runs `cargo test --workspace --exclude ai-account-manager -- --test-threads=1` on macOS 15 and windows-latest. That is the same crate set as local default-members.
 
 결과: Mac은 `target/release/bundle/macos/Ojak.app`, Windows는 `target/release/bundle/nsis/*-setup.exe`. / Output is `target/release/bundle/macos/Ojak.app` on Mac and `target/release/bundle/nsis/*-setup.exe` on Windows.
 

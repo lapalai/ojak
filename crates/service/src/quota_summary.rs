@@ -137,7 +137,8 @@ fn credits_of(members: &[&Account], policy: &Policy, now: i64) -> Option<Credits
 }
 
 /// API 키(월 API 크레딧) 묶음의 표시 사실. 구독 한도와 무관하게 키 상태와 이번 달 추정 사용액만 본다.
-/// `used_usd`는 이 키의 사용액, 상한 도달은 같은 공급자로 등록한 **모든 키의 합계**(`total`)와 그 공급자의 상한으로 본다(배정 검사와 같은 기준). 다른 공급자의 키는 섞지 않는다.
+/// `used_usd`는 이 키의 사용액이다. Claude 키의 상한 도달은 묶음의 모든 키가 각자의 사용액으로 상한에 닿았을 때뿐이다(키마다 따로 적용하므로 다른 키·지운 키의 사용액은 보지 않는다).
+/// OpenAI 키는 같은 공급자로 등록한 **모든 키의 합계**(`total`)와 그 공급자의 상한으로 본다. 다른 공급자의 키는 섞지 않는다.
 /// `unmetered_any`는 같은 공급자 전체(지운 키 포함)에 이번 달 금액을 읽지 못한 요청이 있는지다. OpenAI 키는 이때 더는 쓰지 않으므로 상한에 닿은 것처럼 쉬는 상태로 보인다.
 /// "지금 배정 중"(`api-credit`)인지는 구독 묶음 전체를 본 뒤에 `summaries`가 정한다.
 fn api_credit_of(members: &[&Account], provider: ApiProvider, policy: &Policy, now: i64, total: f64, unmetered_any: bool, mut result: AccountQuotaSummary) -> AccountQuotaSummary {
@@ -147,7 +148,11 @@ fn api_credit_of(members: &[&Account], provider: ApiProvider, policy: &Policy, n
     };
     let used: f64 = members.iter().map(|a| crate::scheduler::api_credit_used(a, now)).sum();
     let stopped = provider == ApiProvider::OpenAi && unmetered_any;
-    let limit_reached = !(total < limit_usd) || stopped;
+    let over_cap = match provider {
+        ApiProvider::Anthropic => !members.iter().any(|a| crate::scheduler::api_key_under_cap(a, limit_usd, now)),
+        ApiProvider::OpenAi => !(total < limit_usd),
+    };
+    let limit_reached = over_cap || stopped;
     let period = aam_adapters::api_credit::period_start(now);
     let unmetered = stopped || members.iter().any(|a| a.api_credit.as_ref().is_some_and(|state| state.period_start == period && state.unmetered_requests > 0));
     result.api_credit = Some(ApiCreditSummary { provider: provider.id().into(), active: false, used_usd: used, limit_usd, limit_reached, unmetered });
@@ -168,7 +173,7 @@ pub(crate) fn summaries(accounts: &[Account], policy: &Policy, blocks: &[BlockSt
 }
 
 /// 스냅샷마다 새로 계산한다. 크레딧 사용 상태를 저장하지 않으므로 한도가 리셋되거나 관측이 오래되면 배지가 곧 사라진다.
-/// `ledger.removed_usd`는 연결을 해제한 API 키의 이번 달 사용액(원장)이다. 월 상한 합계에만 더하고 묶음 표시에는 섞지 않는다.
+/// `ledger.removed_usd`는 연결을 해제한 API 키의 이번 달 사용액(원장)이다. Claude 키 상한 판정에는 쓰지 않으며(키마다 따로 적용), OpenAI 합계와 스냅샷의 `apiCreditRemoved` 표시에만 쓴다.
 /// 확인해 둔 API 크레딧 허용 기간이 있으면 그 기간이 진행 중일 때만 `api-credit`(지금 배정 중)으로 표시한다.
 pub(crate) fn summaries_with(accounts: &[Account], policy: &Policy, blocks: &[BlockStatus], now: i64, ledger: &crate::scheduler::ApiLedger) -> Vec<AccountQuotaSummary> {
     let groups = groups(accounts);
@@ -274,10 +279,10 @@ pub(crate) fn summaries_with(accounts: &[Account], policy: &Policy, blocks: &[Bl
         }
     }
     // 공급자마다 따로 켠다: 그 공급자의 구독 묶음(사용자가 제외하지 않은 것)이 하나 이상 있고 모두 한도 소진으로 쉬는 중이며, 그 공급자의 옵트인이 켜졌을 때만이다.
-    // Claude는 허용 기간이 진행 중일 때만 열린다(허용 기간은 Claude 전용). OpenAI는 허용 기간·선제 사용이 없다.
+    // Claude 키는 풀에 속하면 그 풀이 진행 중일 때만 열린다(풀은 Claude 전용, 풀 밖의 키는 그대로). OpenAI는 풀·선제 사용이 없다.
     for provider in [ApiProvider::Anthropic, ApiProvider::OpenAi] {
         let (opted_in, left) = match provider {
-            ApiProvider::Anthropic => (policy.use_api_credit_after_limit && crate::scheduler::grant_allows_fallback(policy, ledger, now).is_ok(), claude_left),
+            ApiProvider::Anthropic => (policy.use_api_credit_after_limit, claude_left),
             ApiProvider::OpenAi => (policy.use_openai_api_after_limit, codex_left),
         };
         let subscription: Vec<&AccountQuotaSummary> = groups.iter().zip(&results)
@@ -288,7 +293,9 @@ pub(crate) fn summaries_with(accounts: &[Account], policy: &Policy, blocks: &[Bl
         let spent = !subscription.is_empty() && subscription.iter().all(|summary| summary.kind == "resting" && !summary.rate);
         if opted_in && !left && spent {
             for (members, summary) in groups.iter().zip(&mut results) {
-                if summary.kind == "available" && members.iter().all(|a| provider.owns(a)) {
+                let open = provider == ApiProvider::OpenAi
+                    || members.iter().any(|a| crate::scheduler::grant_allows_fallback(policy, ledger, &a.id, now).is_ok());
+                if summary.kind == "available" && open && members.iter().all(|a| provider.owns(a)) {
                     if let Some(api) = summary.api_credit.as_mut() {
                         api.active = true;
                         summary.kind = "api-credit".into();

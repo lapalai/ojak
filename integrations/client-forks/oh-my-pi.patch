@@ -1,67 +1,67 @@
 diff --git a/bun.lock b/bun.lock
-index 074c225..484e444 100644
+index 2b73d1bbe6..dc9778396a 100644
 --- a/bun.lock
 +++ b/bun.lock
-@@ -22,7 +22,7 @@
+@@ -15,7 +15,7 @@
      },
      "packages/agent": {
        "name": "@oh-my-pi/pi-agent-core",
--      "version": "18.15.0",
-+      "version": "18.15.0-ojak.1",
+-      "version": "18.18.9",
++      "version": "18.18.9-ojak.1",
        "dependencies": {
          "@oh-my-pi/pi-ai": "catalog:",
          "@oh-my-pi/pi-catalog": "catalog:",
-@@ -41,7 +41,7 @@
+@@ -34,7 +34,7 @@
      },
      "packages/ai": {
        "name": "@oh-my-pi/pi-ai",
--      "version": "18.15.0",
-+      "version": "18.15.0-ojak.1",
+-      "version": "18.18.9",
++      "version": "18.18.9-ojak.1",
        "dependencies": {
          "@oh-my-pi/omptype": "catalog:",
          "@oh-my-pi/pi-catalog": "catalog:",
-@@ -76,7 +76,7 @@
+@@ -69,7 +69,7 @@
      },
      "packages/coding-agent": {
        "name": "@oh-my-pi/pi-coding-agent",
--      "version": "18.15.0",
-+      "version": "18.15.0-ojak.1",
+-      "version": "18.18.9",
++      "version": "18.18.9-ojak.1",
        "bin": {
          "omp": "src/cli.ts",
        },
-@@ -297,7 +297,7 @@
+@@ -273,7 +273,7 @@
      },
      "packages/utils": {
        "name": "@oh-my-pi/pi-utils",
--      "version": "18.15.0",
-+      "version": "18.15.0-ojak.1",
+-      "version": "18.18.9",
++      "version": "18.18.9-ojak.1",
        "dependencies": {
+         "@oh-my-pi/omptype": "catalog:",
          "@oh-my-pi/pi-natives": "catalog:",
-       },
-@@ -344,14 +344,14 @@
+@@ -319,14 +319,14 @@
      "@napi-rs/cli": "3.7.2",
-     "@oh-my-pi/omp-stats": "18.15.0",
-     "@oh-my-pi/omptype": "18.15.0",
--    "@oh-my-pi/pi-agent-core": "18.15.0",
--    "@oh-my-pi/pi-ai": "18.15.0",
-+    "@oh-my-pi/pi-agent-core": "18.15.0-ojak.1",
-+    "@oh-my-pi/pi-ai": "18.15.0-ojak.1",
-     "@oh-my-pi/pi-catalog": "18.15.0",
--    "@oh-my-pi/pi-coding-agent": "18.15.0",
-+    "@oh-my-pi/pi-coding-agent": "18.15.0-ojak.1",
-     "@oh-my-pi/pi-mnemopi": "18.15.0",
-     "@oh-my-pi/pi-natives": "18.15.0",
-     "@oh-my-pi/pi-tui": "18.15.0",
--    "@oh-my-pi/pi-utils": "18.15.0",
-+    "@oh-my-pi/pi-utils": "18.15.0-ojak.1",
-     "@oh-my-pi/pi-wire": "18.15.0",
-     "@oh-my-pi/snapcompact": "18.15.0",
+     "@oh-my-pi/omp-stats": "18.18.9",
+     "@oh-my-pi/omptype": "18.18.9",
+-    "@oh-my-pi/pi-agent-core": "18.18.9",
+-    "@oh-my-pi/pi-ai": "18.18.9",
++    "@oh-my-pi/pi-agent-core": "18.18.9-ojak.1",
++    "@oh-my-pi/pi-ai": "18.18.9-ojak.1",
+     "@oh-my-pi/pi-catalog": "18.18.9",
+-    "@oh-my-pi/pi-coding-agent": "18.18.9",
++    "@oh-my-pi/pi-coding-agent": "18.18.9-ojak.1",
+     "@oh-my-pi/pi-mnemopi": "18.18.9",
+     "@oh-my-pi/pi-natives": "18.18.9",
+     "@oh-my-pi/pi-tui": "18.18.9",
+-    "@oh-my-pi/pi-utils": "18.18.9",
++    "@oh-my-pi/pi-utils": "18.18.9-ojak.1",
+     "@oh-my-pi/pi-wire": "18.18.9",
+     "@oh-my-pi/snapcompact": "18.18.9",
      "@opentelemetry/api": "^1.9.1",
 diff --git a/docs/environment-variables.md b/docs/environment-variables.md
-index b60ad2a..af52451 100644
+index 434ac69d2c..945c5370ba 100644
 --- a/docs/environment-variables.md
 +++ b/docs/environment-variables.md
-@@ -580,7 +580,7 @@ These affect where coding-agent stores data and which process-local settings ove
+@@ -601,7 +601,7 @@ These affect where coding-agent stores data and which process-local settings ove
  | `PWD`                                               | Used when matching canonical current working directory in path helpers                                                                                                                                                                                                                                                                                                                                                                                                                                                                          |
  | `OMP_WORKTREE_DIR`                                  | Agent-managed worktrees directory override (default `~/.omp/wt`); must be absolute or `~`-relative, relative paths are ignored; wins over the `worktree.base` setting                                                                                                                                                                                                                                                                                                                                                                           |
  | `OMP_GITHUB_CACHE_DB`                               | Overrides the GitHub view cache database path (default `~/.omp/cache/github-cache.db`)                                                                                                                                                                                                                                                                                                                                                                                                                                                          |
@@ -71,10 +71,10 @@ index b60ad2a..af52451 100644
  
  ---
 diff --git a/docs/extensions.md b/docs/extensions.md
-index 463417d..4ddf003 100644
+index 4ae2538077..70ce449e27 100644
 --- a/docs/extensions.md
 +++ b/docs/extensions.md
-@@ -351,6 +351,7 @@ Handlers and tool `execute` receive `ctx` with:
+@@ -373,6 +373,7 @@ Handlers and tool `execute` receive `ctx` with:
  - `hasUI`: whether this runner has a non-no-op UI context, not whether every UI method is supported
  - `cwd`
  - `sessionManager` (read-only)
@@ -82,7 +82,7 @@ index 463417d..4ddf003 100644
  - `modelRegistry`, `model`
  - `models` (read-only model query — see below)
  - `localProtocolOptions` (optional calling-session `local://` root mapping for external tool bridges)
-@@ -358,6 +359,9 @@ Handlers and tool `execute` receive `ctx` with:
+@@ -380,6 +381,9 @@ Handlers and tool `execute` receive `ctx` with:
  - `getAsyncJobSnapshot()` returns the current session's read-only async-job snapshot, or `null` when no session owns the context
  - `compact(instructionsOrOptions?)`: accepts summary focus text or `CompactOptions`, including one-off `mode: "soft" | "remote" | "snapcompact"`, `onComplete`, `onError`, and `suppressContinuation`
  - `isIdle()`, `hasPendingMessages()`, `abort()`
@@ -92,7 +92,7 @@ index 463417d..4ddf003 100644
  - `shutdown()`
  - `resolvePlanReview(reviewId, choice, input?)`: answer the open interactive plan review; returns `false` when the review or choice is unavailable, `refine` requires non-empty `input.feedback`, and on approvals (`execute`, `compact`, `keep`) `input.role` may name a tier from the event's `tiers` to pick the execution model (an unknown role, or a `role` on any other choice, returns `false`)
  - `getPendingPlanReview()`: the open interactive plan review still awaiting an answer, in the `plan_review_requested` shape, or `undefined`; use it to answer a review that opened before the extension loaded or reconnected
-@@ -384,6 +388,18 @@ Handlers and tool `execute` receive `ctx` with:
+@@ -406,6 +410,18 @@ Handlers and tool `execute` receive `ctx` with:
    Explicit paste requires `ctx.ui.supportsEditor === true`: the TUI and non-headless RPC expose composers; ACP and no-op UI contexts do not. Supplied diffs used for LLM review reject above 50,000 characters or 20 reviewable files before delivery, and `open` rejects such a patch before mounting the overlay; split larger patches into smaller requests. Notes-only submissions do not have this review-prompt bound.
  - `setInterval(fn, ms, ...args)` / `setTimeout(fn, ms, ...args)` / `clearTimer(timer)` — managed timers (see below)
  
@@ -111,7 +111,7 @@ index 463417d..4ddf003 100644
  ### Ephemeral side turns (`ctx.runEphemeralTurn`)
  
  Run the same side-turn pipeline as `/btw` using the current model and conversational context. The question and response are not appended to session history, and the request can run while the main turn is active. The snapshot may include in-flight assistant text.
-@@ -614,6 +630,7 @@ and `/new`. Commands retain their explicit prefill and session-transition action
+@@ -659,6 +675,7 @@ and `/new`. Commands retain their explicit prefill and session-transition action
  ### Subagent lifecycle
  
  - `before_subagent_spawn` → `{ model?: string | string[]; block?: boolean; reason?: string; note?: string }`. Fires in the parent session exactly once per spawned child (`task`, eval `agent()`, workpool workers), at dispatch before the child resolves its model — never during a frontend's validation preflight, so stateful routers (round-robin, quota) advance once per child. The event carries `agent`, `invocationKind`, `modelRole` (the pre-expansion role alias, when any), the expanded `patterns` core would use, and an optional stable `spawnKey`. A returned `model` replaces the spawn's attempt-ordered patterns while keeping the role identity, so the remaining entries become the child's retry fallback chain; handlers run in extension order and the last returned `model` wins, along with its `note`, which the task UI shows as the spawn's routing reason on live, async, and settled rows. `block: true` refuses the spawn with `reason`. Cancelling the spawn releases an awaiting handler (its result is discarded and pending `ctx.ui` dialogs close) instead of holding the spawn until the handler timeout.
@@ -120,7 +120,7 @@ index 463417d..4ddf003 100644
  ### Reliability/runtime signals
  
 diff --git a/docs/non-compaction-retry-policy.md b/docs/non-compaction-retry-policy.md
-index 1ead7f6..3e8f259 100644
+index 1ead7f6d71..3e8f2594ca 100644
 --- a/docs/non-compaction-retry-policy.md
 +++ b/docs/non-compaction-retry-policy.md
 @@ -27,6 +27,16 @@ Retry and compaction are checked from the same `agent_end` path, but they are in
@@ -141,62 +141,46 @@ index 1ead7f6..3e8f259 100644
  
  An exact OpenAI Responses HTTP 408 whose error text says `Timed out reading request body` is special only when the provider recorded that the **actual submitted request** was a full replay, not a `previous_response_id` delta. The transport surfaces that full-replay case after the first response. Delta and unknown/legacy request shapes retain ordinary transport retry behavior: mutating history after a delta can force a larger full replay, so automatic local elision must not infer safety from the diagnostic alone. Before any full-replay recovery, the session preserves the normal replay-safety veto and retry budget, requires enabled compaction with `shake` in `compaction.methodOrder`, then performs one conservative, artifact-backed local `shake elide`. The one-shot marker is scoped to the logical prompt sequence and is cleared by any turn that produced output, so a long prompt that keeps making progress can recover a later timeout over its newly grown history while back-to-back timeouts still get exactly one changed request; prompt generation remains the cancellation/session-transition fence. A retry occurs only when that operation rewrote eligible history; disabled, no-progress, artifact-save failure, cancellation, an exhausted retry budget, or a second matching error terminates the turn without an unchanged replay.
 diff --git a/package.json b/package.json
-index 71b1164..eb3ccb4 100644
+index 4af2b64522..d48c323fab 100644
 --- a/package.json
 +++ b/package.json
-@@ -18,14 +18,14 @@
+@@ -17,14 +17,14 @@
  			"@napi-rs/cli": "3.7.2",
- 			"@oh-my-pi/omp-stats": "18.15.0",
- 			"@oh-my-pi/omptype": "18.15.0",
--			"@oh-my-pi/pi-agent-core": "18.15.0",
--			"@oh-my-pi/pi-ai": "18.15.0",
-+			"@oh-my-pi/pi-agent-core": "18.15.0-ojak.1",
-+			"@oh-my-pi/pi-ai": "18.15.0-ojak.1",
- 			"@oh-my-pi/pi-catalog": "18.15.0",
--			"@oh-my-pi/pi-coding-agent": "18.15.0",
-+			"@oh-my-pi/pi-coding-agent": "18.15.0-ojak.1",
- 			"@oh-my-pi/pi-mnemopi": "18.15.0",
- 			"@oh-my-pi/pi-natives": "18.15.0",
- 			"@oh-my-pi/pi-tui": "18.15.0",
--			"@oh-my-pi/pi-utils": "18.15.0",
-+			"@oh-my-pi/pi-utils": "18.15.0-ojak.1",
- 			"@oh-my-pi/pi-wire": "18.15.0",
- 			"@oh-my-pi/snapcompact": "18.15.0",
+ 			"@oh-my-pi/omp-stats": "18.18.9",
+ 			"@oh-my-pi/omptype": "18.18.9",
+-			"@oh-my-pi/pi-agent-core": "18.18.9",
+-			"@oh-my-pi/pi-ai": "18.18.9",
++			"@oh-my-pi/pi-agent-core": "18.18.9-ojak.1",
++			"@oh-my-pi/pi-ai": "18.18.9-ojak.1",
+ 			"@oh-my-pi/pi-catalog": "18.18.9",
+-			"@oh-my-pi/pi-coding-agent": "18.18.9",
++			"@oh-my-pi/pi-coding-agent": "18.18.9-ojak.1",
+ 			"@oh-my-pi/pi-mnemopi": "18.18.9",
+ 			"@oh-my-pi/pi-natives": "18.18.9",
+ 			"@oh-my-pi/pi-tui": "18.18.9",
+-			"@oh-my-pi/pi-utils": "18.18.9",
++			"@oh-my-pi/pi-utils": "18.18.9-ojak.1",
+ 			"@oh-my-pi/pi-wire": "18.18.9",
+ 			"@oh-my-pi/snapcompact": "18.18.9",
  			"@opentelemetry/api": "^1.9.1",
-diff --git a/packages/agent/CHANGELOG.md b/packages/agent/CHANGELOG.md
-index e0e6f4f..2a55d07 100644
---- a/packages/agent/CHANGELOG.md
-+++ b/packages/agent/CHANGELOG.md
-@@ -1,6 +1,10 @@
- # Changelog
- 
--## [Unreleased]
-+## [18.12.0-ojak.1]
-+
-+### Fixed
-+
-+- Custom provider exceptions retain error codes, types, status, and prior-output evidence so admission pauses cannot be mistaken for retryable or safely unsent requests.
- 
- ## [18.15.0] - 2026-11-01
- 
 diff --git a/packages/agent/package.json b/packages/agent/package.json
-index d4607fd..0a73cb2 100644
+index 0b66d4c99e..6de8c7ff2d 100644
 --- a/packages/agent/package.json
 +++ b/packages/agent/package.json
 @@ -1,7 +1,7 @@
  {
    "type": "module",
    "name": "@oh-my-pi/pi-agent-core",
--  "version": "18.15.0",
-+  "version": "18.15.0-ojak.1",
+-  "version": "18.18.9",
++  "version": "18.18.9-ojak.1",
    "description": "General-purpose agent with transport abstraction, state management, and attachment support",
    "homepage": "https://omp.sh",
    "author": { "name": "Stencil Labs, Inc.", "url": "https://stencil.so" },
 diff --git a/packages/agent/src/agent.ts b/packages/agent/src/agent.ts
-index eb30cec..cfce5b5 100644
+index b87a88dada..7a3fcfa504 100644
 --- a/packages/agent/src/agent.ts
 +++ b/packages/agent/src/agent.ts
-@@ -2172,7 +2172,7 @@ export class Agent {
+@@ -2271,7 +2271,7 @@ export class Agent {
  						}
  					: {
  							role: "assistant",
@@ -205,7 +189,7 @@ index eb30cec..cfce5b5 100644
  							api: model.api,
  							provider: model.provider,
  							model: model.id,
-@@ -2188,6 +2188,16 @@ export class Agent {
+@@ -2287,6 +2287,16 @@ export class Agent {
  							errorMessage,
  							timestamp: Date.now(),
  						};
@@ -222,37 +206,20 @@ index eb30cec..cfce5b5 100644
  
  			if (shouldEmitVisibleError) {
  				if (!turnOpen) {
-diff --git a/packages/ai/CHANGELOG.md b/packages/ai/CHANGELOG.md
-index 22c442a..f8121c6 100644
---- a/packages/ai/CHANGELOG.md
-+++ b/packages/ai/CHANGELOG.md
-@@ -1,6 +1,11 @@
- # Changelog
- 
--## [Unreleased]
-+## [18.12.0-ojak.1]
-+
-+### Added
-+
-+- Provider adapters can preserve machine-readable error types and codes on assistant messages through `errorType` and `errorCode`.
-+- Provider callbacks can distinguish primary conversation requests from ephemeral work with host-only `requestKind`, omitted from native gateway requests.
- 
- ## [18.15.0] - 2026-11-01
- 
 diff --git a/packages/ai/package.json b/packages/ai/package.json
-index d35d80c..168f700 100644
+index c477db5326..8195a29de4 100644
 --- a/packages/ai/package.json
 +++ b/packages/ai/package.json
 @@ -1,6 +1,6 @@
  {
  	"name": "@oh-my-pi/pi-ai",
--	"version": "18.15.0",
-+	"version": "18.15.0-ojak.1",
+-	"version": "18.18.9",
++	"version": "18.18.9-ojak.1",
  	"description": "Unified LLM API with automatic model discovery and provider configuration",
  	"keywords": [
  		"ai",
 diff --git a/packages/ai/src/providers/pi-native-client.ts b/packages/ai/src/providers/pi-native-client.ts
-index cafb934..fc2bdd0 100644
+index cafb934c86..fc2bdd090f 100644
 --- a/packages/ai/src/providers/pi-native-client.ts
 +++ b/packages/ai/src/providers/pi-native-client.ts
 @@ -55,6 +55,7 @@ const NON_WIRE_KEYS = new Set<keyof SimpleStreamOptions>([
@@ -264,10 +231,10 @@ index cafb934..fc2bdd0 100644
  const PI_NATIVE_STREAM_IDLE_TIMEOUT_ERROR = "pi-native stream stalled while waiting for the next event";
  const PI_NATIVE_STREAM_FIRST_EVENT_TIMEOUT_ERROR = "pi-native stream timed out while waiting for the first event";
 diff --git a/packages/ai/src/stream.ts b/packages/ai/src/stream.ts
-index 1f9803e..abb2ff0 100644
+index 6d1b5e190d..2193c504bd 100644
 --- a/packages/ai/src/stream.ts
 +++ b/packages/ai/src/stream.ts
-@@ -1515,8 +1515,8 @@ export async function completeSimple<TApi extends Api>(
+@@ -1545,8 +1545,8 @@ export async function completeSimple<TApi extends Api>(
  		onAttempt?: (message: AssistantMessage) => void;
  	},
  ): Promise<AssistantMessage> {
@@ -279,7 +246,7 @@ index 1f9803e..abb2ff0 100644
  		options?.signal,
  		() => streamSimple(model, context, sessionOptions),
 diff --git a/packages/ai/src/types.ts b/packages/ai/src/types.ts
-index 2d2b636..ff437ef 100644
+index e69946b7d6..1cf052e010 100644
 --- a/packages/ai/src/types.ts
 +++ b/packages/ai/src/types.ts
 @@ -580,6 +580,14 @@ export interface StreamOptions {
@@ -297,7 +264,7 @@ index 2d2b636..ff437ef 100644
  	/**
  	 * Optional prompt-cache identity. OpenAI-family providers use this for
  	 * `prompt_cache_key` payloads and cache-affinity headers such as
-@@ -1336,6 +1344,12 @@ export interface AssistantMessage {
+@@ -1364,6 +1372,12 @@ export interface AssistantMessage {
  	errorMessage?: string;
  	/** Stable recovery-classification text when errorMessage includes display-only diagnostics. */
  	errorClassificationMessage?: string;
@@ -311,7 +278,7 @@ index 2d2b636..ff437ef 100644
  	requestBodyReadTimeoutFullReplay?: boolean;
  	/** Per-tool abort messages used when an aborted assistant turn needs different placeholder results per tool call. */
 diff --git a/packages/ai/test/pi-native-client.test.ts b/packages/ai/test/pi-native-client.test.ts
-index 6573ec0..f34033b 100644
+index 6573ec0e52..f34033bd74 100644
 --- a/packages/ai/test/pi-native-client.test.ts
 +++ b/packages/ai/test/pi-native-client.test.ts
 @@ -306,6 +306,7 @@ describe("streamPiNative request shape", () => {
@@ -333,7 +300,7 @@ index 6573ec0..f34033b 100644
  		expect(responseMetadata).toMatchObject({
 diff --git a/packages/ai/test/provider-request-ownership.test.ts b/packages/ai/test/provider-request-ownership.test.ts
 new file mode 100644
-index 0000000..3ac3829
+index 0000000000..3ac382966a
 --- /dev/null
 +++ b/packages/ai/test/provider-request-ownership.test.ts
 @@ -0,0 +1,32 @@
@@ -369,62 +336,24 @@ index 0000000..3ac3829
 +		.rejects.toThrow("durable owner");
 +	expect(mock.calls).toHaveLength(1);
 +});
-diff --git a/packages/coding-agent/CHANGELOG.md b/packages/coding-agent/CHANGELOG.md
-index f3412e4..e97e2db 100644
---- a/packages/coding-agent/CHANGELOG.md
-+++ b/packages/coding-agent/CHANGELOG.md
-@@ -1,6 +1,32 @@
- # Changelog
- 
--## [Unreleased]
-+## [18.15.0-ojak.1]
-+
-+### Changed
-+
-+- Rebased the Ojak fork (durable admission, `persistSession`/`resumePendingTurn`, `before_subagent_admission`, `ojak-durable-native` transport hooks, Ojak-only update channel) onto upstream 18.15.0. Subagent admission now also honors per-call model grants (exact-only resolution after the model registry refresh settles).
-+- Self-update and startup offers now read only `omp-compatible-v2.json` (schema 2) and the `omp-v2-*` assets, and install only when the running Ojak service (`aam status --json` `serviceVersion`) is at least the manifest's `minimumOjakService`; an unknown or older service refuses with "Update Ojak first" and keeps the executable. The schema-1 `omp-compatible.json` is no longer read.
-+
-+## [18.12.0-ojak.2]
-+
-+### Fixed
-+
-+- Self-update and startup offers use only published, non-draft, non-prerelease `lapalai/ojak` releases of the dedicated omp channel (tag `omp-vX.Y.Z-ojak.N`, never the app's `latest`, read from one bounded `/releases?per_page=30` page) whose same-release `omp-compatible-v2.json` admission-protocol manifest version equals the tag version. Native Mac arm64 and Windows x64 assets are size/hash verified before atomic replacement and version verification; a failed replacement rolls back.
-+- Check-only never changes the executable. Force still verifies compatibility; canary, missing manifests, unsupported platforms and network errors preserve the installed client without upstream fallback. Plugin updates remain independent.
-+
-+## [18.12.0-ojak.1]
-+
-+### Added
-+
-+- Extensions can durably save the first user turn with `ctx.persistSession()` and continue explicitly unsent context with `ctx.resumePendingTurn()` without duplicating user messages or tool effects.
-+- Extensions can delay child creation with the cancellable, timeout-free `before_subagent_admission` hook inside existing subagent scheduling limits.
-+- Provider extensions can identify the exact live request owner with readonly `ctx.providerSessionId` and distinguish primary from ephemeral requests through `options.requestKind`.
-+- External request fences use stable-storage synchronization rather than ordinary buffered session flushes; unsupported storage fails closed before dispatch.
-+
-+### Fixed
-+
-+- Requests marked `execution_unknown` or `BRIDGE_EXECUTION_UNKNOWN` no longer trigger automatic retry, fallback, or continuation.
-+- Paused or stopped admission no longer triggers automatic recovery; explicit resumption of a proven-unsent, output-free pause preserves the original user and completed tools.
- 
- ## [18.15.0] - 2026-11-01
- 
 diff --git a/packages/coding-agent/package.json b/packages/coding-agent/package.json
-index 48d2e32..a47ca4d 100644
+index 73bda3ed23..d4819c806e 100644
 --- a/packages/coding-agent/package.json
 +++ b/packages/coding-agent/package.json
 @@ -1,6 +1,6 @@
  {
  	"name": "@oh-my-pi/pi-coding-agent",
--	"version": "18.15.0",
-+	"version": "18.15.0-ojak.1",
+-	"version": "18.18.9",
++	"version": "18.18.9-ojak.1",
  	"description": "Coding agent CLI with read, bash, edit, write tools and session management",
  	"keywords": [
  		"agent",
 diff --git a/packages/coding-agent/src/cli/ojak-update.ts b/packages/coding-agent/src/cli/ojak-update.ts
 new file mode 100644
-index 0000000..1001ee5
+index 0000000000..9a66b21ace
 --- /dev/null
 +++ b/packages/coding-agent/src/cli/ojak-update.ts
-@@ -0,0 +1,242 @@
+@@ -0,0 +1,389 @@
 +import * as fs from "node:fs";
 +import * as os from "node:os";
 +import * as path from "node:path";
@@ -454,7 +383,8 @@ index 0000000..1001ee5
 +export function compatibleAssetFetch(fetchImpl: Fetch = fetch): Fetch {
 +	return async (input, init) => {
 +		let url = String(input);
-+		if (!url.startsWith(BASE) || new URL(url).search || new URL(url).hash) throw new Error("Invalid compatible asset URL");
++		if (!url.startsWith(BASE) || new URL(url).search || new URL(url).hash)
++			throw new Error("Invalid compatible asset URL");
 +		for (let hop = 0; hop < 4; hop++) {
 +			let response: Response;
 +			try {
@@ -467,14 +397,28 @@ index 0000000..1001ee5
 +			await response.body?.cancel();
 +			if (!location) throw new Error("Missing GitHub asset redirect");
 +			const next = new URL(location, url);
-+			if (next.protocol !== "https:" || next.hostname !== "release-assets.githubusercontent.com" || next.port || next.username || next.password || next.hash) throw new Error("Unsafe GitHub asset redirect");
++			if (
++				next.protocol !== "https:" ||
++				next.hostname !== "release-assets.githubusercontent.com" ||
++				next.port ||
++				next.username ||
++				next.password ||
++				next.hash
++			)
++				throw new Error("Unsafe GitHub asset redirect");
 +			url = next.href;
 +		}
 +		throw new Error("Too many GitHub asset redirects");
 +	};
 +}
 +
-+async function json(url: string, fetchImpl: Fetch, signal: AbortSignal, limit: number, expectedSize?: number): Promise<unknown> {
++async function json(
++	url: string,
++	fetchImpl: Fetch,
++	signal: AbortSignal,
++	limit: number,
++	expectedSize?: number,
++): Promise<unknown> {
 +	const response = await fetchImpl(url, { signal, redirect: "error", headers: { Accept: "application/json" } });
 +	if (!response.ok || !response.body) throw new Error(`Compatible release request failed (${response.status})`);
 +	const reader = response.body.getReader();
@@ -488,7 +432,9 @@ index 0000000..1001ee5
 +			if (length > limit) throw new Error("Compatible metadata exceeds size limit");
 +			chunks.push(value);
 +		}
-+	} finally { await reader.cancel(); }
++	} finally {
++		await reader.cancel();
++	}
 +	if (expectedSize !== undefined && length !== expectedSize) throw new Error("Compatible manifest size mismatch");
 +	return JSON.parse(Buffer.concat(chunks).toString("utf8"));
 +}
@@ -513,14 +459,20 @@ index 0000000..1001ee5
 +}
 +
 +/** Places the `aam` CLI can live when it is not on PATH. The first reachable one that reports a version wins. */
-+export function aamCandidates(env: NodeJS.ProcessEnv = process.env, platform: string = process.platform, onPath: string | null = null): string[] {
++export function aamCandidates(
++	env: NodeJS.ProcessEnv = process.env,
++	platform: string = process.platform,
++	onPath: string | null = null,
++): string[] {
 +	const found = new Set<string>();
 +	if (onPath) found.add(onPath);
 +	const win = platform === "win32";
 +	const join = win ? path.win32.join : path.posix.join;
-+	const home = env.AAM_HOME || (win
-+		? join(env.APPDATA || join(os.homedir(), "AppData", "Roaming"), "AI Account Manager")
-+		: join(os.homedir(), "Library", "Application Support", "AI Account Manager"));
++	const home =
++		env.AAM_HOME ||
++		(win
++			? join(env.APPDATA || join(os.homedir(), "AppData", "Roaming"), "AI Account Manager")
++			: join(os.homedir(), "Library", "Application Support", "AI Account Manager"));
 +	if (win) {
 +		// Ojak's NSIS installer puts the real executable at %LOCALAPPDATA%\Ojak\aam.exe. The shim folder only has
 +		// `aam.cmd`, a one-line batch file that names that executable; read it instead of running cmd.exe.
@@ -547,7 +499,10 @@ index 0000000..1001ee5
 +	}
 +	const match = /^@"([^"\r\n]+\.exe)" %\*\r?\n?$/i.exec(text.trim() + "\n");
 +	if (!match) return undefined;
-+	const expanded = match[1]!.replace(/%%/g, "\u0000").replace(/%([A-Za-z_]+)%/g, (_, name: string) => env[name] ?? `%${name}%`).replace(/\u0000/g, "%");
++	const expanded = match[1]!
++		.replace(/%%/g, "\u0000")
++		.replace(/%([A-Za-z_]+)%/g, (_, name: string) => env[name] ?? `%${name}%`)
++		.replace(/\u0000/g, "%");
 +	return expanded.includes("%") || !path.win32.isAbsolute(expanded) ? undefined : expanded;
 +}
 +
@@ -555,28 +510,93 @@ index 0000000..1001ee5
 + * Version of the RUNNING Ojak service, read through `aam status --json` (`serviceVersion`).
 + * Undefined when no `aam` answers or the service predates the field, so callers fail closed.
 + */
-+export async function readOjakServiceVersion(candidates: string[] = aamCandidates(process.env, process.platform, Bun.which("aam"))): Promise<string | undefined> {
++export async function readOjakServiceVersion(
++	candidates: string[] = aamCandidates(process.env, process.platform, Bun.which("aam")),
++): Promise<string | undefined> {
 +	for (const candidate of candidates) {
 +		if (!fs.existsSync(candidate)) continue;
 +		try {
-+			const child = Bun.spawn([candidate, "status", "--json"], { stdin: "ignore", stdout: "pipe", stderr: "ignore", timeout: 20_000, windowsHide: true });
++			const child = Bun.spawn([candidate, "status", "--json"], {
++				stdin: "ignore",
++				stdout: "pipe",
++				stderr: "ignore",
++				timeout: 20_000,
++				windowsHide: true,
++			});
 +			const [text, code] = await Promise.all([new Response(child.stdout).text(), child.exited]);
 +			if (code !== 0 || text.length > 32 * 1024 * 1024) continue;
 +			const parsed: unknown = JSON.parse(text);
-+			if (record(parsed) && typeof parsed.serviceVersion === "string" && parseServiceVersion(parsed.serviceVersion)) return parsed.serviceVersion.trim();
++			if (record(parsed) && typeof parsed.serviceVersion === "string" && parseServiceVersion(parsed.serviceVersion))
++				return parsed.serviceVersion.trim();
 +		} catch {}
 +	}
 +	return undefined;
 +}
 +
 +/** Throws unless the running Ojak service is at least the release's `minimumOjakService`. */
-+export async function requireOjakService(minimum: string, read: () => Promise<string | undefined> = readOjakServiceVersion): Promise<string> {
++export async function requireOjakService(
++	minimum: string,
++	read: () => Promise<string | undefined> = readOjakServiceVersion,
++): Promise<string> {
 +	const actual = await read();
 +	if (!serviceMeets(actual, minimum)) {
 +		const seen = actual ? `running service ${actual}` : "no running Ojak service version could be read";
 +		throw new Error(`Update Ojak first: this omp needs Ojak service ${minimum} or newer (${seen})`);
 +	}
 +	return actual!;
++}
++
++/**
++ * Upstream (can1357/oh-my-pi) latest release. Advisory only: it never selects, downloads or installs anything.
++ * Mirrors the launcher's `aam omp-bridge` report so both surfaces use the same wording and states.
++ */
++const UPSTREAM_LATEST = "https://api.github.com/repos/can1357/oh-my-pi/releases/latest";
++const UPSTREAM_TIMEOUT_MS = 10_000;
++
++/** `current`: the compatible release carries the upstream latest; `compatibility-pending`: upstream is ahead; `unknown`: not readable. */
++export type UpstreamStatus = "current" | "compatibility-pending" | "unknown";
++export type UpstreamReport = { status: UpstreamStatus; upstreamVersion: string | null; compatibleVersion: string };
++
++/** Newest published stable upstream version (`X.Y.Z`), or undefined for any failure or odd tag. Never throws. */
++export async function fetchUpstreamLatest(
++	fetchImpl: Fetch = fetch,
++	timeoutMs = UPSTREAM_TIMEOUT_MS,
++): Promise<string | undefined> {
++	try {
++		const body = await json(UPSTREAM_LATEST, fetchImpl, AbortSignal.timeout(timeoutMs), 4 * 1024 * 1024);
++		if (!record(body) || body.draft !== false || body.prerelease !== false || typeof body.tag_name !== "string")
++			return undefined;
++		const tag = body.tag_name.startsWith("v") ? body.tag_name.slice(1) : undefined;
++		return tag !== undefined && SERVICE_VERSION.test(tag) ? tag : undefined;
++	} catch {
++		return undefined;
++	}
++}
++
++function baseOf(version: string): [number, number, number] {
++	const [major, minor, patch] = version.split(/[-+]/, 1)[0]!.split(".").map(Number);
++	return [major!, minor!, patch!];
++}
++
++/** Upstream is "current" only when the compatible base version is at least upstream's; a failed query is "unknown", never "current". */
++export function classifyUpstream(upstreamVersion: string | undefined, compatibleVersion: string): UpstreamReport {
++	if (upstreamVersion === undefined) return { status: "unknown", upstreamVersion: null, compatibleVersion };
++	const [u, c] = [baseOf(upstreamVersion), baseOf(compatibleVersion)];
++	for (let i = 0; i < 3; i++)
++		if (u[i] !== c[i])
++			return { status: u[i]! > c[i]! ? "compatibility-pending" : "current", upstreamVersion, compatibleVersion };
++	return { status: "current", upstreamVersion, compatibleVersion };
++}
++
++export function describeUpstream(report: UpstreamReport): string {
++	switch (report.status) {
++		case "compatibility-pending":
++			return `Upstream latest is ${report.upstreamVersion}; the newest published Ojak-compatible release is ${report.compatibleVersion}. The compatible release channel is behind upstream; compatibility build, verification and publication are still pending.`;
++		case "current":
++			return `The Ojak-compatible release ${report.compatibleVersion} includes upstream latest ${report.upstreamVersion}.`;
++		case "unknown":
++			return "Upstream latest could not be determined; this report covers the Ojak compatible channel only and does not imply upstream is current.";
++	}
 +}
 +
 +/** A release that cannot be the omp update (never a transport failure); the next candidate is tried. */
@@ -607,38 +627,92 @@ index 0000000..1001ee5
 +	}
 +	if (!VERSION.test(match[1]!)) throw new InvalidRelease(`${tag}: malformed omp release tag`);
 +	const published = typeof entry.published_at === "string" ? Date.parse(entry.published_at) : Number.NaN;
-+	if (entry.draft !== false || entry.prerelease !== false || !Number.isFinite(published) || !Array.isArray(entry.assets)) throw new InvalidRelease(`${tag}: not a published stable release`);
++	if (
++		entry.draft !== false ||
++		entry.prerelease !== false ||
++		!Number.isFinite(published) ||
++		!Array.isArray(entry.assets)
++	)
++		throw new InvalidRelease(`${tag}: not a published stable release`);
 +	return { tag, version: match[1]!, published, assets: entry.assets };
 +}
 +
-+async function release(item: Candidate, platform: string, fetchImpl: Fetch, signal: AbortSignal): Promise<CompatibleRelease> {
++async function release(
++	item: Candidate,
++	platform: string,
++	fetchImpl: Fetch,
++	signal: AbortSignal,
++): Promise<CompatibleRelease> {
 +	const prefix = `${BASE}${item.tag}/`;
 +	function asset(name: string): Record<string, unknown> {
 +		const found = item.assets.filter(a => record(a) && a.name === name);
-+		if (found.length !== 1 || !record(found[0]) || found[0].browser_download_url !== `${prefix}${name}` || !size(found[0].size)) throw new InvalidRelease(`${item.tag}: missing or invalid same-release asset ${name}`);
++		if (
++			found.length !== 1 ||
++			!record(found[0]) ||
++			found[0].browser_download_url !== `${prefix}${name}` ||
++			!size(found[0].size)
++		)
++			throw new InvalidRelease(`${item.tag}: missing or invalid same-release asset ${name}`);
 +		return found[0];
 +	}
 +	const manifestAsset = asset(MANIFEST);
-+	if (Number(manifestAsset.size) > 64 * 1024) throw new InvalidRelease(`${item.tag}: compatible manifest exceeds size limit`);
++	if (Number(manifestAsset.size) > 64 * 1024)
++		throw new InvalidRelease(`${item.tag}: compatible manifest exceeds size limit`);
 +	asset(ASSETS[platform as keyof typeof ASSETS]);
-+	const manifest = await json(String(manifestAsset.browser_download_url), compatibleAssetFetch(fetchImpl), signal, 64 * 1024, Number(manifestAsset.size));
-+	if (!record(manifest) || manifest.schemaVersion !== 2 || manifest.admissionProtocol !== 1 || typeof manifest.version !== "string" || !VERSION.test(manifest.version) || typeof manifest.minimumOjakService !== "string" || !SERVICE_VERSION.test(manifest.minimumOjakService) || !record(manifest.platforms)) throw new InvalidRelease(`${item.tag}: invalid Ojak compatibility manifest or admission protocol`);
-+	if (manifest.version !== item.version) throw new InvalidRelease(`${item.tag}: manifest version ${manifest.version} does not match the tag`);
++	const manifest = await json(
++		String(manifestAsset.browser_download_url),
++		compatibleAssetFetch(fetchImpl),
++		signal,
++		64 * 1024,
++		Number(manifestAsset.size),
++	);
++	if (
++		!record(manifest) ||
++		manifest.schemaVersion !== 2 ||
++		manifest.admissionProtocol !== 1 ||
++		typeof manifest.version !== "string" ||
++		!VERSION.test(manifest.version) ||
++		typeof manifest.minimumOjakService !== "string" ||
++		!SERVICE_VERSION.test(manifest.minimumOjakService) ||
++		!record(manifest.platforms)
++	)
++		throw new InvalidRelease(`${item.tag}: invalid Ojak compatibility manifest or admission protocol`);
++	if (manifest.version !== item.version)
++		throw new InvalidRelease(`${item.tag}: manifest version ${manifest.version} does not match the tag`);
 +	for (const [key, name] of Object.entries(ASSETS)) {
 +		const entry = manifest.platforms[key];
-+		if (!record(entry) || entry.asset !== name || !size(entry.size) || typeof entry.sha256 !== "string" || !/^[a-f0-9]{64}$/.test(entry.sha256)) throw new InvalidRelease(`${item.tag}: invalid compatible platform ${key}`);
++		if (
++			!record(entry) ||
++			entry.asset !== name ||
++			!size(entry.size) ||
++			typeof entry.sha256 !== "string" ||
++			!/^[a-f0-9]{64}$/.test(entry.sha256)
++		)
++			throw new InvalidRelease(`${item.tag}: invalid compatible platform ${key}`);
 +		const published = asset(name);
-+		if (published.size !== entry.size || (published.digest != null && published.digest !== `sha256:${entry.sha256}`)) throw new InvalidRelease(`${item.tag}: inconsistent compatible asset ${name}`);
++		if (published.size !== entry.size || (published.digest != null && published.digest !== `sha256:${entry.sha256}`))
++			throw new InvalidRelease(`${item.tag}: inconsistent compatible asset ${name}`);
 +	}
 +	const entry = manifest.platforms[platform] as { asset: string; size: number; sha256: string };
-+	return { version: manifest.version, minimumOjakService: manifest.minimumOjakService, file: { name: entry.asset, size: entry.size, sha256: entry.sha256 }, download: `${prefix}${entry.asset}` };
++	return {
++		version: manifest.version,
++		minimumOjakService: manifest.minimumOjakService,
++		file: { name: entry.asset, size: entry.size, sha256: entry.sha256 },
++		download: `${prefix}${entry.asset}`,
++	};
 +}
 +
 +/** Newest valid release of the omp channel (highest `X.Y.Z-ojak.N`, then latest publication). Never reads `/releases/latest`. */
-+export async function fetchCompatibleRelease(options: {
-+	fetchImpl?: Fetch; platform?: string; channel?: UpdateChannel; timeoutMs?: number;
-+} = {}): Promise<CompatibleRelease> {
-+	if (options.channel === "canary") throw new Error("Ojak supports only published stable compatible releases; canary is unavailable");
++export async function fetchCompatibleRelease(
++	options: {
++		fetchImpl?: Fetch;
++		platform?: string;
++		channel?: UpdateChannel;
++		timeoutMs?: number;
++	} = {},
++): Promise<CompatibleRelease> {
++	if (options.channel === "canary")
++		throw new Error("Ojak supports only published stable compatible releases; canary is unavailable");
 +	const platform = options.platform ?? `${process.platform}-${process.arch}`;
 +	if (!Object.hasOwn(ASSETS, platform)) throw new Error(`No compatible Ojak update for ${platform}`);
 +	const fetchImpl = options.fetchImpl ?? fetch;
@@ -665,10 +739,12 @@ index 0000000..1001ee5
 +			skipped.push(error.message);
 +		}
 +	}
-+	throw new Error(`No valid published omp release found in the Ojak omp channel${skipped.length ? ` (${skipped.slice(0, 5).join("; ")})` : ""}`);
++	throw new Error(
++		`No valid published omp release found in the Ojak omp channel${skipped.length ? ` (${skipped.slice(0, 5).join("; ")})` : ""}`,
++	);
 +}
 diff --git a/packages/coding-agent/src/cli/update-cli.ts b/packages/coding-agent/src/cli/update-cli.ts
-index 8fbee0c..f2d621a 100644
+index 49d398897c..679d21d27c 100644
 --- a/packages/coding-agent/src/cli/update-cli.ts
 +++ b/packages/coding-agent/src/cli/update-cli.ts
 @@ -15,7 +15,6 @@ import {
@@ -676,18 +752,18 @@ index 8fbee0c..f2d621a 100644
  	compareVersions,
  	formatBytes,
 -	getProjectDir,
+ 	getUpdateStateDir,
  	isCompiledBinary,
  	isEnoent,
- 	VERSION,
-@@ -23,7 +22,6 @@ import {
+@@ -25,7 +24,6 @@ import {
  import chalk from "@oh-my-pi/pi-utils/chalk";
- import { withFileLock } from "@oh-my-pi/pi-utils/file-lock";
+ import { type FileLockHandle, tryAcquireFileLock, withFileLock } from "@oh-my-pi/pi-utils/file-lock";
  import { $ } from "bun";
 -import { Settings, settings } from "../config/settings";
  import { theme } from "@oh-my-pi/pi-tui/theme";
  import {
  	isTimeoutError,
-@@ -31,7 +29,7 @@ import {
+@@ -33,7 +31,7 @@ import {
  	unsupportedProxyMessage,
  	withTimeoutSignal,
  } from "../utils/fetch-timeout";
@@ -696,16 +772,23 @@ index 8fbee0c..f2d621a 100644
  import {
  	DEFAULT_NPM_REGISTRY,
  	loadNpmRegistryResolver,
-@@ -40,7 +38,7 @@ import {
+@@ -42,7 +40,14 @@ import {
  	npmRegistryPackageUrl,
  } from "./npm-registry";
  
 -import { cfgUpdateChannel } from "../modes/settings";
-+import { compatibleAssetFetch, fetchCompatibleRelease, requireOjakService } from "./ojak-update";
++import {
++	classifyUpstream,
++	compatibleAssetFetch,
++	describeUpstream,
++	fetchCompatibleRelease,
++	fetchUpstreamLatest,
++	requireOjakService,
++} from "./ojak-update";
  
  const PACKAGE = "@oh-my-pi/pi-coding-agent";
  const HOMEBREW_FORMULA = "can1357/tap/omp";
-@@ -980,16 +978,6 @@ export async function pruneBunInstallCache(
+@@ -1009,16 +1014,6 @@ export async function pruneBunInstallCache(
  	return { scannedPackages, removedEntries };
  }
  
@@ -722,7 +805,7 @@ index 8fbee0c..f2d621a 100644
  
  interface BunGlobalInstallLocations {
  	globalDir?: string;
-@@ -1013,48 +1001,6 @@ export function resolveBunGlobalNodeModulesDirFromLocations({
+@@ -1042,48 +1037,6 @@ export function resolveBunGlobalNodeModulesDirFromLocations({
  	return undefined;
  }
  
@@ -771,10 +854,27 @@ index 8fbee0c..f2d621a 100644
  
  /**
   * Resolve the path that `omp` maps to in the user's PATH.
-@@ -1103,19 +1049,6 @@ async function isNativeExecutable(filePath: string): Promise<boolean> {
- 	return [0xfeedface, 0xfeedfacf, 0xcefaedfe, 0xcffaedfe, 0xcafebabe].includes(head.readUInt32BE(0));
+@@ -1115,37 +1068,6 @@ async function reportedVersionAtPath(binaryPath: string): Promise<string | undef
+ 	}
  }
  
+-/** Whether `filePath` starts like an ELF, PE, or Mach-O executable rather than a script. */
+-async function isNativeExecutable(filePath: string): Promise<boolean> {
+-	const head = Buffer.alloc(4);
+-	try {
+-		const file = await fs.promises.open(filePath, "r");
+-		try {
+-			if ((await file.read(head, 0, 4, 0)).bytesRead < 4) return false;
+-		} finally {
+-			await file.close();
+-		}
+-	} catch {
+-		return false;
+-	}
+-	if (head.toString("latin1") === "\x7fELF" || head.toString("latin1", 0, 2) === "MZ") return true;
+-	return [0xfeedface, 0xfeedfacf, 0xcefaedfe, 0xcffaedfe, 0xcafebabe].includes(head.readUInt32BE(0));
+-}
+-
 -/**
 - * The installed version a binary update names to the build service
 - * (`from_version`) so its answer carries a patch from that build: what
@@ -788,10 +888,11 @@ index 8fbee0c..f2d621a 100644
 -	if (!(await isNativeExecutable(targetPath))) return VERSION;
 -	return (await reportedVersionAtPath(targetPath)) ?? VERSION;
 -}
- 
+-
  /**
   * Run a specific binary and check if it reports the expected version.
-@@ -1176,10 +1109,6 @@ function printVerificationResult(result: InstalledVersionVerification, expectedV
+  */
+@@ -1207,10 +1129,6 @@ function printVerificationResult(result: InstalledVersionVerification, expectedV
  	console.log(chalk.yellow(`You may need to reinstall: ${installerHint()}`));
  }
  
@@ -802,7 +903,7 @@ index 8fbee0c..f2d621a 100644
  
  async function unlinkIfExists(filePath: string): Promise<void> {
  	try {
-@@ -1507,43 +1436,6 @@ export interface RenameMigrationSteps {
+@@ -1538,43 +1456,6 @@ export interface RenameMigrationSteps {
  	verify(): Promise<InstalledVersionVerification>;
  }
  
@@ -846,7 +947,7 @@ index 8fbee0c..f2d621a 100644
  
  /**
   * Migrate a package-manager install across an `omp.rename` hop without a
-@@ -1587,75 +1479,6 @@ export async function migrateRenamedInstall(release: ReleaseInfo, steps: RenameM
+@@ -1618,75 +1499,6 @@ export async function migrateRenamedInstall(release: ReleaseInfo, steps: RenameM
  	printVerifiedVersion(release.version);
  }
  
@@ -922,7 +1023,7 @@ index 8fbee0c..f2d621a 100644
  /** Injectable steps for {@link updateViaManager}; mirrors {@link RenameMigrationSteps}. */
  export interface ManagerUpdateSteps {
  	/** Manager name used in progress and recovery messages. */
-@@ -1672,29 +1495,6 @@ export interface ManagerUpdateSteps {
+@@ -1703,33 +1515,6 @@ export interface ManagerUpdateSteps {
  	repair(launcherPath: string): Promise<void>;
  }
  
@@ -930,7 +1031,11 @@ index 8fbee0c..f2d621a 100644
 - * Production {@link ManagerUpdateSteps}: a bun/npm global install plus an
 - * in-place takeover with the build service's build of the same version.
 - */
--function packageManagerUpdateSteps(manager: "bun" | "npm", release: ReleaseInfo): ManagerUpdateSteps {
+-function packageManagerUpdateSteps(
+-	manager: "bun" | "npm",
+-	release: ReleaseInfo,
+-	onProgress?: UpdateProgressListener,
+-): ManagerUpdateSteps {
 -	return {
 -		manager,
 -		install: () => (manager === "bun" ? updateViaBun(release) : updateViaNpm(release)),
@@ -942,9 +1047,9 @@ index 8fbee0c..f2d621a 100644
 -			// npm's script shims outrank `.exe` in PowerShell and Git Bash, so
 -			// they must be retired rather than merely shadowed.
 -			if (isWindowsScriptLauncherPath(launcherPath)) {
--				await updateViaShimTakeover(launcherPath, build);
+-				await updateViaShimTakeover(launcherPath, build, { onProgress });
 -			} else {
--				await updateViaBinaryAt(launcherPath, build);
+-				await updateViaBinaryAt(launcherPath, build, { onProgress });
 -			}
 -		},
 -	};
@@ -952,7 +1057,7 @@ index 8fbee0c..f2d621a 100644
  
  /**
   * Run a package-manager self-update, repairing the launcher when the manager
-@@ -1759,44 +1559,6 @@ export async function updateViaManager(
+@@ -1794,44 +1579,6 @@ export async function updateViaManager(
  	);
  }
  
@@ -997,16 +1102,15 @@ index 8fbee0c..f2d621a 100644
  
  // Monotonic within this process so two updates started in the same millisecond
  // (same pid, same `Date.now()`) still get distinct temp/backup paths. Kept
-@@ -2086,243 +1848,59 @@ export async function updateViaShimTakeover(
+@@ -2128,58 +1875,23 @@ export async function updateViaShimTakeover(
   * a user recovering from a binary-only release straight back through bun.
   */
  function installerHint(): string {
 -	return process.platform === "win32"
 -		? "& ([scriptblock]::Create((irm https://omp.sh/install.ps1))) -Binary"
 -		: "curl -fsSL https://omp.sh/install | sh -s -- --binary";
-+	return "run `aam omp-bridge update-omp` or download the compatible omp asset (omp-v2-*) from https://github.com/lapalai/ojak/releases";
- }
- 
+-}
+-
 -/** Persisted channel, or undefined when settings are unavailable (SDK/test embedding without `Settings.init()`). */
 -function readPersistedChannel(): UpdateChannel | undefined {
 -	try {
@@ -1037,9 +1141,44 @@ index 8fbee0c..f2d621a 100644
 -	isChannelSwitch: boolean;
 -	/** Persist `channel` once the update succeeds (`--canary`/`--stable` given). */
 -	persistChannel: boolean;
--}
--
--/**
+-	onProgress?: UpdateProgressListener;
++	return "run `aam omp-bridge update-omp` or download the compatible omp asset (omp-v2-*) from https://github.com/lapalai/ojak/releases";
+ }
+ 
+ /** Options for {@link runUpdateCommand}: the `omp update` flags, plus a progress listener for background runs. */
+ export interface UpdateOptions {
+ 	force: boolean;
+ 	check: boolean;
+-	/** Switch to and persist this channel; unset keeps `update.channel`. */
++	/** Ojak publishes stable compatible releases only; `canary` is refused. */
+ 	channel?: UpdateChannel;
+ 	onProgress?: UpdateProgressListener;
+ }
+ 
+ /** How {@link runUpdateCommand} ended without an error. */
+ export type UpdateOutcome =
+-	/** Nothing newer to install. */
++	/** Nothing newer to install from the Ojak compatible channel (says nothing about upstream; see the printed upstream line). */
+ 	| { kind: "current" }
+-	/** `--check` found `version`; nothing was installed. */
++	/** `--check` found compatible `version`; nothing was installed. */
+ 	| { kind: "available"; version: string }
+ 	/** This install cannot update itself (a managing app, Nix, a channel its installer lacks). */
+ 	| { kind: "unsupported"; reason: string }
+@@ -2193,8 +1905,7 @@ function updateError(what: string, err: unknown): Error {
+ 
+ /**
+  * Lock held while an update installs, so `omp update` and the background
+- * auto-update never run two installers (two `bun install -g`, or a package
+- * manager racing a binary swap) against the same install.
++ * auto-update never run two installers against the same install.
+  */
+ function acquireInstallLock(): FileLockHandle {
+ 	const dir = getUpdateStateDir();
+@@ -2205,221 +1916,73 @@ function acquireInstallLock(): FileLockHandle {
+ }
+ 
+ /**
 - * Print how the offered `version` relates to the running build. Returns false
 - * when there is nothing to install: not newer, and neither `--force` nor a
 - * channel switch asks for it.
@@ -1074,31 +1213,35 @@ index 8fbee0c..f2d621a 100644
 -	target: BinaryUpdateTarget | undefined,
 -	targetError: unknown,
 -	request: UpdateRequest,
--): Promise<void> {
+-): Promise<UpdateOutcome> {
 -	let build: BuildAnswer;
 -	try {
 -		const fromVersion = target ? await installedBuildVersion(target.path) : VERSION;
 -		build = await fetchBuild({ channel: request.channel }, { fromVersion });
 -	} catch (err) {
--		console.error(chalk.red(`Failed to check for updates: ${err}`));
--		process.exit(1);
+-		throw updateError("Failed to check for updates", err);
 -	}
--	if (!announceOffer(build.version, request) || request.check) return;
+-	if (!announceOffer(build.version, request)) return { kind: "current" };
+-	if (request.check) return { kind: "available", version: build.version };
 -
 -	try {
 -		if (!target) throw targetError;
--		await updateViaBinaryAt(target.path, build, { validateExistingTarget: target.validateExistingTarget });
+-		await updateViaBinaryAt(target.path, build, {
+-			validateExistingTarget: target.validateExistingTarget,
+-			onProgress: request.onProgress,
+-		});
 -		if (request.persistChannel) persistChannel(request.channel);
 -	} catch (err) {
--		console.error(chalk.red(`Update failed: ${err}`));
--		process.exit(1);
+-		throw updateError("Update failed", err);
 -	}
+-	return { kind: "installed", version: build.version };
 -}
 -
 -/**
 - * Replace a bun/npm install with the standalone binary because npm says the
 - * release is binary-only ({@link shouldForceBinaryUpdate}).
-- *
++ * Shared command path, with transport and installation seams for deterministic tests.
+  *
 - * The launcher is resolved again without package-manager routing: a manager
 - * symlink is taken over in place, a Windows script launcher gets `omp.exe`
 - * beside it. The binary is the build service's newest on the channel. A build
@@ -1110,19 +1253,8 @@ index 8fbee0c..f2d621a 100644
 -	manager: "bun" | "npm",
 -	release: ReleaseInfo,
 -	channel: UpdateChannel,
-+/** Shared command path, with transport and installation seams for deterministic tests. */
-+export async function runCompatibleUpdate(
-+	opts: { force: boolean; check: boolean; channel?: UpdateChannel },
-+	deps: {
-+		fetchImpl?: Fetch;
-+		platform?: string;
-+		currentVersion?: string;
-+		resolveTarget: () => Promise<{ path: string; validateExistingTarget?: boolean }>;
-+		verifyInstalledVersion?: typeof verifyInstalledVersion;
-+		/** Version of the running Ojak service; undefined when it cannot be read (the update is then refused). */
-+		readServiceVersion?: () => Promise<string | undefined>;
-+	},
- ): Promise<void> {
+-	onProgress?: UpdateProgressListener,
+-): Promise<string> {
 -	const target = await resolveUpdateTarget({ allowPackageManagers: false });
 -	const fromVersion = target.method === "binary" ? await installedBuildVersion(target.path) : VERSION;
 -	const build = await fetchBuild({ channel }, { fromVersion });
@@ -1139,104 +1271,146 @@ index 8fbee0c..f2d621a 100644
 -		if (target.replacesSymlink) {
 -			console.log(chalk.dim("Replacing the package-manager launcher with the standalone binary."));
 -		}
--		await updateViaBinaryAt(target.path, build, { validateExistingTarget: target.validateExistingTarget });
+-		await updateViaBinaryAt(target.path, build, {
+-			validateExistingTarget: target.validateExistingTarget,
+-			onProgress,
+-		});
 -		if (target.replacesSymlink) console.log(chalk.yellow(unmanaged));
-+	const build = await fetchCompatibleRelease({ fetchImpl: deps.fetchImpl, platform: deps.platform, channel: opts.channel });
-+	const current = deps.currentVersion ?? VERSION;
-+	console.log(`Ojak compatible release: ${build.version} (installed: ${current})`);
-+	if (!opts.force && compareVersions(build.version, current) <= 0) return;
-+	// Fail closed before anything is downloaded or resolved: a newer omp must never run against an older Ojak service.
-+	const service = await requireOjakService(build.minimumOjakService, deps.readServiceVersion);
-+	if (opts.check) {
-+		console.log(`Update available; Ojak service ${service} meets the required ${build.minimumOjakService}. Run \`${APP_NAME} update\` to install.`);
- 		return;
- 	}
+-		return build.version;
+-	}
 -	// Without package-manager routing only a Windows script launcher resolves
 -	// to a manager (the bun/npm bin-dir probes are skipped), so its path is known.
 -	if (target.method !== "npm" || !target.path) throw new Error(`Could not resolve ${APP_NAME} launcher path in PATH`);
 -	console.log(chalk.dim("This release ships as a standalone binary; replacing the script launcher."));
--	await updateViaShimTakeover(target.path, build);
+-	await updateViaShimTakeover(target.path, build, { onProgress });
 -	console.log(chalk.yellow(unmanaged));
+-	return build.version;
 -}
 -
 -/**
 - * Update a package-manager install (bun, npm, Homebrew, mise, Nix) to npm's
 - * release for the channel.
-- */
++ * Installed, compatible and upstream are three different facts and are printed as such: only the Ojak compatible
++ * release is ever installed. The upstream latest is advisory (best effort, bounded); when it cannot be read it is
++ * reported as unknown, never as "latest", and it never changes what is installed.
+  */
 -async function runManagedUpdate(
 -	target: ManagedUpdateTarget | undefined,
 -	targetError: unknown,
 -	request: UpdateRequest,
--): Promise<void> {
++export async function runCompatibleUpdate(
++	opts: { force: boolean; check: boolean; channel?: UpdateChannel; onProgress?: UpdateProgressListener },
++	deps: {
++		fetchImpl?: Fetch;
++		platform?: string;
++		currentVersion?: string;
++		resolveTarget: () => Promise<{ path: string; validateExistingTarget?: boolean }>;
++		verifyInstalledVersion?: typeof verifyInstalledVersion;
++		/** Version of the running Ojak service; undefined when it cannot be read (the update is then refused). */
++		readServiceVersion?: () => Promise<string | undefined>;
++		/** Upstream query seam; defaults to the real GitHub latest-release check. Never rejects. */
++		readUpstreamLatest?: () => Promise<string | undefined>;
++	},
+ ): Promise<UpdateOutcome> {
 -	let release: ReleaseInfo;
 -	try {
 -		release = await getLatestRelease({ channel: request.channel });
 -	} catch (err) {
--		console.error(chalk.red(`Failed to check for updates: ${err}`));
--		process.exit(1);
+-		throw updateError("Failed to check for updates", err);
 -	}
--	if (!announceOffer(release.version, request)) return;
+-	if (!announceOffer(release.version, request)) return { kind: "current" };
 -	if (release.packages.pkg !== PACKAGE) {
 -		console.log(chalk.cyan(`The npm package moved to ${release.packages.pkg}; updating migrates this install.`));
 -	}
--	if (request.check) return;
+-	if (request.check) return { kind: "available", version: release.version };
 -
+-	let installed = release.version;
 -	try {
 -		if (!target) throw targetError;
 -		if (
 -			request.channel === "canary" &&
 -			(target.method === "nix" || target.method === "brew" || target.method === "mise")
 -		) {
--			console.log(chalk.yellow("Canary updates are only supported for bun, npm, or binary installs."));
--			return;
+-			const reason = "Canary updates are only supported for bun, npm, or binary installs.";
+-			console.log(chalk.yellow(reason));
+-			return { kind: "unsupported", reason };
 -		}
 -		if (target.method === "nix") {
--			console.log(chalk.yellow("This installation is managed by Nix and cannot update itself."));
+-			const reason = "This installation is managed by Nix and cannot update itself.";
+-			console.log(chalk.yellow(reason));
 -			console.log(chalk.dim("Update the flake input or profile that provides omp, then rebuild."));
--			return;
+-			return { kind: "unsupported", reason };
 -		}
+-		const installing = (): void => request.onProgress?.({ phase: "installing", version: release.version });
 -		if (target.method === "brew") {
+-			installing();
 -			await updateViaHomebrew(release.version, request.force);
 -		} else if (target.method === "mise") {
+-			installing();
 -			await updateViaMise(release.version, request.force);
 -		} else if (shouldForceBinaryUpdate(release)) {
--			await updateToStandaloneBinary(target.method, release, request.channel);
+-			installed = await updateToStandaloneBinary(target.method, release, request.channel, request.onProgress);
 -		} else {
--			await updateViaManager(release, target.path, packageManagerUpdateSteps(target.method, release));
+-			installing();
+-			await updateViaManager(
+-				release,
+-				target.path,
+-				packageManagerUpdateSteps(target.method, release, request.onProgress),
+-			);
 -		}
 -		if (request.persistChannel) persistChannel(request.channel);
 -	} catch (err) {
--		console.error(chalk.red(`Update failed: ${err}`));
--		process.exit(1);
+-		throw updateError("Update failed", err);
 -	}
+-	return { kind: "installed", version: installed };
++	const build = await fetchCompatibleRelease({ fetchImpl: deps.fetchImpl, platform: deps.platform, channel: opts.channel });
++	const current = deps.currentVersion ?? VERSION;
++	console.log(`Ojak compatible release: ${build.version} (installed: ${current})`);
++	// Advisory and read only after the compatible release validated: a failing or slow upstream (bounded at 10s) can neither
++	// fail nor alter the compatible install, and its failure is reported as "unknown", never as "latest".
++	const upstream = await (deps.readUpstreamLatest ?? (() => fetchUpstreamLatest(deps.fetchImpl)))().catch(() => undefined);
++	console.log(chalk.dim(describeUpstream(classifyUpstream(upstream, build.version))));
++	if (!opts.force && compareVersions(build.version, current) <= 0) {
++		console.log(`No newer Ojak-compatible release is available for installed omp ${current}; this is not a statement about upstream.`);
++		return { kind: "current" };
++	}
++	// Fail closed before anything is downloaded or resolved: a newer omp must never run against an older Ojak service.
++	const service = await requireOjakService(build.minimumOjakService, deps.readServiceVersion);
++	if (opts.check) {
++		console.log(`Update available; Ojak service ${service} meets the required ${build.minimumOjakService}. Run \`${APP_NAME} update\` to install.`);
++		return { kind: "available", version: build.version };
++	}
 +	const target = await deps.resolveTarget();
 +	await updateViaBinaryAt(target.path, build, {
 +		fetchImpl: compatibleAssetFetch(deps.fetchImpl),
 +		validateExistingTarget: target.validateExistingTarget,
 +		verifyInstalledVersion: deps.verifyInstalledVersion,
++		onProgress: opts.onProgress,
 +	});
++	return { kind: "installed", version: build.version };
  }
  
--/**
+ /**
 - * Run the update command.
 - *
 - * The installer that owns the PATH `omp` decides where the version comes
 - * from: a standalone binary asks the build service, a package-manager install
 - * asks npm. When no target resolves, the running build's kind decides, so
 - * `--check` still answers; installing then fails on the unresolved target.
-- */
- export async function runUpdateCommand(opts: {
- 	force: boolean;
- 	check: boolean;
- 	channel?: UpdateChannel;
- }): Promise<void> {
+- *
+- * Progress and results print to stdout. Throws when the check or the install
+- * fails, or when another update holds the install lock.
++ * Run the update command. Only the Ojak compatible channel is consulted for installation; the upstream
++ * latest is reported for transparency. Throws (fail closed, existing executable preserved) on any failure or
++ * when another update holds the install lock.
+  */
+ export async function runUpdateCommand(opts: UpdateOptions): Promise<UpdateOutcome> {
 -	const ompPath = resolveOmpPath();
 -	const manager = ompPath ? await managedInstallName(ompPath) : undefined;
 -	if (manager) {
--		console.log(
--			chalk.yellow(`${ompPath} is installed and kept up to date by ${manager}; update it from ${manager}.`),
--		);
--		return;
+-		const reason = `${ompPath} is installed and kept up to date by ${manager}; update it from ${manager}.`;
+-		console.log(chalk.yellow(reason));
+-		return { kind: "unsupported", reason };
 -	}
 -	// `update.channel` picks the channel; --canary/--stable switch and persist it.
 -	await Settings.init({ cwd: getProjectDir() });
@@ -1250,22 +1424,22 @@ index 8fbee0c..f2d621a 100644
 -		channel,
 -		isChannelSwitch: opts.channel !== undefined && opts.channel !== persistedChannel,
 -		persistChannel: opts.channel !== undefined,
+-		onProgress: opts.onProgress,
 -	};
 -
--	let target: UpdateTarget | undefined;
--	let targetError: unknown;
+ 	const lock = opts.check ? undefined : acquireInstallLock();
  	try {
--		target = await resolveUpdateTarget({ allowPackageManagers: true });
--	} catch (err) {
--		targetError = err;
--	}
--	if (target?.method === "binary") {
--		await runBinaryUpdate(target, targetError, request);
--	} else if (!target && isCompiledBinary()) {
--		await runBinaryUpdate(undefined, targetError, request);
--	} else {
--		await runManagedUpdate(target, targetError, request);
-+		await runCompatibleUpdate(opts, {
+-		let target: UpdateTarget | undefined;
+-		let targetError: unknown;
+-		try {
+-			target = await resolveUpdateTarget({ allowPackageManagers: true });
+-		} catch (err) {
+-			targetError = err;
+-		}
+-		if (target?.method === "binary") return await runBinaryUpdate(target, targetError, request);
+-		if (!target && isCompiledBinary()) return await runBinaryUpdate(undefined, targetError, request);
+-		return await runManagedUpdate(target, targetError, request);
++		return await runCompatibleUpdate(opts, {
 +			resolveTarget: async () => {
 +				const ompPath = resolveOmpPath();
 +				const owner = ompPath ? await managedInstallName(ompPath) : undefined;
@@ -1276,12 +1450,11 @@ index 8fbee0c..f2d621a 100644
 +			},
 +		});
 +	} catch (error) {
-+		console.error(`Ojak compatible update not installed: ${error instanceof Error ? error.message : String(error)}. Existing executable preserved; upstream fallback is disabled.`);
-+		process.exitCode = 1;
++		throw updateError("Ojak compatible update not installed", `${error instanceof Error ? error.message : String(error)}. Existing executable preserved; upstream fallback is disabled.`);
+ 	} finally {
+ 		lock?.release();
  	}
- }
- 
-@@ -2339,14 +1917,14 @@ ${chalk.bold("Options:")}
+@@ -2438,14 +2001,14 @@ ${chalk.bold("Options:")}
    -c, --check     Check for updates without installing
    -f, --force     Force reinstall even if up to date
    -l, --plugins   Update installed plugins
@@ -1300,10 +1473,10 @@ index 8fbee0c..f2d621a 100644
  `);
  }
 diff --git a/packages/coding-agent/src/commands/update.ts b/packages/coding-agent/src/commands/update.ts
-index fb9dcaf..f1ddd77 100644
+index 40559e2526..4e13016bc9 100644
 --- a/packages/coding-agent/src/commands/update.ts
 +++ b/packages/coding-agent/src/commands/update.ts
-@@ -15,11 +15,11 @@ export default class Update extends Command {
+@@ -16,11 +16,11 @@ export default class Update extends Command {
  		force: Flags.boolean({ char: "f", description: "Force update", default: false }),
  		check: Flags.boolean({ char: "c", description: "Check for updates without installing", default: false }),
  		plugins: Flags.boolean({ char: "l", description: "Update installed plugins", default: false }),
@@ -1319,7 +1492,7 @@ index fb9dcaf..f1ddd77 100644
  	async run(): Promise<void> {
  		const { flags } = await this.parse(Update);
 diff --git a/packages/coding-agent/src/config/model-resolver.ts b/packages/coding-agent/src/config/model-resolver.ts
-index 17e42e9..208a0d2 100644
+index 17e42e9d89..208a0d245c 100644
 --- a/packages/coding-agent/src/config/model-resolver.ts
 +++ b/packages/coding-agent/src/config/model-resolver.ts
 @@ -1809,6 +1809,14 @@ export function sessionModelDiscoveryProviders(
@@ -1353,19 +1526,19 @@ index 17e42e9..208a0d2 100644
  	let lookupRegistry: ModelLookupRegistry = modelRegistry;
  	if (disabledProviders.size > 0) {
 diff --git a/packages/coding-agent/src/extensibility/extensions/runner.ts b/packages/coding-agent/src/extensibility/extensions/runner.ts
-index 8aa7944..00cc1b6 100644
+index 67c21bb687..a3884229f3 100644
 --- a/packages/coding-agent/src/extensibility/extensions/runner.ts
 +++ b/packages/coding-agent/src/extensibility/extensions/runner.ts
-@@ -26,7 +26,7 @@ import {
- 	setContextHistoryIndex,
- } from "@oh-my-pi/pi-ai/utils/block-symbols";
- import type { KeyId } from "@oh-my-pi/pi-tui";
+@@ -28,7 +28,7 @@ import {
+ import { addKeyAliases, canonicalKeyId, type KeyId, type Keybinding } from "@oh-my-pi/pi-tui";
+ import { KEYBINDINGS, KeybindingsManager } from "@oh-my-pi/pi-tui/app-keybindings";
+ import { appApproveKeys, appFollowUpKeys } from "@oh-my-pi/pi-tui/keybinding-matchers";
 -import { logger } from "@oh-my-pi/pi-utils";
 +import { logger, untilAborted } from "@oh-my-pi/pi-utils";
  import { refreshShellConfigCache } from "@oh-my-pi/pi-utils/procmgr";
  import { MAIN_AGENT_RULE_NAME } from "../../capability/rule";
  import type { ModelRegistry } from "../../config/model-registry";
-@@ -55,6 +55,7 @@ import type {
+@@ -61,6 +61,7 @@ import type {
  	BeforeAgentStartEventResult,
  	BeforeProviderRequestEvent,
  	BeforeProviderRequestEventResult,
@@ -1373,7 +1546,7 @@ index 8aa7944..00cc1b6 100644
  	BeforeSubagentSpawnEvent,
  	BeforeSubagentSpawnEventResult,
  	CompactOptions,
-@@ -524,7 +525,10 @@ export class ExtensionRunner {
+@@ -609,7 +610,10 @@ export class ExtensionRunner {
  	#trackUserWait?: UserWaitTracker;
  	#errorListeners: Set<ExtensionErrorListener> = new Set();
  	#getModel: () => Model | undefined = () => undefined;
@@ -1384,7 +1557,7 @@ index 8aa7944..00cc1b6 100644
  	#waitForIdleFn: () => Promise<void> = async () => {};
  	#abortFn: () => void = () => {};
  	#hasPendingMessagesFn: () => boolean = () => false;
-@@ -849,7 +853,10 @@ export class ExtensionRunner {
+@@ -940,7 +944,10 @@ export class ExtensionRunner {
  
  		// Context actions (required)
  		this.#getModel = contextActions.getModel;
@@ -1395,7 +1568,7 @@ index 8aa7944..00cc1b6 100644
  		this.#abortFn = contextActions.abort;
  		this.#hasPendingMessagesFn = contextActions.hasPendingMessages;
  		this.#shutdownHandler = contextActions.shutdown;
-@@ -1592,8 +1599,13 @@ export class ExtensionRunner {
+@@ -1787,8 +1794,13 @@ export class ExtensionRunner {
  		agent: ExtensionAgentIdentity = this.agent,
  	): ExtensionContext {
  		const getModel = model ? () => model : this.#getModel;
@@ -1406,10 +1579,10 @@ index 8aa7944..00cc1b6 100644
 +		const assertOwner = () => {
 +			if (sessionId !== this.sessionManager.getSessionId()) throw new Error("Extension context belongs to another session");
 +		};
- 		const sendUserMessage = (text: string, options?: SendUserMessageOptions): void =>
- 			this.runtime.sendUserMessage(text, options);
- 		const getSessionModes = () => this.#sessionModes;
-@@ -1606,6 +1618,10 @@ export class ExtensionRunner {
+ 		const sendUserMessage = (text: string, options?: SendUserMessageOptions): void => {
+ 			void this.runtime.sendUserMessage(text, options);
+ 		};
+@@ -1802,6 +1814,10 @@ export class ExtensionRunner {
  			hasUI: this.hasUI(),
  			cwd: this.cwd,
  			sessionManager: this.sessionManager,
@@ -1420,7 +1593,7 @@ index 8aa7944..00cc1b6 100644
  			modelRegistry: this.modelRegistry,
  			isProjectTrusted: () => true,
  			agent,
-@@ -1614,6 +1630,17 @@ export class ExtensionRunner {
+@@ -1810,6 +1826,17 @@ export class ExtensionRunner {
  			},
  			models: createExtensionModelQuery(this.modelRegistry, this.settings, getModel),
  			isIdle: () => this.#isIdleFn(),
@@ -1438,7 +1611,7 @@ index 8aa7944..00cc1b6 100644
  			abort: () => this.#abortFn(),
  			hasPendingMessages: () => this.#hasPendingMessagesFn(),
  			shutdown: () => this.#shutdownHandler(),
-@@ -1707,8 +1734,12 @@ export class ExtensionRunner {
+@@ -1903,8 +1930,12 @@ export class ExtensionRunner {
  	}
  
  	createCommandContext(): ExtensionCommandContext {
@@ -1452,7 +1625,7 @@ index 8aa7944..00cc1b6 100644
  			getContextUsage: () => this.#getContextUsageFn(),
  			waitForIdle: () => this.#waitForIdleFn(),
  			newSession: options => this.#newSessionHandler(options),
-@@ -2419,6 +2450,27 @@ export class ExtensionRunner {
+@@ -2665,6 +2696,27 @@ export class ExtensionRunner {
  		return undefined;
  	}
  
@@ -1481,10 +1654,10 @@ index 8aa7944..00cc1b6 100644
  	 * Runs `before_subagent_spawn` handlers; a `block` short-circuits, the last defined `model` wins.
  	 * `signal` (the spawn's abort signal) cancels an awaiting handler instead of parking until the timeout.
 diff --git a/packages/coding-agent/src/extensibility/extensions/types.ts b/packages/coding-agent/src/extensibility/extensions/types.ts
-index a5515b9..3ad1cdc 100644
+index 2eb58d9813..25b5cc4c84 100644
 --- a/packages/coding-agent/src/extensibility/extensions/types.ts
 +++ b/packages/coding-agent/src/extensibility/extensions/types.ts
-@@ -760,6 +760,8 @@ export interface ExtensionContext {
+@@ -805,6 +805,8 @@ export interface ExtensionContext {
  	cwd: string;
  	/** Session manager (read-only) */
  	sessionManager: ReadonlySessionManager;
@@ -1493,7 +1666,7 @@ index a5515b9..3ad1cdc 100644
  	/** Model registry for API key resolution */
  	modelRegistry: ModelRegistry;
  	/** Calling session's `local://` root mapping for external tool bridges. */
-@@ -770,6 +772,15 @@ export interface ExtensionContext {
+@@ -815,6 +817,15 @@ export interface ExtensionContext {
  	models: ExtensionModelQuery;
  	/** Whether the agent is idle (not streaming) */
  	isIdle(): boolean;
@@ -1509,7 +1682,7 @@ index a5515b9..3ad1cdc 100644
  	/** Abort the current agent operation */
  	abort(): void;
  	/** Whether there are queued messages waiting */
-@@ -1185,6 +1196,17 @@ export interface BeforeSubagentSpawnEvent {
+@@ -1231,6 +1242,17 @@ export interface BeforeSubagentSpawnEvent {
  	spawnKey?: string;
  }
  
@@ -1527,7 +1700,7 @@ index a5515b9..3ad1cdc 100644
  export type {
  	AgentEndEvent,
  	AgentStartEvent,
-@@ -1644,6 +1666,7 @@ export type ExtensionEvent =
+@@ -1690,6 +1712,7 @@ export type ExtensionEvent =
  	| AfterProviderResponseEvent
  	| BeforeAgentStartEvent
  	| BeforeSubagentSpawnEvent
@@ -1535,7 +1708,7 @@ index a5515b9..3ad1cdc 100644
  	| AgentStartEvent
  	| AgentEndEvent
  	| SessionStopEvent
-@@ -1852,6 +1875,7 @@ export interface ExtensionAPI {
+@@ -1917,6 +1940,7 @@ export interface ExtensionAPI {
  		event: "before_subagent_spawn",
  		handler: ExtensionHandler<BeforeSubagentSpawnEvent, BeforeSubagentSpawnEventResult>,
  	): void;
@@ -1543,7 +1716,7 @@ index a5515b9..3ad1cdc 100644
  	on(event: "agent_start", handler: ExtensionHandler<AgentStartEvent>): void;
  	on(event: "agent_end", handler: ExtensionHandler<AgentEndEvent>): void;
  	on(event: "session_stop", handler: ExtensionHandler<SessionStopEvent, SessionStopEventResult>): void;
-@@ -2354,7 +2378,10 @@ export interface ExtensionActions {
+@@ -2453,7 +2477,10 @@ export interface ExtensionActions {
  /** Actions for ExtensionContext (ctx.* in event handlers). */
  export interface ExtensionContextActions {
  	getModel: () => Model | undefined;
@@ -1555,7 +1728,7 @@ index a5515b9..3ad1cdc 100644
  	hasPendingMessages: () => boolean;
  	shutdown: () => void;
 diff --git a/packages/coding-agent/src/main.ts b/packages/coding-agent/src/main.ts
-index 89668b0..996af2b 100644
+index a3adea1626..93b0c8b078 100644
 --- a/packages/coding-agent/src/main.ts
 +++ b/packages/coding-agent/src/main.ts
 @@ -20,7 +20,7 @@ import {
@@ -1567,27 +1740,28 @@ index 89668b0..996af2b 100644
  import * as logger from "@oh-my-pi/pi-utils/logger";
  import * as postmortem from "@oh-my-pi/pi-utils/postmortem";
  import { fuzzyFilter } from "@oh-my-pi/pi-tui/fuzzy";
-@@ -41,9 +41,9 @@ import { processFileArguments } from "./cli/file-processor";
+@@ -41,10 +41,10 @@ import { processFileArguments } from "./cli/file-processor";
  import { buildInitialMessage } from "./cli/initial-message";
  import { formatKeyHint, KeybindingsManager } from "@oh-my-pi/pi-tui/app-keybindings";
  import type { SessionPickerOptions } from "@oh-my-pi/pi-tui/apps/session-picker";
 -import { fetchBuild } from "./cli/build-service";
 +import { fetchCompatibleRelease, readOjakServiceVersion, serviceMeets } from "./cli/ojak-update";
  import { applyStartupCwd } from "./cli/startup-cwd";
+ import { runAutoUpdate } from "./cli/auto-update";
 -import { getLatestRelease, isSourceCheckout, managedInstallName } from "./cli/update-cli";
 +import { isSourceCheckout, managedInstallName } from "./cli/update-cli";
  import { findConfigFile } from "./config";
  import { ModelRegistry } from "./config/model-registry";
  import { formatModelSelectorValue } from "@oh-my-pi/pi-tui/overlays/model-selector";
-@@ -183,7 +183,6 @@ import {
- 	cfgTuiImeSafeCursor,
- 	cfgTuiMaxInlineImages,
- 	cfgTuiResizeScrollback,
+@@ -185,7 +185,6 @@ import {
+ 	cfgTuiMaxFps,
+ 	cfgTuiMotion,
+ 	cfgUpdateAuto,
 -	cfgUpdateChannel,
  } from "./modes/settings";
  import {
  	cfgDefaultThinkingLevel,
-@@ -279,13 +278,10 @@ async function checkForNewVersion(currentVersion: string): Promise<string | unde
+@@ -281,13 +280,10 @@ async function checkForNewVersion(currentVersion: string): Promise<string | unde
  		// Checkouts update through git and a manager (Tern) updates its omp itself:
  		// "run omp update" would be wrong advice for both.
  		if (isSourceCheckout() || (await managedInstallName(process.execPath))) return;
@@ -1606,10 +1780,10 @@ index 89668b0..996af2b 100644
  		return undefined;
  	}
 diff --git a/packages/coding-agent/src/modes/acp/acp-agent.ts b/packages/coding-agent/src/modes/acp/acp-agent.ts
-index 4537538..fa0f23a 100644
+index 25d9a28646..4f9a0e1a79 100644
 --- a/packages/coding-agent/src/modes/acp/acp-agent.ts
 +++ b/packages/coding-agent/src/modes/acp/acp-agent.ts
-@@ -3100,7 +3100,10 @@ export class AcpAgent implements Agent {
+@@ -3305,7 +3305,10 @@ export class AcpAgent implements Agent {
  			},
  			{
  				getModel: () => record.session.model,
@@ -1621,10 +1795,10 @@ index 4537538..fa0f23a 100644
  					void record.session.abort({ reason: USER_INTERRUPT_LABEL });
  				},
 diff --git a/packages/coding-agent/src/modes/controllers/extension-ui-controller.ts b/packages/coding-agent/src/modes/controllers/extension-ui-controller.ts
-index 76c5b60..f347110 100644
+index 49060cc608..4986903348 100644
 --- a/packages/coding-agent/src/modes/controllers/extension-ui-controller.ts
 +++ b/packages/coding-agent/src/modes/controllers/extension-ui-controller.ts
-@@ -276,7 +276,10 @@ export class ExtensionUiController {
+@@ -289,7 +289,10 @@ export class ExtensionUiController {
  		};
  		const contextActions: ExtensionContextActions = {
  			getModel: () => this.ctx.session.model,
@@ -1635,7 +1809,7 @@ index 76c5b60..f347110 100644
  			abort: () => this.ctx.session.abort({ reason: USER_INTERRUPT_LABEL }),
  			hasPendingMessages: () => this.ctx.session.queuedMessageCount > 0,
  			shutdown: () => this.ctx.requestShutdown(),
-@@ -509,7 +512,10 @@ export class ExtensionUiController {
+@@ -514,7 +517,10 @@ export class ExtensionUiController {
  		};
  		const contextActions: ExtensionContextActions = {
  			getModel: () => this.ctx.session.model,
@@ -1647,10 +1821,10 @@ index 76c5b60..f347110 100644
  			hasPendingMessages: () => this.ctx.session.queuedMessageCount > 0,
  			shutdown: () => this.ctx.requestShutdown(),
 diff --git a/packages/coding-agent/src/modes/runtime-init.ts b/packages/coding-agent/src/modes/runtime-init.ts
-index edf5830..7a301ac 100644
+index a798abf594..48d22ea74f 100644
 --- a/packages/coding-agent/src/modes/runtime-init.ts
 +++ b/packages/coding-agent/src/modes/runtime-init.ts
-@@ -140,7 +140,10 @@ export async function initializeExtensions(session: AgentSession, options: Initi
+@@ -142,7 +142,10 @@ export async function initializeExtensions(session: AgentSession, options: Initi
  		// ExtensionContextActions
  		{
  			getModel: () => session.model,
@@ -1662,10 +1836,10 @@ index edf5830..7a301ac 100644
  			hasPendingMessages: () => session.queuedMessageCount > 0,
  			shutdown,
 diff --git a/packages/coding-agent/src/sdk.ts b/packages/coding-agent/src/sdk.ts
-index 0f4cea6..6b7e22c 100644
+index 999216c82b..66a3fc0b08 100644
 --- a/packages/coding-agent/src/sdk.ts
 +++ b/packages/coding-agent/src/sdk.ts
-@@ -109,6 +109,7 @@ import { createAnnotationsAPI } from "./extensibility/custom-commands/bundled/an
+@@ -111,6 +111,7 @@ import { createAnnotationsAPI } from "./extensibility/custom-commands/bundled/an
  import { discoverCustomToolPaths, loadCustomTools, type ToolPathWithSource } from "./extensibility/custom-tools";
  import type { CustomTool, CustomToolContext, CustomToolSessionEvent } from "./extensibility/custom-tools/types";
  import {
@@ -1673,7 +1847,7 @@ index 0f4cea6..6b7e22c 100644
  	bindPreparedExtensions,
  	discoverAndLoadExtensions,
  	discoverExtensionPaths,
-@@ -2666,6 +2667,12 @@ async function createAgentSessionScoped(options: CreateAgentSessionOptions): Pro
+@@ -2695,6 +2696,12 @@ async function createAgentSessionScoped(options: CreateAgentSessionOptions): Pro
  			getClientBridge: () => session?.clientBridge,
  			emitBeforeSubagentSpawn: (event, signal) =>
  				session?.extensionRunner?.emitBeforeSubagentSpawn(event, signal) ?? Promise.resolve(undefined),
@@ -1686,7 +1860,7 @@ index 0f4cea6..6b7e22c 100644
  			queueDeferredDiagnostics: entry => session?.yieldQueue.enqueue(LSP_LATE_DIAGNOSTIC_MESSAGE_TYPE, entry),
  			queueLaunchCompletion: notification =>
  				session?.queueLaunchCompletion(notification) ??
-@@ -4761,7 +4768,8 @@ async function createAgentSessionScoped(options: CreateAgentSessionOptions): Pro
+@@ -4818,7 +4825,8 @@ async function createAgentSessionScoped(options: CreateAgentSessionOptions): Pro
  			options.cacheWarming === false
  				? undefined
  				: new CacheWarmer({
@@ -1696,7 +1870,7 @@ index 0f4cea6..6b7e22c 100644
  						getPromptTokens: () => session.lastPromptTokens(),
  						getMode: () => cfgProvidersCacheWarming.get(settings),
  						decide: event => extensionRunner.emitCacheWarmingDecision(event),
-@@ -5697,7 +5705,8 @@ async function createAgentSessionScoped(options: CreateAgentSessionOptions): Pro
+@@ -5789,7 +5797,8 @@ async function createAgentSessionScoped(options: CreateAgentSessionOptions): Pro
  					hideThinkingSummary: agent.hideThinkingSummary,
  					maxRetryDelayMs: agent.maxRetryDelayMs,
  					getToolContext: toolCall => toolContextStore.getContext(toolCall),
@@ -1708,10 +1882,10 @@ index 0f4cea6..6b7e22c 100644
  					// copies), and the primary's resolver could reach main-session MCP tools.
 diff --git a/packages/coding-agent/src/session/admission-recovery.ts b/packages/coding-agent/src/session/admission-recovery.ts
 new file mode 100644
-index 0000000..98fa494
+index 0000000000..90f63f8117
 --- /dev/null
 +++ b/packages/coding-agent/src/session/admission-recovery.ts
-@@ -0,0 +1,32 @@
+@@ -0,0 +1,41 @@
 +import type { AssistantMessage } from "@oh-my-pi/pi-ai";
 +
 +/** Terminal bridge outcomes have distinct meanings, but all veto automatic provider submission. */
@@ -1721,31 +1895,40 @@ index 0000000..98fa494
 +	const classification = message.errorClassificationMessage ?? "";
 +	const detail = message.errorMessage ?? "";
 +	if (
-+		message.errorType === "execution_unknown" || message.errorCode === "BRIDGE_EXECUTION_UNKNOWN" ||
++		message.errorType === "execution_unknown" ||
++		message.errorCode === "BRIDGE_EXECUTION_UNKNOWN" ||
 +		/\b(?:execution_unknown|BRIDGE_EXECUTION_UNKNOWN)\b/.test(classification) ||
 +		/\b(?:execution_unknown|BRIDGE_EXECUTION_UNKNOWN)\b/.test(detail)
-+	) return "execution_unknown";
++	)
++		return "execution_unknown";
 +	if (
 +		message.errorCode === "BRIDGE_ADMISSION_STOPPED" ||
-+		/\bBRIDGE_ADMISSION_STOPPED\b/.test(classification) || /\bBRIDGE_ADMISSION_STOPPED\b/.test(detail)
-+	) return "admission_stopped";
++		/\bBRIDGE_ADMISSION_STOPPED\b/.test(classification) ||
++		/\bBRIDGE_ADMISSION_STOPPED\b/.test(detail)
++	)
++		return "admission_stopped";
 +	if (
 +		message.errorCode === "BRIDGE_ADMISSION_PAUSED" ||
-+		/\bBRIDGE_ADMISSION_PAUSED\b/.test(classification) || /\bBRIDGE_ADMISSION_PAUSED\b/.test(detail)
-+	) return "admission_paused";
++		/\bBRIDGE_ADMISSION_PAUSED\b/.test(classification) ||
++		/\bBRIDGE_ADMISSION_PAUSED\b/.test(detail)
++	)
++		return "admission_paused";
 +	return undefined;
 +}
 +
 +/** Explicit continuation is safe only for an output-free, positively identified pre-send pause. */
 +export function isResumableAdmissionPause(message: AssistantMessage): boolean {
-+	return message.stopReason === "error" && message.errorAfterOutput !== true &&
++	return (
++		message.stopReason === "error" &&
++		message.errorAfterOutput !== true &&
 +		message.content.every(block => block.type === "text" && block.text === "") &&
 +		automaticRecoveryVeto(message) === "admission_paused" &&
 +		(message.errorCode === "BRIDGE_ADMISSION_PAUSED" ||
-+			message.errorMessage?.startsWith("[BRIDGE_ADMISSION_PAUSED]") === true);
++			message.errorMessage?.startsWith("[BRIDGE_ADMISSION_PAUSED]") === true)
++	);
 +}
 diff --git a/packages/coding-agent/src/session/agent-session.ts b/packages/coding-agent/src/session/agent-session.ts
-index 47ba57b..ffdfb19 100644
+index 16853e2324..d2d112555c 100644
 --- a/packages/coding-agent/src/session/agent-session.ts
 +++ b/packages/coding-agent/src/session/agent-session.ts
 @@ -38,6 +38,7 @@ import {
@@ -1756,7 +1939,7 @@ index 47ba57b..ffdfb19 100644
  	type QueuedMessagePreparation,
  	type QueuedMessageQueue,
  	resolveTelemetry,
-@@ -484,6 +485,7 @@ import type { ShakeMode, ShakeResult } from "./shake-types";
+@@ -511,6 +512,7 @@ import type { ShakeMode, ShakeResult } from "./shake-types";
  import { ToolChoiceQueue } from "./tool-choice-queue";
  import { planTurnPersistence, sameMessageContent, sessionMessagePersistenceKey } from "./turn-persistence";
  import { TurnRecovery, type TurnRecoveryHost } from "./turn-recovery";
@@ -1764,7 +1947,7 @@ index 47ba57b..ffdfb19 100644
  import { YieldQueue } from "./yield-queue";
  
  export * from "./agent-session-events";
-@@ -2260,10 +2262,17 @@ export class AgentSession implements SettingsScope {
+@@ -2468,10 +2470,17 @@ export class AgentSession implements SettingsScope, AgentViewSession {
  		// toggle scopes priority to Fireworks alone, without mutating the shared
  		// session `serviceTier` that drives `/fast` and OpenAI/Anthropic priority.
  		this.agent.serviceTierResolver = model => this.#models.effectiveServiceTier(model);
@@ -1783,7 +1966,7 @@ index 47ba57b..ffdfb19 100644
  		this.#onPayload = config.onPayload;
  		this.rawSseDebugBuffer = config.rawSseDebugBuffer ?? new RawSseDebugBuffer();
  		// Avoid wrapping in an `async` closure when no user callback is configured: the
-@@ -4927,6 +4936,18 @@ export class AgentSession implements SettingsScope {
+@@ -5079,6 +5088,18 @@ export class AgentSession implements SettingsScope, AgentViewSession {
  			// outside the session transcript (issue #6177).
  			logProviderTurnError(msg);
  
@@ -1802,7 +1985,7 @@ index 47ba57b..ffdfb19 100644
  			// Invalidate GitHub Copilot credentials on a hard auth failure (401, or an
  			// expired/revoked token) so stale tokens aren't reused on the next request.
  			// Account usage caps and concurrency caps leave the credential valid: the
-@@ -9133,12 +9154,16 @@ export class AgentSession implements SettingsScope {
+@@ -9792,12 +9813,16 @@ export class AgentSession implements SettingsScope, AgentViewSession {
  			return this.#extensionRunner.createCommandContext();
  		}
  
@@ -1819,7 +2002,7 @@ index 47ba57b..ffdfb19 100644
  			modelRegistry: this.#modelRegistry,
  			isProjectTrusted: () => true,
  			// Used only when the session has no extension runner. `createAgentSession` always builds
-@@ -9148,6 +9173,8 @@ export class AgentSession implements SettingsScope {
+@@ -9807,6 +9832,8 @@ export class AgentSession implements SettingsScope, AgentViewSession {
  			model: this.model ?? undefined,
  			models: createExtensionModelQuery(this.#modelRegistry, this.settings, () => this.model ?? undefined),
  			isIdle: () => !this.isStreaming,
@@ -1828,7 +2011,7 @@ index 47ba57b..ffdfb19 100644
  			abort: () => {
  				void this.abort();
  			},
-@@ -11517,6 +11544,110 @@ export class AgentSession implements SettingsScope {
+@@ -12404,6 +12431,110 @@ export class AgentSession implements SettingsScope, AgentViewSession {
  		await this.sessionManager.flush();
  	}
  
@@ -1940,22 +2123,22 @@ index 47ba57b..ffdfb19 100644
  	 * Fork the current session, creating a new session file with the exact same state.
  	 * Copies all entries and artifacts to the new session.
 diff --git a/packages/coding-agent/src/session/session-advisors.ts b/packages/coding-agent/src/session/session-advisors.ts
-index f2645c3..92d0b51 100644
+index 059ef1ebee..dee11034bf 100644
 --- a/packages/coding-agent/src/session/session-advisors.ts
 +++ b/packages/coding-agent/src/session/session-advisors.ts
-@@ -1438,6 +1438,7 @@ export class SessionAdvisors {
- 				// Read per request so a mid-session `providers.openaiWebsockets` change reaches advisors.
+@@ -1453,6 +1453,7 @@ export class SessionAdvisors {
+ 				// Read per request so transport setting changes reach existing advisors.
  				const options = {
  					...streamOptions,
 +					requestKind: "ephemeral" as const,
- 					preferWebsockets: streamOptions?.preferWebsockets ?? this.#host.preferWebsockets(),
+ 					preferWebsockets: streamOptions?.preferWebsockets ?? this.#host.preferWebsockets(requestModel),
  				};
  				if (requestModel.api === "openai-codex-responses") {
 diff --git a/packages/coding-agent/src/session/session-manager.ts b/packages/coding-agent/src/session/session-manager.ts
-index e1ad72d..b86ef72 100644
+index 97c726b71c..0bccc74858 100644
 --- a/packages/coding-agent/src/session/session-manager.ts
 +++ b/packages/coding-agent/src/session/session-manager.ts
-@@ -2746,7 +2746,13 @@ export class SessionManager {
+@@ -2785,7 +2785,13 @@ export class SessionManager {
  	 * Force the session onto disk even with no assistant message yet (ACP
  	 * session/new must create a discoverable file immediately).
  	 */
@@ -1970,7 +2153,7 @@ index e1ad72d..b86ef72 100644
  		if (!this.#persist || !this.#sessionFile) return;
  		this.#forceFileCreation = true;
  		if (this.#fileIsCurrent && !this.#rewriteRequired) return;
-@@ -2879,6 +2885,20 @@ export class SessionManager {
+@@ -2918,6 +2924,20 @@ export class SessionManager {
  		if (this.#diskFailure) throw this.#diskFailure;
  	}
  
@@ -1992,7 +2175,7 @@ index e1ad72d..b86ef72 100644
  	 * Synchronously makes the current append-only session durable. Avoid rewriting
  	 * an already-current file: large restored sessions can contain GiB of compacted
 diff --git a/packages/coding-agent/src/session/session-storage.ts b/packages/coding-agent/src/session/session-storage.ts
-index cadcd3a..f8ea491 100644
+index 27f1d04449..117182c07b 100644
 --- a/packages/coding-agent/src/session/session-storage.ts
 +++ b/packages/coding-agent/src/session/session-storage.ts
 @@ -89,6 +89,8 @@ export interface SessionStorageWriter {
@@ -2004,7 +2187,7 @@ index cadcd3a..f8ea491 100644
  	/** Drain synchronously flushable queued work when the backend supports it. No fsync. */
  	flushSync?(): void;
  	/** False once close() has begun/finished. */
-@@ -461,6 +463,31 @@ class FileSessionStorageWriter implements SessionStorageWriter {
+@@ -460,6 +462,31 @@ class FileSessionStorageWriter implements SessionStorageWriter {
  		if (this.#error) throw this.#error;
  	}
  
@@ -2037,18 +2220,18 @@ index cadcd3a..f8ea491 100644
  		if (this.#error) throw this.#error;
  	}
 diff --git a/packages/coding-agent/src/session/turn-recovery.ts b/packages/coding-agent/src/session/turn-recovery.ts
-index 86d9c32..5a1a310 100644
+index 1748e9513d..2e0ae59217 100644
 --- a/packages/coding-agent/src/session/turn-recovery.ts
 +++ b/packages/coding-agent/src/session/turn-recovery.ts
 @@ -45,6 +45,7 @@ import {
  	resolveThinkingLevelForModel,
  } from "@oh-my-pi/pi-tui/thinking";
- import type { EditMode } from "@oh-my-pi/pi-tui/tools/edit";
+ import type { EditModeSetting } from "../edit/settings";
 +import { automaticRecoveryVeto } from "./admission-recovery";
  import type { AgentSessionEvent } from "./agent-session-events";
  import type { ResetRecoveryResult } from "./codex-auto-reset";
  import type {
-@@ -644,13 +645,20 @@ export class TurnRecovery {
+@@ -650,13 +651,20 @@ export class TurnRecovery {
  		return this.#persistTerminalEmptyErrorTurn(message);
  	}
  
@@ -2069,7 +2252,7 @@ index 86d9c32..5a1a310 100644
  		return this.#handleUnexpectedAssistantStop(message);
  	}
  
-@@ -666,6 +674,7 @@ export class TurnRecovery {
+@@ -672,6 +680,7 @@ export class TurnRecovery {
  	 * prompt; past the cap the error surfaces as before.
  	 */
  	handleMalformedFunctionCallStop(message: AssistantMessage): boolean {
@@ -2077,7 +2260,7 @@ index 86d9c32..5a1a310 100644
  		if (message.stopReason !== "error") return false;
  		const id = this.#classifyRetryMessage(message);
  		if (!AIError.is(id, AIError.Flag.MalformedFunctionCall)) {
-@@ -727,6 +736,7 @@ export class TurnRecovery {
+@@ -733,6 +742,7 @@ export class TurnRecovery {
  	 * own `response.steer`, and the rejected steer drains as ordinary input next.
  	 */
  	handleCommittedTextStreamStall(message: AssistantMessage): boolean {
@@ -2085,7 +2268,7 @@ index 86d9c32..5a1a310 100644
  		const id = this.#classifyRetryMessage(message);
  		const socketClosed =
  			message.stopReason === "error" &&
-@@ -795,6 +805,7 @@ export class TurnRecovery {
+@@ -801,6 +811,7 @@ export class TurnRecovery {
  		message: AssistantMessage,
  		options: { autoContinue: boolean; triggerContextTokens?: number; excludeMediaMethods?: boolean },
  	): Promise<RecoveryCompactionResult> {
@@ -2093,7 +2276,7 @@ index 86d9c32..5a1a310 100644
  		return this.#runRecoveryCompactionWithRollback(reason, message, options);
  	}
  
-@@ -824,6 +835,7 @@ export class TurnRecovery {
+@@ -830,6 +841,7 @@ export class TurnRecovery {
  	 * the active account.
  	 */
  	async recordUsageLimitOutcome(message: AssistantMessage): Promise<boolean> {
@@ -2101,7 +2284,7 @@ index 86d9c32..5a1a310 100644
  		if (message.stopReason !== "error") return false;
  		const id = this.#classifyRetryMessage(message);
  		const activeModel = this.#host.model();
-@@ -1489,6 +1501,7 @@ export class TurnRecovery {
+@@ -1498,6 +1510,7 @@ export class TurnRecovery {
  	 * their own marker, not the generic sentinel, so they never match here.
  	 */
  	isRetryableReasonlessAbort(message: AssistantMessage): boolean {
@@ -2109,7 +2292,7 @@ index 86d9c32..5a1a310 100644
  		if (
  			(message.stopReason !== "aborted" && message.stopReason !== "error") ||
  			// A `fallback` boundary is bookkeeping, not output: a stream aborted
-@@ -1518,6 +1531,7 @@ export class TurnRecovery {
+@@ -1527,6 +1540,7 @@ export class TurnRecovery {
  	 * cannot fall through to the generic 408 replay path.
  	 */
  	async handleResponsesRequestBodyReadTimeout(message: AssistantMessage): Promise<RequestBodyReadTimeoutRecovery> {
@@ -2117,7 +2300,7 @@ index 86d9c32..5a1a310 100644
  		if (message.stopReason !== "error" || !AIError.isResponsesRequestBodyReadTimeout(message)) {
  			return "not-applicable";
  		}
-@@ -1560,6 +1574,7 @@ export class TurnRecovery {
+@@ -1569,6 +1583,7 @@ export class TurnRecovery {
  	 * Context overflow is NOT retryable (handled by compaction instead).
  	 */
  	isRetryableError(message: AssistantMessage): boolean {
@@ -2125,7 +2308,7 @@ index 86d9c32..5a1a310 100644
  		if (message.stopReason !== "error") return false;
  		if (this.#isUsagePreflightBlocked(message)) return false;
  		if (AIError.isResponsesRequestBodyReadTimeout(message)) return false;
-@@ -1657,6 +1672,7 @@ export class TurnRecovery {
+@@ -1666,6 +1681,7 @@ export class TurnRecovery {
  	 * unexecuted call must be reissued.
  	 */
  	classifyResolvedInterruptedToolTurn(message: AssistantMessage): "reasonless-abort" | "stream-stall" | undefined {
@@ -2133,7 +2316,7 @@ index 86d9c32..5a1a310 100644
  		const id = this.#classifyRetryMessage(message);
  		const genericAbort =
  			message.errorMessage !== undefined && Object.hasOwn(GENERIC_ABORT_MESSAGES, message.errorMessage);
-@@ -2467,6 +2483,7 @@ export class TurnRecovery {
+@@ -2476,6 +2492,7 @@ export class TurnRecovery {
  	 * Requires the base model to exist in the registry.
  	 */
  	isFireworksFastFallbackEligible(message: AssistantMessage): boolean {
@@ -2141,7 +2324,7 @@ index 86d9c32..5a1a310 100644
  		const model = this.#activeFireworksFastModel();
  		if (!model) return false;
  		if (message.stopReason !== "error") return false;
-@@ -2498,6 +2515,7 @@ export class TurnRecovery {
+@@ -2507,6 +2524,7 @@ export class TurnRecovery {
  	 * `pinFallback`), and turns that already emitted replay-unsafe output.
  	 */
  	isHardErrorFallbackEligible(message: AssistantMessage): boolean {
@@ -2149,7 +2332,7 @@ index 86d9c32..5a1a310 100644
  		if (message.stopReason !== "error") return false;
  		if (this.#isUsagePreflightBlocked(message)) return false;
  		const model = this.#host.model();
-@@ -2640,6 +2658,7 @@ export class TurnRecovery {
+@@ -2649,6 +2667,7 @@ export class TurnRecovery {
  	 * @returns true if retry was initiated, false if max retries exceeded or disabled
  	 */
  	async #handleRetryableError(message: AssistantMessage, options?: RetryPolicyOptions): Promise<boolean> {
@@ -2158,10 +2341,10 @@ index 86d9c32..5a1a310 100644
  			return await this.#applyRetryPolicy(message, options);
  		} catch (error) {
 diff --git a/packages/coding-agent/src/task/executor.ts b/packages/coding-agent/src/task/executor.ts
-index 4c46558..989db9a 100644
+index 3f7dcfe90b..88ebf8df5b 100644
 --- a/packages/coding-agent/src/task/executor.ts
 +++ b/packages/coding-agent/src/task/executor.ts
-@@ -24,6 +24,7 @@ import {
+@@ -40,6 +40,7 @@ import {
  } from "@oh-my-pi/pi-tui/render/render-utils";
  import { type EditMode, getEditInputPaths } from "@oh-my-pi/pi-tui/tools/edit";
  import {
@@ -2169,7 +2352,7 @@ index 4c46558..989db9a 100644
  	formatModelStringWithRouting,
  	resolveAgentAdvisorRolePattern,
  	resolveAgentAdvisorSelection,
-@@ -440,6 +441,8 @@ export interface ExecutorOptions {
+@@ -477,6 +478,8 @@ export interface ExecutorOptions {
  	modelRole?: string;
  	/** Extension routing note for the chosen model; surfaced as `resolvedModelRoute`. */
  	modelRoute?: string;
@@ -2178,7 +2361,7 @@ index 4c46558..989db9a 100644
  	/**
  	 * Active model selector of the parent session, used as an auth-aware fallback
  	 * if the resolved subagent model has no working credentials. See #985.
-@@ -4548,7 +4551,7 @@ export async function runSubprocess(options: ExecutorOptions): Promise<SingleRes
+@@ -4746,7 +4749,7 @@ async function runSubprocessOnThisThread(options: ExecutorOptions): Promise<Sing
  				explicitThinkingLevel,
  				authFallbackUsed,
  				warning: modelResolutionWarning,
@@ -2188,7 +2371,7 @@ index 4c46558..989db9a 100644
  					modelPatterns,
  					options.parentActiveModelPattern,
 diff --git a/packages/coding-agent/src/task/structured-subagent.ts b/packages/coding-agent/src/task/structured-subagent.ts
-index e2d024e..d06434f 100644
+index 498db63ea6..43f1c1b10e 100644
 --- a/packages/coding-agent/src/task/structured-subagent.ts
 +++ b/packages/coding-agent/src/task/structured-subagent.ts
 @@ -7,15 +7,17 @@
@@ -2210,7 +2393,7 @@ index e2d024e..d06434f 100644
  } from "../config/model-resolver";
  import { type OAuthAccountPools, validateAgentAccountPools } from "../config/account-pools";
  import {
-@@ -981,6 +983,38 @@ function describeSalvagedWork(result: SingleResult): string {
+@@ -1032,6 +1034,38 @@ function describeSalvagedWork(result: SingleResult): string {
   */
  export async function runStructuredSubagent(request: StructuredSubagentRequest): Promise<StructuredSubagentResult> {
  	const policy = await applySpawnHook(request, await resolveEffectiveSubagentPolicy(request));
@@ -2249,7 +2432,7 @@ index e2d024e..d06434f 100644
  	const lease = await leaseArtifacts(request.session, request.invocationKind);
  	let changesApplied: boolean | null = null;
  	let mergeSummary = "";
-@@ -998,12 +1032,9 @@ export async function runStructuredSubagent(request: StructuredSubagentRequest):
+@@ -1049,12 +1083,9 @@ export async function runStructuredSubagent(request: StructuredSubagentRequest):
  			? (result: SingleResult) => request.session.recordEvalSubagentUsage?.(result.usage?.output ?? 0)
  			: undefined;
  	try {
@@ -2264,7 +2447,7 @@ index e2d024e..d06434f 100644
  			deferredCleanup = completion;
  		};
 diff --git a/packages/coding-agent/src/tools/index.ts b/packages/coding-agent/src/tools/index.ts
-index 7e6027a..2a786d2 100644
+index 1ec93606a0..860b39301a 100644
 --- a/packages/coding-agent/src/tools/index.ts
 +++ b/packages/coding-agent/src/tools/index.ts
 @@ -12,6 +12,7 @@ import { EditTool } from "../edit";
@@ -2275,7 +2458,7 @@ index 7e6027a..2a786d2 100644
  	BeforeSubagentSpawnEvent,
  	BeforeSubagentSpawnEventResult,
  	PreparedExtension,
-@@ -442,6 +443,8 @@ export interface ToolSession {
+@@ -454,6 +455,8 @@ export interface ToolSession {
  		event: BeforeSubagentSpawnEvent,
  		signal?: AbortSignal,
  	): Promise<BeforeSubagentSpawnEventResult | undefined>;
@@ -2286,11 +2469,11 @@ index 7e6027a..2a786d2 100644
  	/** Model registry for passing to subagents (avoids re-discovery) */
 diff --git a/packages/coding-agent/test/cli/ojak-update.test.ts b/packages/coding-agent/test/cli/ojak-update.test.ts
 new file mode 100644
-index 0000000..9568668
+index 0000000000..f2b24ded62
 --- /dev/null
 +++ b/packages/coding-agent/test/cli/ojak-update.test.ts
-@@ -0,0 +1,330 @@
-+import { afterEach, expect, it } from "bun:test";
+@@ -0,0 +1,678 @@
++import { afterEach, expect, it, spyOn } from "bun:test";
 +import * as fs from "node:fs";
 +import { mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
 +import * as os from "node:os";
@@ -2298,11 +2481,23 @@ index 0000000..9568668
 +import * as path from "node:path";
 +import { join } from "node:path";
 +import type { Fetch } from "../../src/cli/build-service";
-+import { aamCandidates, compareFork, compatibleAssetFetch, fetchCompatibleRelease, readOjakServiceVersion, requireOjakService, serviceMeets, windowsShimTarget } from "../../src/cli/ojak-update";
++import {
++	aamCandidates,
++	classifyUpstream,
++	compareFork,
++	compatibleAssetFetch,
++	fetchCompatibleRelease,
++	fetchUpstreamLatest,
++	readOjakServiceVersion,
++	requireOjakService,
++	serviceMeets,
++	windowsShimTarget,
++} from "../../src/cli/ojak-update";
 +import { runCompatibleUpdate } from "../../src/cli/update-cli";
 +
 +const API = "https://api.github.com/repos/lapalai/ojak/releases?per_page=30";
 +const LATEST = "https://api.github.com/repos/lapalai/ojak/releases/latest";
++const UPSTREAM = "https://api.github.com/repos/can1357/oh-my-pi/releases/latest";
 +const TAG = "omp-v18.15.0-ojak.2";
 +const BASE = `https://github.com/lapalai/ojak/releases/download/${TAG}/`;
 +const APP_BASE = "https://github.com/lapalai/ojak/releases/download/v0.22.2/";
@@ -2312,24 +2507,50 @@ index 0000000..9568668
 +const DARWIN = "omp-v2-darwin-arm64";
 +const WINDOWS = "omp-v2-windows-x64.exe";
 +const dirs: string[] = [];
-+afterEach(async () => { await Promise.all(dirs.splice(0).map(dir => rm(dir, { recursive: true, force: true }))); });
++afterEach(async () => {
++	await Promise.all(dirs.splice(0).map(dir => rm(dir, { recursive: true, force: true })));
++});
 +function fixture(extra: unknown[] = []) {
 +	const entry = (asset: string) => ({ asset, size: bytes.length, sha256: Bun.SHA256.hash(bytes, "hex") });
-+	const manifest = { schemaVersion: 2, admissionProtocol: 1, version: "18.15.0-ojak.2", minimumOjakService: "0.22.2", platforms: {
-+		"darwin-arm64": entry(DARWIN), "win32-x64": entry(WINDOWS),
-+	} };
-+	const release = { draft: false, prerelease: false, published_at: "2026-10-19T00:00:00Z", tag_name: TAG, assets: [
-+		{ name: MANIFEST, size: 600, browser_download_url: `${BASE}${MANIFEST}` },
-+		...Object.values(manifest.platforms).map(e => ({ name: e.asset, size: e.size, browser_download_url: BASE + e.asset })),
-+	] };
++	const manifest = {
++		schemaVersion: 2,
++		admissionProtocol: 1,
++		version: "18.15.0-ojak.2",
++		minimumOjakService: "0.22.2",
++		platforms: {
++			"darwin-arm64": entry(DARWIN),
++			"win32-x64": entry(WINDOWS),
++		},
++	};
++	const release = {
++		draft: false,
++		prerelease: false,
++		published_at: "2026-10-19T00:00:00Z",
++		tag_name: TAG,
++		assets: [
++			{ name: MANIFEST, size: 600, browser_download_url: `${BASE}${MANIFEST}` },
++			...Object.values(manifest.platforms).map(e => ({
++				name: e.asset,
++				size: e.size,
++				browser_download_url: BASE + e.asset,
++			})),
++		],
++	};
 +	// The desktop app's release: published and `latest`, carries latest.json and no omp assets.
-+	const app = { draft: false, prerelease: false, published_at: "2026-11-03T00:00:00Z", tag_name: "v0.22.2", assets: [
-+		{ name: "latest.json", size: 400, browser_download_url: `${APP_BASE}latest.json` },
-+		{ name: "Ojak.app.tar.gz", size: 4000, browser_download_url: `${APP_BASE}Ojak.app.tar.gz` },
-+	] };
++	const app = {
++		draft: false,
++		prerelease: false,
++		published_at: "2026-11-03T00:00:00Z",
++		tag_name: "v0.22.2",
++		assets: [
++			{ name: "latest.json", size: 400, browser_download_url: `${APP_BASE}latest.json` },
++			{ name: "Ojak.app.tar.gz", size: 4000, browser_download_url: `${APP_BASE}Ojak.app.tar.gz` },
++		],
++	};
 +	const requests: string[] = [];
 +	const fetchImpl: Fetch = async (input, init) => {
-+		const url = String(input); requests.push(url);
++		const url = String(input);
++		requests.push(url);
 +		expect(init?.signal).toBeInstanceOf(AbortSignal);
 +		if (url === LATEST) return Response.json(app);
 +		if (url === API) {
@@ -2344,30 +2565,52 @@ index 0000000..9568668
 +	return { manifest, release, app, requests, fetchImpl };
 +}
 +async function target() {
-+	const dir = await mkdtemp(join(tmpdir(), "ojak-update-")); dirs.push(dir);
-+	const path = join(dir, "omp"); await writeFile(path, old);
++	const dir = await mkdtemp(join(tmpdir(), "ojak-update-"));
++	dirs.push(dir);
++	const path = join(dir, "omp");
++	await writeFile(path, old);
 +	return path;
 +}
 +function dependencies(f: { fetchImpl: Fetch }, path: string, verified = true) {
-+	return { fetchImpl: f.fetchImpl, platform: "darwin-arm64", currentVersion: "18.12.0-ojak.1", readServiceVersion: async (): Promise<string | undefined> => "0.22.2",
++	return {
++		fetchImpl: f.fetchImpl,
++		platform: "darwin-arm64",
++		currentVersion: "18.12.0-ojak.1",
++		readServiceVersion: async (): Promise<string | undefined> => "0.22.2",
++		readUpstreamLatest: async (): Promise<string | undefined> => undefined,
 +		resolveTarget: async () => ({ path }),
-+		verifyInstalledVersion: async (version: string) => ({ ok: verified && (await readFile(path)).equals(bytes), actual: version, path }),
++		verifyInstalledVersion: async (version: string) => ({
++			ok: verified && (await readFile(path)).equals(bytes),
++			actual: version,
++			path,
++		}),
 +	};
 +}
 +it("installs verified same-release bytes using the real atomic replacement", async () => {
-+	const f = fixture(); const path = await target();
++	const f = fixture();
++	const path = await target();
 +	await runCompatibleUpdate({ check: false, force: false }, dependencies(f, path));
 +	expect(await readFile(path)).toEqual(bytes);
 +	expect(f.requests).toEqual([API, `${BASE}${MANIFEST}`, `${BASE}${DARWIN}`]);
 +});
 +it("check-only never resolves or mutates the target, including --force", async () => {
-+	const f = fixture(); const path = await target();
-+	await runCompatibleUpdate({ check: true, force: true }, { ...dependencies(f, path), resolveTarget: async () => { throw new Error("must not resolve target"); } });
++	const f = fixture();
++	const path = await target();
++	await runCompatibleUpdate(
++		{ check: true, force: true },
++		{
++			...dependencies(f, path),
++			resolveTarget: async () => {
++				throw new Error("must not resolve target");
++			},
++		},
++	);
 +	expect(await readFile(path, "utf8")).toBe(old);
 +	expect(f.requests).toEqual([API, `${BASE}${MANIFEST}`]);
 +});
 +it("does not downgrade unless force was explicitly requested", async () => {
-+	const f = fixture(); const path = await target();
++	const f = fixture();
++	const path = await target();
 +	const deps = { ...dependencies(f, path), currentVersion: "18.15.0-ojak.3" };
 +	await runCompatibleUpdate({ check: false, force: false }, deps);
 +	expect(await readFile(path, "utf8")).toBe(old);
@@ -2375,74 +2618,139 @@ index 0000000..9568668
 +	expect(await readFile(path)).toEqual(bytes);
 +});
 +it("rolls back a replacement whose executable version verification fails", async () => {
-+	const f = fixture(); const path = await target();
++	const f = fixture();
++	const path = await target();
 +	await expect(runCompatibleUpdate({ check: false, force: false }, dependencies(f, path, false))).rejects.toThrow();
 +	expect(await readFile(path, "utf8")).toBe(old);
 +});
 +it("digest mismatch preserves the old executable", async () => {
-+	const f = fixture(); const path = await target();
++	const f = fixture();
++	const path = await target();
 +	f.manifest.platforms["darwin-arm64"].sha256 = "0".repeat(64);
-+	await expect(runCompatibleUpdate({ check: false, force: true }, dependencies(f, path))).rejects.toThrow("digest mismatch");
++	await expect(runCompatibleUpdate({ check: false, force: true }, dependencies(f, path))).rejects.toThrow(
++		"digest mismatch",
++	);
 +	expect(await readFile(path, "utf8")).toBe(old);
 +});
-+it.each(["protocol", "schema", "minimum", "version", "platform", "size", "url", "draft", "prerelease", "missing"])("refuses invalid %s without replacing or upstream fallback", async kind => {
-+	const f = fixture(); const path = await target();
-+	if (kind === "protocol") f.manifest.admissionProtocol = 2;
-+	if (kind === "schema") f.manifest.schemaVersion = 1;
-+	if (kind === "minimum") f.manifest.minimumOjakService = "latest";
-+	if (kind === "version") f.manifest.version = "18.15.0-canary.1";
-+	if (kind === "platform") f.manifest.platforms["win32-x64"].asset = "omp-windows-x64.exe";
-+	if (kind === "size") f.manifest.platforms["darwin-arm64"].size++;
-+	if (kind === "url") f.release.assets[1]!.browser_download_url = "https://evil.example/omp";
-+	if (kind === "draft") f.release.draft = true;
-+	if (kind === "prerelease") f.release.prerelease = true;
-+	if (kind === "missing") f.release.assets.shift();
-+	await expect(runCompatibleUpdate({ check: false, force: true }, dependencies(f, path))).rejects.toThrow();
-+	expect(await readFile(path, "utf8")).toBe(old);
-+	expect(f.requests.every(url => url === API || url === `${BASE}${MANIFEST}`)).toBe(true);
-+});
++it.each(["protocol", "schema", "minimum", "version", "platform", "size", "url", "draft", "prerelease", "missing"])(
++	"refuses invalid %s without replacing or upstream fallback",
++	async kind => {
++		const f = fixture();
++		const path = await target();
++		if (kind === "protocol") f.manifest.admissionProtocol = 2;
++		if (kind === "schema") f.manifest.schemaVersion = 1;
++		if (kind === "minimum") f.manifest.minimumOjakService = "latest";
++		if (kind === "version") f.manifest.version = "18.15.0-canary.1";
++		if (kind === "platform") f.manifest.platforms["win32-x64"].asset = "omp-windows-x64.exe";
++		if (kind === "size") f.manifest.platforms["darwin-arm64"].size++;
++		if (kind === "url") f.release.assets[1]!.browser_download_url = "https://evil.example/omp";
++		if (kind === "draft") f.release.draft = true;
++		if (kind === "prerelease") f.release.prerelease = true;
++		if (kind === "missing") f.release.assets.shift();
++		await expect(runCompatibleUpdate({ check: false, force: true }, dependencies(f, path))).rejects.toThrow();
++		expect(await readFile(path, "utf8")).toBe(old);
++		expect(f.requests.every(url => url === API || url === `${BASE}${MANIFEST}`)).toBe(true);
++	},
++);
 +it("rejects unsupported hosts and canary before any request", async () => {
 +	const f = fixture();
-+	await expect(fetchCompatibleRelease({ fetchImpl: f.fetchImpl, platform: "linux-x64" })).rejects.toThrow("No compatible");
-+	await expect(fetchCompatibleRelease({ fetchImpl: f.fetchImpl, platform: "darwin-arm64", channel: "canary" })).rejects.toThrow("stable");
++	await expect(fetchCompatibleRelease({ fetchImpl: f.fetchImpl, platform: "linux-x64" })).rejects.toThrow(
++		"No compatible",
++	);
++	await expect(
++		fetchCompatibleRelease({ fetchImpl: f.fetchImpl, platform: "darwin-arm64", channel: "canary" }),
++	).rejects.toThrow("stable");
 +	expect(f.requests).toEqual([]);
 +});
 +it("network failure leaves the executable intact and never tries another origin", async () => {
-+	const f = fixture(); const path = await target(); const requests: string[] = [];
-+	await expect(runCompatibleUpdate({ check: false, force: true }, { ...dependencies(f, path), fetchImpl: async input => { requests.push(String(input)); throw new Error("offline"); } })).rejects.toThrow("offline");
-+	expect(requests).toEqual([API]); expect(await readFile(path, "utf8")).toBe(old);
++	const f = fixture();
++	const path = await target();
++	const requests: string[] = [];
++	await expect(
++		runCompatibleUpdate(
++			{ check: false, force: true },
++			{
++				...dependencies(f, path),
++				fetchImpl: async input => {
++					requests.push(String(input));
++					throw new Error("offline");
++				},
++			},
++		),
++	).rejects.toThrow("offline");
++	expect(requests).toEqual([API]);
++	expect(await readFile(path, "utf8")).toBe(old);
 +});
 +it("allows GitHub signed asset redirects but rejects unrelated redirect hosts", async () => {
 +	const requests: string[] = [];
-+	const fetchImpl: Fetch = async input => { requests.push(String(input)); return requests.length === 1 ? new Response(null, { status: 302, headers: { location: "https://release-assets.githubusercontent.com/file?token=signed" } }) : new Response(bytes); };
-+	expect(await (await compatibleAssetFetch(fetchImpl)(`${BASE}${DARWIN}`)).arrayBuffer()).toEqual(bytes.buffer.slice(bytes.byteOffset, bytes.byteOffset + bytes.byteLength));
-+	await expect(compatibleAssetFetch(async () => new Response(null, { status: 302, headers: { location: "https://evil.example/file" } }))(`${BASE}${DARWIN}`)).rejects.toThrow("Unsafe");
++	const fetchImpl: Fetch = async input => {
++		requests.push(String(input));
++		return requests.length === 1
++			? new Response(null, {
++					status: 302,
++					headers: { location: "https://release-assets.githubusercontent.com/file?token=signed" },
++				})
++			: new Response(bytes);
++	};
++	expect(await (await compatibleAssetFetch(fetchImpl)(`${BASE}${DARWIN}`)).arrayBuffer()).toEqual(
++		bytes.buffer.slice(bytes.byteOffset, bytes.byteOffset + bytes.byteLength),
++	);
++	await expect(
++		compatibleAssetFetch(
++			async () => new Response(null, { status: 302, headers: { location: "https://evil.example/file" } }),
++		)(`${BASE}${DARWIN}`),
++	).rejects.toThrow("Unsafe");
 +});
 +
 +it("a schema-1 release (only the old manifest and unversioned assets) is refused without a manifest or binary request", async () => {
 +	const requests: string[] = [];
-+	const old = { draft: false, prerelease: false, published_at: "2026-10-19T00:00:00Z", tag_name: TAG, assets: [
-+		{ name: "omp-compatible.json", size: 600, browser_download_url: `${BASE}omp-compatible.json` },
-+		{ name: "omp-darwin-arm64", size: bytes.length, browser_download_url: `${BASE}omp-darwin-arm64` },
-+		{ name: "omp-windows-x64.exe", size: bytes.length, browser_download_url: `${BASE}omp-windows-x64.exe` },
-+	] };
-+	const fetchImpl: Fetch = async input => { requests.push(String(input)); if (String(input) === API) return Response.json([old]); throw new Error("unexpected request"); };
-+	await expect(fetchCompatibleRelease({ fetchImpl, platform: "darwin-arm64" })).rejects.toThrow(`missing or invalid same-release asset ${MANIFEST}`);
++	const old = {
++		draft: false,
++		prerelease: false,
++		published_at: "2026-10-19T00:00:00Z",
++		tag_name: TAG,
++		assets: [
++			{ name: "omp-compatible.json", size: 600, browser_download_url: `${BASE}omp-compatible.json` },
++			{ name: "omp-darwin-arm64", size: bytes.length, browser_download_url: `${BASE}omp-darwin-arm64` },
++			{ name: "omp-windows-x64.exe", size: bytes.length, browser_download_url: `${BASE}omp-windows-x64.exe` },
++		],
++	};
++	const fetchImpl: Fetch = async input => {
++		requests.push(String(input));
++		if (String(input) === API) return Response.json([old]);
++		throw new Error("unexpected request");
++	};
++	await expect(fetchCompatibleRelease({ fetchImpl, platform: "darwin-arm64" })).rejects.toThrow(
++		`missing or invalid same-release asset ${MANIFEST}`,
++	);
 +	expect(requests).toEqual([API]);
 +});
 +it("refuses an older, missing or malformed Ojak service before download, even for check-only, leaving the executable alone", async () => {
 +	for (const service of ["0.22.1", "0.21.9", "", "garbage", undefined]) {
 +		for (const check of [false, true]) {
-+			const f = fixture(); const path = await target();
-+			await expect(runCompatibleUpdate({ check, force: true }, { ...dependencies(f, path), readServiceVersion: async () => service })).rejects.toThrow("Update Ojak first");
++			const f = fixture();
++			const path = await target();
++			await expect(
++				runCompatibleUpdate(
++					{ check, force: true },
++					{ ...dependencies(f, path), readServiceVersion: async () => service },
++				),
++			).rejects.toThrow("Update Ojak first");
 +			expect(await readFile(path, "utf8")).toBe(old);
 +			expect(f.requests).toEqual([API, `${BASE}${MANIFEST}`]);
 +		}
 +	}
 +});
 +it("an up-to-date omp never consults the Ojak service", async () => {
-+	const f = fixture(); const path = await target();
-+	const deps = { ...dependencies(f, path), currentVersion: "18.15.0-ojak.2", readServiceVersion: async () => { throw new Error("must not read the service"); } };
++	const f = fixture();
++	const path = await target();
++	const deps = {
++		...dependencies(f, path),
++		currentVersion: "18.15.0-ojak.2",
++		readServiceVersion: async () => {
++			throw new Error("must not read the service");
++		},
++	};
 +	await runCompatibleUpdate({ check: false, force: false }, deps);
 +	expect(await readFile(path, "utf8")).toBe(old);
 +});
@@ -2453,21 +2761,29 @@ index 0000000..9568668
 +	expect(serviceMeets("0.23.0-rc.1+b5", "0.22.2")).toBe(true);
 +	expect(serviceMeets("0.22.1", "0.22.2")).toBe(false);
 +	expect(serviceMeets("0.9.9", "0.22.2")).toBe(false);
-+	for (const bad of [undefined, "", "0.22", "0.22.2.1", "a.b.c", "01.2.3"]) expect(serviceMeets(bad, "0.22.2")).toBe(false);
++	for (const bad of [undefined, "", "0.22", "0.22.2.1", "a.b.c", "01.2.3"])
++		expect(serviceMeets(bad, "0.22.2")).toBe(false);
 +	expect(serviceMeets("0.22.2", "bad")).toBe(false);
 +});
 +it("requireOjakService reports the unknown and older cases distinctly", async () => {
 +	await expect(requireOjakService("0.22.2", async () => "0.22.2")).resolves.toBe("0.22.2");
 +	await expect(requireOjakService("0.22.2", async () => "0.21.0")).rejects.toThrow("running service 0.21.0");
-+	await expect(requireOjakService("0.22.2", async () => undefined)).rejects.toThrow("no running Ojak service version could be read");
++	await expect(requireOjakService("0.22.2", async () => undefined)).rejects.toThrow(
++		"no running Ojak service version could be read",
++	);
 +});
 +it("reads serviceVersion from the aam CLI and fails closed on every other answer", async () => {
-+	const dir = await mkdtemp(join(tmpdir(), "ojak-aam-")); dirs.push(dir);
-+	const script = async (name: string, body: string) => { const p = join(dir, name); await writeFile(p, `#!/bin/sh\n${body}\n`, { mode: 0o755 }); return p; };
++	const dir = await mkdtemp(join(tmpdir(), "ojak-aam-"));
++	dirs.push(dir);
++	const script = async (name: string, body: string) => {
++		const p = join(dir, name);
++		await writeFile(p, `#!/bin/sh\n${body}\n`, { mode: 0o755 });
++		return p;
++	};
 +	const ok = await script("ok", `[ "$1 $2" = "status --json" ] && echo '{"serviceVersion":"0.22.2","tools":[]}'`);
 +	const old = await script("old", `echo '{"tools":[]}'`);
 +	const broken = await script("broken", "echo 'not json'");
-+	const failing = await script("failing", "echo '{\"serviceVersion\":\"9.9.9\"}'; exit 3");
++	const failing = await script("failing", 'echo \'{"serviceVersion":"9.9.9"}\'; exit 3');
 +	if (process.platform === "win32") return;
 +	expect(await readOjakServiceVersion([ok])).toBe("0.22.2");
 +	expect(await readOjakServiceVersion([join(dir, "missing"), ok])).toBe("0.22.2");
@@ -2483,7 +2799,13 @@ index 0000000..9568668
 +	expect(mac).toContain("/Applications/Ojak.app/Contents/MacOS/aam");
 +	expect(aamCandidates({ AAM_HOME: "/x" } as NodeJS.ProcessEnv, "darwin")[0]).toBe("/x/bin/aam");
 +	// Ojak's NSIS install: real exe at %LOCALAPPDATA%\Ojak\aam.exe; shim folder holds only aam.cmd (no aam.exe).
-+	const win = aamCandidates({ APPDATA: "C:\\Users\\me\\AppData\\Roaming", LOCALAPPDATA: "C:\\Users\\me\\AppData\\Local" } as NodeJS.ProcessEnv, "win32");
++	const win = aamCandidates(
++		{
++			APPDATA: "C:\\Users\\me\\AppData\\Roaming",
++			LOCALAPPDATA: "C:\\Users\\me\\AppData\\Local",
++		} as NodeJS.ProcessEnv,
++		"win32",
++	);
 +	expect(win).toContain("C:\\Users\\me\\AppData\\Local\\Ojak\\aam.exe");
 +	expect(win.some(p => p.includes("Programs"))).toBe(false);
 +	expect(win.some(p => p.endsWith("\\bin\\aam.exe"))).toBe(false);
@@ -2497,7 +2819,12 @@ index 0000000..9568668
 +	expect(windowsShimTarget(shim, env)).toBe("C:\\Users\\me\\AppData\\Local\\Ojak\\aam.exe");
 +	fs.writeFileSync(shim, '@"C:\\Custom Dir\\Ojak\\aam.exe" %*\r\n');
 +	expect(windowsShimTarget(shim, env)).toBe("C:\\Custom Dir\\Ojak\\aam.exe");
-+	for (const bad of ['@"%UNSET%\\Ojak\\aam.exe" %*\r\n', '@"%LOCALAPPDATA%\\Ojak\\aam.exe" --shim claude %*\r\n', '@"calc.bat" %*\r\n', "@echo off\r\nstart evil.exe\r\n"]) {
++	for (const bad of [
++		'@"%UNSET%\\Ojak\\aam.exe" %*\r\n',
++		'@"%LOCALAPPDATA%\\Ojak\\aam.exe" --shim claude %*\r\n',
++		'@"calc.bat" %*\r\n',
++		"@echo off\r\nstart evil.exe\r\n",
++	]) {
 +		fs.writeFileSync(shim, bad);
 +		expect(windowsShimTarget(shim, env)).toBeUndefined();
 +	}
@@ -2505,30 +2832,59 @@ index 0000000..9568668
 +	fs.rmSync(dir, { recursive: true, force: true });
 +});
 +// Needs a real installed, running Ojak; clean CI runners have none. Opt in with OJAK_NATIVE_INSTALL_TEST=1 on a provisioned Windows PC.
-+it.skipIf(process.platform !== "win32" || process.env.OJAK_NATIVE_INSTALL_TEST !== "1")("on native Windows finds the running service through the install layout with aam off PATH", async () => {
-+	const candidates = aamCandidates(process.env, "win32", null);
-+	const version = await readOjakServiceVersion(candidates);
-+	expect(version).toMatch(/^\d+\.\d+\.\d+$/);
-+});
++it.skipIf(process.platform !== "win32" || process.env.OJAK_NATIVE_INSTALL_TEST !== "1")(
++	"on native Windows finds the running service through the install layout with aam off PATH",
++	async () => {
++		const candidates = aamCandidates(process.env, "win32", null);
++		const version = await readOjakServiceVersion(candidates);
++		expect(version).toMatch(/^\d+\.\d+\.\d+$/);
++	},
++);
 +
 +function omp(tag: string, version: string, over: Record<string, unknown> = {}, minimum = "0.22.2") {
 +	const base = `https://github.com/lapalai/ojak/releases/download/${tag}/`;
 +	const entry = (asset: string) => ({ asset, size: bytes.length, sha256: Bun.SHA256.hash(bytes, "hex") });
-+	const manifest = { schemaVersion: 2, admissionProtocol: 1, version, minimumOjakService: minimum, platforms: { "darwin-arm64": entry(DARWIN), "win32-x64": entry(WINDOWS) } };
++	const manifest = {
++		schemaVersion: 2,
++		admissionProtocol: 1,
++		version,
++		minimumOjakService: minimum,
++		platforms: { "darwin-arm64": entry(DARWIN), "win32-x64": entry(WINDOWS) },
++	};
 +	const manifestBytes = JSON.stringify(manifest);
-+	const release = { draft: false, prerelease: false, published_at: "2026-11-03T12:00:00Z", tag_name: tag, assets: [
-+		{ name: MANIFEST, size: Buffer.byteLength(manifestBytes), browser_download_url: `${base}${MANIFEST}` },
-+		{ name: DARWIN, size: bytes.length, browser_download_url: `${base}${DARWIN}` },
-+		{ name: WINDOWS, size: bytes.length, browser_download_url: `${base}${WINDOWS}` },
-+	], ...over };
++	const release = {
++		draft: false,
++		prerelease: false,
++		published_at: "2026-11-03T12:00:00Z",
++		tag_name: tag,
++		assets: [
++			{ name: MANIFEST, size: Buffer.byteLength(manifestBytes), browser_download_url: `${base}${MANIFEST}` },
++			{ name: DARWIN, size: bytes.length, browser_download_url: `${base}${DARWIN}` },
++			{ name: WINDOWS, size: bytes.length, browser_download_url: `${base}${WINDOWS}` },
++		],
++		...over,
++	};
 +	return { release, manifest: manifestBytes, base };
 +}
 +/** Fixture API serving a release list plus the manifests of the listed omp releases; `/releases/latest` is the app release. */
 +function channel(...releases: ReturnType<typeof omp>[]) {
-+	const app = { draft: false, prerelease: false, published_at: "2026-11-04T00:00:00Z", tag_name: "v0.22.3", assets: [{ name: "latest.json", size: 400, browser_download_url: "https://github.com/lapalai/ojak/releases/download/v0.22.3/latest.json" }] };
++	const app = {
++		draft: false,
++		prerelease: false,
++		published_at: "2026-11-04T00:00:00Z",
++		tag_name: "v0.22.3",
++		assets: [
++			{
++				name: "latest.json",
++				size: 400,
++				browser_download_url: "https://github.com/lapalai/ojak/releases/download/v0.22.3/latest.json",
++			},
++		],
++	};
 +	const requests: string[] = [];
 +	const fetchImpl: Fetch = async input => {
-+		const url = String(input); requests.push(url);
++		const url = String(input);
++		requests.push(url);
 +		if (url === LATEST) return Response.json(app);
 +		if (url === API) return Response.json([app, ...releases.map(r => r.release)]);
 +		const hit = releases.find(r => url === `${r.base}${MANIFEST}`);
@@ -2546,7 +2902,7 @@ index 0000000..9568668
 +	expect(c.requests).toEqual([API, `${b.base}${MANIFEST}`]);
 +	expect(c.requests).not.toContain(LATEST);
 +	// The app updater's feed is untouched: `latest` still resolves to A (the app release with no omp assets).
-+	const latest = await (await c.fetchImpl(LATEST)) .json() as { tag_name: string; assets: { name: string }[] };
++	const latest = (await (await c.fetchImpl(LATEST)).json()) as { tag_name: string; assets: { name: string }[] };
 +	expect(latest.tag_name).toBe("v0.22.3");
 +	expect(latest.assets.map(a => a.name)).toEqual(["latest.json"]);
 +});
@@ -2554,7 +2910,9 @@ index 0000000..9568668
 +	const older = omp("omp-v18.15.0-ojak.1", "18.15.0-ojak.1");
 +	const newer = omp("omp-v18.15.0-ojak.10", "18.15.0-ojak.10");
 +	const c = channel(older, newer);
-+	expect((await fetchCompatibleRelease({ fetchImpl: c.fetchImpl, platform: "win32-x64" })).version).toBe("18.15.0-ojak.10");
++	expect((await fetchCompatibleRelease({ fetchImpl: c.fetchImpl, platform: "win32-x64" })).version).toBe(
++		"18.15.0-ojak.10",
++	);
 +});
 +it.each([
 +	["draft", { draft: true }],
@@ -2564,52 +2922,93 @@ index 0000000..9568668
 +	const good = omp("omp-v18.15.0-ojak.1", "18.15.0-ojak.1");
 +	const bad = omp("omp-v18.15.0-ojak.2", "18.15.0-ojak.2", over);
 +	const c = channel(bad, good);
-+	expect((await fetchCompatibleRelease({ fetchImpl: c.fetchImpl, platform: "darwin-arm64" })).version).toBe("18.15.0-ojak.1");
++	expect((await fetchCompatibleRelease({ fetchImpl: c.fetchImpl, platform: "darwin-arm64" })).version).toBe(
++		"18.15.0-ojak.1",
++	);
 +	expect(c.requests).toEqual([API, `${good.base}${MANIFEST}`]);
 +});
 +it("ignores a draft-only channel with no update", async () => {
 +	const c = channel(omp("omp-v18.15.0-ojak.2", "18.15.0-ojak.2", { draft: true }));
-+	await expect(fetchCompatibleRelease({ fetchImpl: c.fetchImpl, platform: "darwin-arm64" })).rejects.toThrow("No valid published omp release");
++	await expect(fetchCompatibleRelease({ fetchImpl: c.fetchImpl, platform: "darwin-arm64" })).rejects.toThrow(
++		"No valid published omp release",
++	);
 +	expect(c.requests).toEqual([API]);
 +});
-+it.each(["omp-v18.15.0", "omp-v18.15.0-ojak.0", "omp-v18.15.0-ojak.01", "omp-18.15.0-ojak.1", "omp-v18.15-ojak.1", "omp-v18.15.0-ojak.1-rc", "v18.15.0-ojak.1"])("ignores the malformed tag %s without requesting its manifest", async tag => {
++it.each([
++	"omp-v18.15.0",
++	"omp-v18.15.0-ojak.0",
++	"omp-v18.15.0-ojak.01",
++	"omp-18.15.0-ojak.1",
++	"omp-v18.15-ojak.1",
++	"omp-v18.15.0-ojak.1-rc",
++	"v18.15.0-ojak.1",
++])("ignores the malformed tag %s without requesting its manifest", async tag => {
 +	const bad = omp(tag, "18.15.0-ojak.1");
 +	const c = channel(bad);
-+	await expect(fetchCompatibleRelease({ fetchImpl: c.fetchImpl, platform: "darwin-arm64" })).rejects.toThrow("No valid published omp release");
++	await expect(fetchCompatibleRelease({ fetchImpl: c.fetchImpl, platform: "darwin-arm64" })).rejects.toThrow(
++		"No valid published omp release",
++	);
 +	expect(c.requests).toEqual([API]);
 +});
 +it("ignores a release whose manifest version differs from its tag and uses the next one", async () => {
 +	const good = omp("omp-v18.15.0-ojak.1", "18.15.0-ojak.1");
 +	const mismatched = omp("omp-v18.15.0-ojak.2", "18.15.0-ojak.3");
 +	const c = channel(mismatched, good);
-+	expect((await fetchCompatibleRelease({ fetchImpl: c.fetchImpl, platform: "darwin-arm64" })).version).toBe("18.15.0-ojak.1");
++	expect((await fetchCompatibleRelease({ fetchImpl: c.fetchImpl, platform: "darwin-arm64" })).version).toBe(
++		"18.15.0-ojak.1",
++	);
 +	const only = channel(mismatched);
-+	await expect(fetchCompatibleRelease({ fetchImpl: only.fetchImpl, platform: "darwin-arm64" })).rejects.toThrow("does not match the tag");
++	await expect(fetchCompatibleRelease({ fetchImpl: only.fetchImpl, platform: "darwin-arm64" })).rejects.toThrow(
++		"does not match the tag",
++	);
 +});
 +it("never falls back to the app's latest release when the omp channel is empty", async () => {
 +	const c = channel();
-+	await expect(fetchCompatibleRelease({ fetchImpl: c.fetchImpl, platform: "darwin-arm64" })).rejects.toThrow("No valid published omp release");
++	await expect(fetchCompatibleRelease({ fetchImpl: c.fetchImpl, platform: "darwin-arm64" })).rejects.toThrow(
++		"No valid published omp release",
++	);
 +	expect(c.requests).toEqual([API]);
 +});
 +it("bounds the manifest requests made for a polluted channel", async () => {
 +	const many = Array.from({ length: 12 }, (_, i) => omp(`omp-v18.15.0-ojak.${i + 1}`, `18.15.0-ojak.${i + 100}`));
 +	const c = channel(...many);
-+	await expect(fetchCompatibleRelease({ fetchImpl: c.fetchImpl, platform: "darwin-arm64" })).rejects.toThrow("No valid published omp release");
++	await expect(fetchCompatibleRelease({ fetchImpl: c.fetchImpl, platform: "darwin-arm64" })).rejects.toThrow(
++		"No valid published omp release",
++	);
 +	expect(c.requests.length).toBe(1 + 5);
 +});
 +it("a channel release that is not newer than the installed omp installs nothing and never reads the service", async () => {
 +	const c = channel(omp("omp-v18.15.0-ojak.1", "18.15.0-ojak.1"));
 +	const path = await target();
-+	const deps = { fetchImpl: c.fetchImpl, platform: "darwin-arm64", currentVersion: "18.15.0-ojak.1", readServiceVersion: async () => { throw new Error("must not read the service"); }, resolveTarget: async () => { throw new Error("must not resolve target"); } };
++	const deps = {
++		fetchImpl: c.fetchImpl,
++		platform: "darwin-arm64",
++		currentVersion: "18.15.0-ojak.1",
++		readUpstreamLatest: async (): Promise<string | undefined> => undefined,
++		readServiceVersion: async () => {
++			throw new Error("must not read the service");
++		},
++		resolveTarget: async () => {
++			throw new Error("must not resolve target");
++		},
++	};
 +	await runCompatibleUpdate({ check: false, force: false }, deps);
 +	await runCompatibleUpdate({ check: false, force: false }, { ...deps, currentVersion: "18.15.0-ojak.7" });
 +	expect(await readFile(path, "utf8")).toBe(old);
-+	expect(c.requests).toEqual([API, `${"https://github.com/lapalai/ojak/releases/download/omp-v18.15.0-ojak.1/"}${MANIFEST}`, API, `${"https://github.com/lapalai/ojak/releases/download/omp-v18.15.0-ojak.1/"}${MANIFEST}`]);
++	expect(c.requests).toEqual([
++		API,
++		`${"https://github.com/lapalai/ojak/releases/download/omp-v18.15.0-ojak.1/"}${MANIFEST}`,
++		API,
++		`${"https://github.com/lapalai/ojak/releases/download/omp-v18.15.0-ojak.1/"}${MANIFEST}`,
++	]);
 +});
 +it("installs the channel release B end to end through the real atomic replacement", async () => {
 +	const b = omp("omp-v18.15.0-ojak.1", "18.15.0-ojak.1");
 +	const c = channel(b);
-+	const wrapped: Fetch = async (input, init) => String(input) === `${b.base}${DARWIN}` ? (c.requests.push(String(input)), new Response(bytes)) : c.fetchImpl(input, init);
++	const wrapped: Fetch = async (input, init) =>
++		String(input) === `${b.base}${DARWIN}`
++			? (c.requests.push(String(input)), new Response(bytes))
++			: c.fetchImpl(input, init);
 +	const path = await target();
 +	await runCompatibleUpdate({ check: false, force: false }, { ...dependencies({ fetchImpl: wrapped }, path) });
 +	expect(await readFile(path)).toEqual(bytes);
@@ -2620,8 +3019,140 @@ index 0000000..9568668
 +	expect(compareFork("18.15.0-ojak.1", "18.16.0-ojak.1")).toBe(-1);
 +	expect(compareFork("18.15.0-ojak.1", "18.15.0-ojak.1")).toBe(0);
 +});
++
++const logged = () => {
++	const lines: string[] = [];
++	spyOn(console, "log").mockImplementation((...a: unknown[]) => {
++		lines.push(a.join(" "));
++	});
++	return lines;
++};
++it("classifies upstream as current, compatibility-pending or unknown and never maps a failure to current", () => {
++	expect(classifyUpstream("18.18.9", "18.18.9-ojak.1")).toEqual({
++		status: "current",
++		upstreamVersion: "18.18.9",
++		compatibleVersion: "18.18.9-ojak.1",
++	});
++	expect(classifyUpstream("18.18.9", "18.15.0-ojak.1").status).toBe("compatibility-pending");
++	expect(classifyUpstream("18.9.0", "18.15.0-ojak.1").status).toBe("current");
++	expect(classifyUpstream("18.18.10", "18.18.9-ojak.4").status).toBe("compatibility-pending");
++	expect(classifyUpstream(undefined, "18.18.9-ojak.1")).toEqual({
++		status: "unknown",
++		upstreamVersion: null,
++		compatibleVersion: "18.18.9-ojak.1",
++	});
++});
++it.each([
++	["v18.18.9", false, false, "18.18.9"],
++	["v18.18.9", true, false, undefined],
++	["v18.18.9", false, true, undefined],
++	["v18.19.0-rc.1", false, false, undefined],
++	["18.18.9", false, false, undefined],
++	["vlatest", false, false, undefined],
++])("reads the upstream latest tag %s (draft=%p prerelease=%p) as %p", async (tag, draft, prerelease, expected) => {
++	const fetchImpl: Fetch = async input => {
++		expect(String(input)).toBe(UPSTREAM);
++		return Response.json({ tag_name: tag, draft, prerelease });
++	};
++	expect(await fetchUpstreamLatest(fetchImpl)).toBe(expected);
++});
++it("an upstream HTTP or network failure is unknown and never throws", async () => {
++	expect(await fetchUpstreamLatest(async () => new Response("no", { status: 500 }))).toBeUndefined();
++	expect(
++		await fetchUpstreamLatest(async () => {
++			throw new Error("offline");
++		}),
++	).toBeUndefined();
++	expect(await fetchUpstreamLatest(async () => new Response("not json"))).toBeUndefined();
++});
++it("reports upstream ahead of the compatible release as pending and says current only about the compatible channel", async () => {
++	const lines = logged();
++	const c = channel(omp("omp-v18.15.0-ojak.1", "18.15.0-ojak.1"));
++	const path = await target();
++	const out = await runCompatibleUpdate(
++		{ check: false, force: false },
++		{
++			...dependencies({ fetchImpl: c.fetchImpl }, path),
++			currentVersion: "18.15.0-ojak.1",
++			readUpstreamLatest: async () => "18.18.9",
++		},
++	);
++	expect(out).toEqual({ kind: "current" });
++	const text = lines.join("\n");
++	expect(text).toContain("Upstream latest is 18.18.9");
++	expect(text).toContain("pending");
++	expect(text).toContain("not a statement about upstream");
++	expect(text).not.toMatch(/up to date|includes upstream/i);
++	expect(await readFile(path, "utf8")).toBe(old);
++});
++it("an unreadable upstream is reported unknown, still installs the validated compatible release and is never read before validation", async () => {
++	const lines = logged();
++	const order: string[] = [];
++	const f = fixture();
++	const path = await target();
++	const out = await runCompatibleUpdate(
++		{ check: false, force: false },
++		{
++			...dependencies(f, path),
++			readUpstreamLatest: async () => {
++				order.push("upstream");
++				throw new Error("offline");
++			},
++		},
++	);
++	expect(out).toEqual({ kind: "installed", version: "18.15.0-ojak.2" });
++	expect(await readFile(path)).toEqual(bytes);
++	expect(lines.join("\n")).toContain("could not be determined");
++	expect(lines.join("\n")).not.toContain("includes upstream");
++	expect(order).toEqual(["upstream"]);
++});
++it("an upstream newer than the installed compatible release is never installed; only the compatible bytes are", async () => {
++	logged();
++	const f = fixture();
++	const path = await target();
++	await runCompatibleUpdate(
++		{ check: false, force: false },
++		{ ...dependencies(f, path), readUpstreamLatest: async () => "99.0.0" },
++	);
++	expect(await readFile(path)).toEqual(bytes);
++	expect(
++		f.requests.every(url => url.startsWith("https://api.github.com/repos/lapalai/ojak/") || url.startsWith(BASE)),
++	).toBe(true);
++});
++it("an invalid compatible release fails before upstream is consulted and preserves the executable", async () => {
++	const f = fixture();
++	const path = await target();
++	f.release.draft = true;
++	let asked = false;
++	await expect(
++		runCompatibleUpdate(
++			{ check: false, force: false },
++			{
++				...dependencies(f, path),
++				readUpstreamLatest: async () => {
++					asked = true;
++					return "99.0.0";
++				},
++			},
++		),
++	).rejects.toThrow();
++	expect(asked).toBe(false);
++	expect(await readFile(path, "utf8")).toBe(old);
++});
++it("runUpdateCommand fails closed with a thrown error so the auto-update worker cannot report success", async () => {
++	const { runUpdateCommand } = await import("../../src/cli/update-cli");
++	const original = globalThis.fetch;
++	globalThis.fetch = (async () => {
++		throw new Error("offline");
++	}) as unknown as typeof fetch;
++	try {
++		await expect(runUpdateCommand({ force: false, check: true })).rejects.toThrow("upstream fallback is disabled");
++	} finally {
++		globalThis.fetch = original;
++	}
++});
 diff --git a/packages/coding-agent/test/cli/update-cli.test.ts b/packages/coding-agent/test/cli/update-cli.test.ts
-index 9e9ccc2..7da927f 100644
+index 9e9ccc2fd3..7da927f493 100644
 --- a/packages/coding-agent/test/cli/update-cli.test.ts
 +++ b/packages/coding-agent/test/cli/update-cli.test.ts
 @@ -1,128 +1,12 @@
@@ -2757,10 +3288,10 @@ index 9e9ccc2..7da927f 100644
  	afterEach(() => {
 diff --git a/packages/coding-agent/test/extension-session-admission.test.ts b/packages/coding-agent/test/extension-session-admission.test.ts
 new file mode 100644
-index 0000000..5b17cc7
+index 0000000000..d04d515853
 --- /dev/null
 +++ b/packages/coding-agent/test/extension-session-admission.test.ts
-@@ -0,0 +1,421 @@
+@@ -0,0 +1,540 @@
 +import { afterAll, afterEach, beforeAll, describe, expect, it, vi } from "bun:test";
 +import * as fs from "node:fs";
 +import { type } from "@oh-my-pi/omptype";
@@ -2772,7 +3303,11 @@ index 0000000..5b17cc7
 +import { Settings } from "@oh-my-pi/pi-coding-agent/config/settings";
 +import { ExtensionRuntime, loadExtensionFromFactory } from "@oh-my-pi/pi-coding-agent/extensibility/extensions/loader";
 +import { ExtensionRunner } from "@oh-my-pi/pi-coding-agent/extensibility/extensions/runner";
-+import type { ExtensionAgentIdentity, ExtensionContext, ExtensionFactory } from "@oh-my-pi/pi-coding-agent/extensibility/extensions/types";
++import type {
++	ExtensionAgentIdentity,
++	ExtensionContext,
++	ExtensionFactory,
++} from "@oh-my-pi/pi-coding-agent/extensibility/extensions/types";
 +import { initializeExtensions } from "@oh-my-pi/pi-coding-agent/modes/runtime-init";
 +import { AgentSession } from "@oh-my-pi/pi-coding-agent/session/agent-session";
 +import { AuthStorage } from "@oh-my-pi/pi-coding-agent/session/auth-storage";
@@ -2799,43 +3334,68 @@ index 0000000..5b17cc7
 +	for (const dir of dirs.splice(0)) await dir.remove();
 +});
 +
-+async function harness(options: {
-+	manager?: SessionManager;
-+	messages?: AgentMessage[];
-+	tools?: AgentTool[];
-+	identity?: ExtensionAgentIdentity;
-+	extension?: ExtensionFactory;
-+	providerSessionId?: string;
-+	beforeRequest?: (ctx: ExtensionContext, options?: SimpleStreamOptions) => Promise<void>;
-+	model?: MockModelOptions;
-+} = {}) {
++async function harness(
++	options: {
++		manager?: SessionManager;
++		messages?: AgentMessage[];
++		tools?: AgentTool[];
++		identity?: ExtensionAgentIdentity;
++		extension?: ExtensionFactory;
++		providerSessionId?: string;
++		beforeRequest?: (ctx: ExtensionContext, options?: SimpleStreamOptions) => Promise<void>;
++		model?: MockModelOptions;
++	} = {},
++) {
 +	const dir = TempDir.createSync("@pi-pending-turn-");
 +	dirs.push(dir);
 +	const manager = options.manager ?? SessionManager.create(dir.path(), dir.path());
 +	const mock = createMockModel(options.model ?? { responses: [{ content: ["complete"] }] });
 +	const settings = Settings.isolated({
-+		"compaction.enabled": false, "retry.enabled": false, "todo.enabled": false, "todo.reminders": false,
++		"compaction.enabled": false,
++		"retry.enabled": false,
++		"todo.enabled": false,
++		"todo.reminders": false,
 +	});
 +	settings.setModelRole("default", `${mock.provider}/${mock.id}`);
 +	const runtime = new ExtensionRuntime();
 +	const extensions = options.extension
 +		? [await loadExtensionFromFactory(options.extension, dir.path(), new EventBus(), runtime)]
 +		: [];
-+	const runner = new ExtensionRunner(extensions, runtime, dir.path(), manager, modelRegistry,
-+		undefined, settings, undefined, undefined, options.identity);
++	const runner = new ExtensionRunner(
++		extensions,
++		runtime,
++		dir.path(),
++		manager,
++		modelRegistry,
++		undefined,
++		settings,
++		undefined,
++		undefined,
++		options.identity,
++	);
 +	const agent = new Agent({
 +		getApiKey: () => "test-key",
-+		initialState: { model: mock, systemPrompt: ["Test"], tools: options.tools ?? [],
-+			messages: options.messages ?? manager.buildSessionContext().messages },
++		initialState: {
++			model: mock,
++			systemPrompt: ["Test"],
++			tools: options.tools ?? [],
++			messages: options.messages ?? manager.buildSessionContext().messages,
++		},
 +		convertToLlm,
 +		streamFn: async (model, context, streamOptions) => {
 +			await options.beforeRequest?.(runner.createContext(), streamOptions);
 +			return mock.stream(model, context, streamOptions);
 +		},
 +	});
-+	const session = new AgentSession({ agent, sessionManager: manager, settings, modelRegistry,
++	const session = new AgentSession({
++		agent,
++		sessionManager: manager,
++		settings,
++		modelRegistry,
 +		providerSessionId: options.providerSessionId,
-+		toolRegistry: new Map((options.tools ?? []).map(tool => [tool.name, tool])), extensionRunner: runner });
++		toolRegistry: new Map((options.tools ?? []).map(tool => [tool.name, tool])),
++		extensionRunner: runner,
++	});
 +	sessions.push(session);
 +	await initializeExtensions(session, { reportSendError: () => {}, reportRuntimeError: () => {} });
 +	return { session, manager, mock, ctx: runner.createContext(), runner, dir };
@@ -2844,10 +3404,23 @@ index 0000000..5b17cc7
 +const user: AgentMessage = { role: "user", content: [{ type: "text", text: "do the saved work" }], timestamp: 1 };
 +
 +function completedToolTurn(): AgentMessage[] {
-+	return [user, { ...createAssistantMessage(""), stopReason: "toolUse",
-+		content: [{ type: "toolCall", id: "effect-1", name: "effect", arguments: {} }], timestamp: 2 },
-+		{ role: "toolResult", toolCallId: "effect-1", toolName: "effect", content: [{ type: "text", text: "already done" }],
-+			isError: false, timestamp: 3 }];
++	return [
++		user,
++		{
++			...createAssistantMessage(""),
++			stopReason: "toolUse",
++			content: [{ type: "toolCall", id: "effect-1", name: "effect", arguments: {} }],
++			timestamp: 2,
++		},
++		{
++			role: "toolResult",
++			toolCallId: "effect-1",
++			toolName: "effect",
++			content: [{ type: "text", text: "already done" }],
++			isError: false,
++			timestamp: 3,
++		},
++	];
 +}
 +
 +describe("supported extension session durability and unsent continuation", () => {
@@ -2857,20 +3430,28 @@ index 0000000..5b17cc7
 +	] satisfies ExtensionAgentIdentity[]) {
 +		it(`persists the first ${identity.kind} prompt before provider dispatch without inventing an assistant`, async () => {
 +			let durableRoles: string[] = [];
-+			const { session, manager } = await harness({ identity, beforeRequest: async (ctx, options) => {
-+				if (options?.requestKind !== "primary" || options.sessionId !== ctx.providerSessionId) {
-+					throw new Error("Missing primary request owner");
-+				}
-+				await ctx.persistSession();
-+				const file = ctx.sessionManager.getSessionFile();
-+				if (!file) throw new Error("missing session path");
-+				const entries = Bun.JSONL.parse(await Bun.file(file).text()) as Array<{ type: string; message?: AgentMessage }>;
-+				durableRoles = entries.filter(entry => entry.type === "message").map(entry => entry.message!.role);
-+			} });
++			const { session, manager } = await harness({
++				identity,
++				beforeRequest: async (ctx, options) => {
++					if (options?.requestKind !== "primary" || options.sessionId !== ctx.providerSessionId) {
++						throw new Error("Missing primary request owner");
++					}
++					await ctx.persistSession();
++					const file = ctx.sessionManager.getSessionFile();
++					if (!file) throw new Error("missing session path");
++					const entries = Bun.JSONL.parse(await Bun.file(file).text()) as Array<{
++						type: string;
++						message?: AgentMessage;
++					}>;
++					durableRoles = entries.filter(entry => entry.type === "message").map(entry => entry.message!.role);
++				},
++			});
 +			await session.prompt("first real prompt");
 +			await session.waitForIdle();
 +			expect(durableRoles).toEqual(["user"]);
-+			expect(manager.getEntries().filter(entry => entry.type === "message" && entry.message.role === "user")).toHaveLength(1);
++			expect(
++				manager.getEntries().filter(entry => entry.type === "message" && entry.message.role === "user"),
++			).toHaveLength(1);
 +		});
 +	}
 +
@@ -2908,8 +3489,9 @@ index 0000000..5b17cc7
 +		await session.prompt("reset owner");
 +		await session.waitForIdle();
 +		expect(owners).toEqual(["initial-provider-id", fresh!.sessionId, resetId]);
-+		expect(mock.calls[2].context.messages.filter(message => message.role === "user").map(message => message.content))
-+			.toEqual([[{ type: "text", text: "reset owner" }]]);
++		expect(
++			mock.calls[2].context.messages.filter(message => message.role === "user").map(message => message.content),
++		).toEqual([[{ type: "text", text: "reset owner" }]]);
 +	});
 +
 +	it("leaves an admission pause terminal until explicitly resumed, with one original user", async () => {
@@ -2920,9 +3502,11 @@ index 0000000..5b17cc7
 +			beforeRequest: async context => {
 +				attempts++;
 +				await context.persistSession();
-+				if (paused) throw Object.assign(new Error("Admission wait budget exhausted"), {
-+					code: "BRIDGE_ADMISSION_PAUSED", status: 400,
-+				});
++				if (paused)
++					throw Object.assign(new Error("Admission wait budget exhausted"), {
++						code: "BRIDGE_ADMISSION_PAUSED",
++						status: 400,
++					});
 +			},
 +			extension: pi => {
 +				pi.on("session_stop", () => {
@@ -2945,18 +3529,37 @@ index 0000000..5b17cc7
 +		await session.waitForIdle();
 +		expect(attempts).toBe(2);
 +		expect(mock.calls[0].context.messages.map(message => message.role)).toEqual(["user"]);
-+		expect(manager.getEntries().filter(entry => entry.type === "message" && entry.message.role === "user")).toHaveLength(1);
-+		expect(manager.getEntries().filter(entry =>
-+			entry.type === "message" && entry.message.role === "assistant" &&
-+			entry.message.errorCode === "BRIDGE_ADMISSION_PAUSED")).toHaveLength(1);
++		expect(
++			manager.getEntries().filter(entry => entry.type === "message" && entry.message.role === "user"),
++		).toHaveLength(1);
++		expect(
++			manager
++				.getEntries()
++				.filter(
++					entry =>
++						entry.type === "message" &&
++						entry.message.role === "assistant" &&
++						entry.message.errorCode === "BRIDGE_ADMISSION_PAUSED",
++				),
++		).toHaveLength(1);
 +	});
 +
 +	it("resumes a reopened output-free pause after completed tools without replaying their effects", async () => {
 +		let effects = 0;
-+		const tool: AgentTool = { name: "effect", label: "Effect", description: "Record an effect", parameters: type({}),
-+			execute: async () => { effects++; return { content: [{ type: "text", text: "executed" }] }; } };
++		const tool: AgentTool = {
++			name: "effect",
++			label: "Effect",
++			description: "Record an effect",
++			parameters: type({}),
++			execute: async () => {
++				effects++;
++				return { content: [{ type: "text", text: "executed" }] };
++			},
++		};
 +		const pause: AssistantMessage = {
-+			...createAssistantMessage(""), content: [], stopReason: "error",
++			...createAssistantMessage(""),
++			content: [],
++			stopReason: "error",
 +			errorMessage: "[BRIDGE_ADMISSION_PAUSED] count budget exhausted",
 +		};
 +		const first = await harness({ messages: [...completedToolTurn(), pause] });
@@ -2973,7 +3576,11 @@ index 0000000..5b17cc7
 +		await next.session.waitForIdle();
 +		expect(effects).toBe(0);
 +		expect(next.mock.calls).toHaveLength(1);
-+		expect(next.mock.calls[0].context.messages.map(message => message.role)).toEqual(["user", "assistant", "toolResult"]);
++		expect(next.mock.calls[0].context.messages.map(message => message.role)).toEqual([
++			"user",
++			"assistant",
++			"toolResult",
++		]);
 +	});
 +
 +	it("never automatically recovers or explicitly resumes permanent admission setup failures", async () => {
@@ -2984,11 +3591,15 @@ index 0000000..5b17cc7
 +				attempts++;
 +				await context.persistSession();
 +				throw Object.assign(new Error("[BRIDGE_ADMISSION_STOPPED] invalid admission configuration"), {
-+					code: "BRIDGE_ADMISSION_STOPPED", status: 400,
++					code: "BRIDGE_ADMISSION_STOPPED",
++					status: 400,
 +				});
 +			},
 +			extension: pi => {
-+				pi.on("session_stop", () => { stopHooks++; return { continue: true }; });
++				pi.on("session_stop", () => {
++					stopHooks++;
++					return { continue: true };
++				});
 +			},
 +		});
 +		session.setAutoRetryEnabled(true);
@@ -3014,8 +3625,11 @@ index 0000000..5b17cc7
 +			const { ctx, manager, mock } = await harness({ messages: [user] });
 +			manager.appendMessage(user);
 +			manager.appendMessage({
-+				...createAssistantMessage(""), content: [], stopReason: "error",
-+				errorCode: "BRIDGE_ADMISSION_PAUSED", ...fields,
++				...createAssistantMessage(""),
++				content: [],
++				stopReason: "error",
++				errorCode: "BRIDGE_ADMISSION_PAUSED",
++				...fields,
 +			});
 +			expect(await ctx.resumePendingTurn()).toBe(false);
 +			expect(mock.calls).toEqual([]);
@@ -3025,7 +3639,8 @@ index 0000000..5b17cc7
 +	it("does not mistake discarded incomplete tool output for a pre-send pause", async () => {
 +		const model = createMockModel({ responses: [] });
 +		const partial: AssistantMessage = {
-+			...createAssistantMessage(""), stopReason: "toolUse",
++			...createAssistantMessage(""),
++			stopReason: "toolUse",
 +			content: [{ type: "toolCall", id: "partial", name: "effect", arguments: {} }],
 +		};
 +		const agent = new Agent({
@@ -3034,9 +3649,11 @@ index 0000000..5b17cc7
 +				const stream = new AssistantMessageEventStream();
 +				stream.push({ type: "start", partial });
 +				stream.push({ type: "toolcall_start", contentIndex: 0, partial });
-+				stream.fail(Object.assign(new Error("[BRIDGE_ADMISSION_PAUSED] invalid after output"), {
-+					code: "BRIDGE_ADMISSION_PAUSED",
-+				}));
++				stream.fail(
++					Object.assign(new Error("[BRIDGE_ADMISSION_PAUSED] invalid after output"), {
++						code: "BRIDGE_ADMISSION_PAUSED",
++					}),
++				);
 +				return stream;
 +			},
 +		});
@@ -3058,23 +3675,38 @@ index 0000000..5b17cc7
 +		sessions.splice(sessions.indexOf(first.session), 1);
 +		const reopened = await SessionManager.open(file);
 +		const admissions: boolean[] = [];
-+		const next = await harness({ manager: reopened, extension: pi => {
-+			pi.on("session_start", async (_event, ctx) => {
-+				admissions.push(...await Promise.all([ctx.resumePendingTurn(), ctx.resumePendingTurn()]));
-+			});
-+		} });
++		const next = await harness({
++			manager: reopened,
++			extension: pi => {
++				pi.on("session_start", async (_event, ctx) => {
++					admissions.push(...(await Promise.all([ctx.resumePendingTurn(), ctx.resumePendingTurn()])));
++				});
++			},
++		});
 +		await next.session.waitForIdle();
 +		expect(admissions).toEqual([true, false]);
 +		expect(next.mock.calls).toHaveLength(1);
-+		expect(next.mock.calls[0].context.messages.filter(message => message.role === "user").map(message => message.content)).toEqual([user.content]);
-+		expect(reopened.getEntries().filter(entry => entry.type === "message" && entry.message.role === "user")).toHaveLength(1);
++		expect(
++			next.mock.calls[0].context.messages.filter(message => message.role === "user").map(message => message.content),
++		).toEqual([user.content]);
++		expect(
++			reopened.getEntries().filter(entry => entry.type === "message" && entry.message.role === "user"),
++		).toHaveLength(1);
 +		expect(await next.ctx.resumePendingTurn()).toBe(false);
 +	});
 +
 +	it("continues after real tool results without executing their effects again", async () => {
 +		let effects = 0;
-+		const tool: AgentTool = { name: "effect", label: "Effect", description: "Record an effect", parameters: type({}),
-+			execute: async () => { effects++; return { content: [{ type: "text", text: "executed" }] }; } };
++		const tool: AgentTool = {
++			name: "effect",
++			label: "Effect",
++			description: "Record an effect",
++			parameters: type({}),
++			execute: async () => {
++				effects++;
++				return { content: [{ type: "text", text: "executed" }] };
++			},
++		};
 +		const { ctx, session, mock } = await harness({ messages: completedToolTurn(), tools: [tool] });
 +		expect(await ctx.resumePendingTurn()).toBe(true);
 +		await session.waitForIdle();
@@ -3113,7 +3745,9 @@ index 0000000..5b17cc7
 +	it("fails closed on stable-storage errors before dispatch", async () => {
 +		const { ctx, manager, mock } = await harness({ messages: [user] });
 +		await ctx.persistSession();
-+		const sync = vi.spyOn(fs, "fsyncSync").mockImplementation(() => { throw new Error("disk unavailable"); });
++		const sync = vi.spyOn(fs, "fsyncSync").mockImplementation(() => {
++			throw new Error("disk unavailable");
++		});
 +		try {
 +			await expect(ctx.resumePendingTurn()).rejects.toThrow("disk unavailable");
 +			expect(mock.calls).toEqual([]);
@@ -3131,10 +3765,18 @@ index 0000000..5b17cc7
 +	});
 +
 +	it("does not replay an execution-unknown provider request even with automatic retry enabled", async () => {
-+		const { session, mock, manager } = await harness({ model: { responses: [
-+			{ content: [], stopReason: "error", errorMessage: '503 {"error":{"code":"BRIDGE_EXECUTION_UNKNOWN","message":"service unavailable"}}' },
-+			{ content: ["must not be requested"] },
-+		] } });
++		const { session, mock, manager } = await harness({
++			model: {
++				responses: [
++					{
++						content: [],
++						stopReason: "error",
++						errorMessage: '503 {"error":{"code":"BRIDGE_EXECUTION_UNKNOWN","message":"service unavailable"}}',
++					},
++					{ content: ["must not be requested"] },
++				],
++			},
++		});
 +		session.setAutoRetryEnabled(true);
 +		const retries: string[] = [];
 +		session.subscribe(event => {
@@ -3144,8 +3786,12 @@ index 0000000..5b17cc7
 +		await session.waitForIdle();
 +		expect(mock.calls).toHaveLength(1);
 +		expect(retries).toEqual([]);
-+		const errors = manager.getEntries().filter(entry =>
-+			entry.type === "message" && entry.message.role === "assistant" && entry.message.stopReason === "error");
++		const errors = manager
++			.getEntries()
++			.filter(
++				entry =>
++					entry.type === "message" && entry.message.role === "assistant" && entry.message.stopReason === "error",
++			);
 +		expect(errors).toHaveLength(1);
 +	});
 +
@@ -3170,7 +3816,11 @@ index 0000000..5b17cc7
 +		const entered = Promise.withResolvers<void>();
 +		const release = Promise.withResolvers<void>();
 +		const flush = manager.flush.bind(manager);
-+		vi.spyOn(manager, "flush").mockImplementation(async () => { entered.resolve(); await release.promise; await flush(); });
++		vi.spyOn(manager, "flush").mockImplementation(async () => {
++			entered.resolve();
++			await release.promise;
++			await flush();
++		});
 +		const resume = ctx.resumePendingTurn();
 +		const settled = resume.catch(error => error);
 +		await entered.promise;
@@ -3183,7 +3833,7 @@ index 0000000..5b17cc7
 +	});
 +});
 diff --git a/packages/coding-agent/test/extensions-runner.test.ts b/packages/coding-agent/test/extensions-runner.test.ts
-index 52d64eb..67dfd59 100644
+index 07a8525175..748acf5912 100644
 --- a/packages/coding-agent/test/extensions-runner.test.ts
 +++ b/packages/coding-agent/test/extensions-runner.test.ts
 @@ -15,7 +15,7 @@ import { getBundledModel } from "@oh-my-pi/pi-catalog/models";
@@ -3297,10 +3947,10 @@ index 52d64eb..67dfd59 100644
  		const dirA = tempDir.join("dirA");
  		const dirB = tempDir.join("dirB");
 diff --git a/packages/coding-agent/test/task/structured-subagent.test.ts b/packages/coding-agent/test/task/structured-subagent.test.ts
-index 809191d..a99986e 100644
+index 22668671c1..a38ca68b2f 100644
 --- a/packages/coding-agent/test/task/structured-subagent.test.ts
 +++ b/packages/coding-agent/test/task/structured-subagent.test.ts
-@@ -32,6 +32,8 @@ import * as discoveryModule from "@oh-my-pi/pi-coding-agent/task/discovery";
+@@ -40,6 +40,8 @@ import * as discoveryModule from "@oh-my-pi/pi-coding-agent/task/discovery";
  import { createEvalCustomTools } from "@oh-my-pi/pi-coding-agent/task/eval-tools";
  import * as executorModule from "@oh-my-pi/pi-coding-agent/task/executor";
  import * as isolationRunner from "@oh-my-pi/pi-coding-agent/task/isolation-runner";
@@ -3309,7 +3959,7 @@ index 809191d..a99986e 100644
  import {
  	buildStructuredSubagentRecoveryHint,
  	resolveEffectiveSubagentPolicy,
-@@ -651,6 +653,92 @@ describe("structured subagent primitive", () => {
+@@ -728,6 +730,92 @@ describe("structured subagent primitive", () => {
  		await fs.rm(settled.artifactsDir, { recursive: true, force: true });
  	});
  
@@ -3402,8 +4052,8 @@ index 809191d..a99986e 100644
  	it("rejects dispatch before leasing artifacts when an extension blocks the spawn", async () => {
  		mockDiscovery();
  		const blockedSession = session();
-@@ -1091,25 +1179,6 @@ describe("structured subagent primitive", () => {
- 		await fs.rm(restrictedRun.artifactsDir, { recursive: true, force: true });
+@@ -1231,26 +1319,6 @@ describe("structured subagent primitive", () => {
+ 		]);
  	});
  
 -	it("unregisters and removes a temporary lease when output ID allocation fails", async () => {
@@ -3425,14 +4075,15 @@ index 809191d..a99986e 100644
 -		expect(artifactsDirsFromRegistry()).toEqual([]);
 -		await expect(fs.stat(artifactsDir as string)).rejects.toThrow();
 -	});
- 
+-
  	it("unregisters and removes a temporary lease when plan reference loading fails", async () => {
  		mockDiscovery();
+ 		vi.spyOn(planHandoff, "loadOverallPlanReference").mockRejectedValue(new Error("plan unavailable"));
 diff --git a/packages/coding-agent/test/turn-recovery-replay-unsafe.test.ts b/packages/coding-agent/test/turn-recovery-replay-unsafe.test.ts
-index 22c80a5..e97d38e 100644
+index c757f63673..2b9037c3ce 100644
 --- a/packages/coding-agent/test/turn-recovery-replay-unsafe.test.ts
 +++ b/packages/coding-agent/test/turn-recovery-replay-unsafe.test.ts
-@@ -135,6 +135,49 @@ describe("TurnRecovery replay-unsafe output classification", () => {
+@@ -140,6 +140,49 @@ describe("TurnRecovery replay-unsafe output classification", () => {
  		tempDir.removeSync();
  	});
  
@@ -3483,10 +4134,10 @@ index 22c80a5..e97d38e 100644
  		const fallback = getBundledModel("openai", "gpt-4o-mini");
  		if (!fallback) throw new Error("Expected bundled fallback model");
 diff --git a/packages/coding-agent/test/update-cli.test.ts b/packages/coding-agent/test/update-cli.test.ts
-index fc02ccb..15d495f 100644
+index acee3dad8e..7cdaba5f9f 100644
 --- a/packages/coding-agent/test/update-cli.test.ts
 +++ b/packages/coding-agent/test/update-cli.test.ts
-@@ -868,30 +868,6 @@ describe("migrateRenamedInstall transaction", () => {
+@@ -869,30 +869,6 @@ describe("migrateRenamedInstall transaction", () => {
  		expect(logs.some(line => line.includes("could not remove the old"))).toBe(true);
  	});
  
@@ -3517,31 +4168,15 @@ index fc02ccb..15d495f 100644
  });
  
  describe("update-cli bun install command", () => {
-diff --git a/packages/utils/CHANGELOG.md b/packages/utils/CHANGELOG.md
-index dfed1ee..e6920b1 100644
---- a/packages/utils/CHANGELOG.md
-+++ b/packages/utils/CHANGELOG.md
-@@ -129,6 +129,11 @@
- ### Fixed
- 
- - Fixed an unhandled rejection when a subprocess is spawned with an already-aborted signal ([#15750](https://github.com/can1357/oh-my-pi/pull/15750) by [@harshaygadekar](https://github.com/harshaygadekar))
-+## [18.12.0-ojak.1] - 2026-10-16
-+
-+### Changed
-+
-+- Identify the coupled Ojak durable-admission fork in CLI version output and client metadata.
- 
- ## [18.10.0] - 2026-10-12
- 
 diff --git a/packages/utils/package.json b/packages/utils/package.json
-index 2fe13a7..5087feb 100644
+index c2f7f54569..53680a177d 100644
 --- a/packages/utils/package.json
 +++ b/packages/utils/package.json
 @@ -1,6 +1,6 @@
  {
  	"name": "@oh-my-pi/pi-utils",
--	"version": "18.15.0",
-+	"version": "18.15.0-ojak.1",
+-	"version": "18.18.9",
++	"version": "18.18.9-ojak.1",
  	"description": "Shared utilities for pi packages",
  	"keywords": [
  		"cli",

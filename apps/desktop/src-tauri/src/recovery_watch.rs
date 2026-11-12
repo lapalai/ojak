@@ -472,7 +472,8 @@ mod tests {
             quota_summaries,
             api_credit_removed: None,
             openai_api_removed: None,
-            api_credit_grant: None,
+            api_credit_grants: Vec::new(),
+            api_credit_billings: Vec::new(),
             service_version: None,
         }
     }

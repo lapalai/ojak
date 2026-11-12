@@ -226,24 +226,42 @@ fn summary_groups_api_keys_separately_and_activates_only_when_subscriptions_are_
     assert!(shown.iter().any(|summary| summary.kind == "extra"));
 }
 
-/// 키가 여럿이면 상한은 모든 키의 합계로 본다(같은 Console 조직의 키는 잔액을 공유). 각각 $150인 키 둘이면 $300이라
-/// 상한 $200에서 어느 키도 고르지 않고, 요약도 두 키 모두 상한 도달로 보인다. 상한 안이면 덜 쓴 키를 먼저 고른다.
+/// 월 상한은 키마다 따로 적용한다. 각각 $150인 키 둘은 합계가 $300이어도 상한 $200 아래라 둘 다 후보이고(덜 쓴 키·동률이면 id 순),
+/// 한 키가 $200에 닿아도 다른 키는 계속 후보다. 모든 키가 각자의 상한에 닿았을 때만 아무 키도 고르지 않고 요약도 상한 도달로 보인다.
 #[test]
-fn monthly_cap_is_combined_across_keys_and_least_used_key_goes_first() {
+fn monthly_cap_is_applied_per_key_and_least_used_key_goes_first() {
     let now = now_ms();
     let mut spent = account_fixture("spent", now);
     spend(&mut spent);
+    // 각각 상한 아래: 합계($300)가 상한($200)을 넘어도 둘 다 후보다.
     let pair = [spent.clone(), api_account("a", 150.0, now), api_account("b", 150.0, now)];
-    let blocked = decide(&pair, &on(), &headless(), now);
-    assert_eq!(blocked.selected_account_id, None);
+    let open = decide(&pair, &on(), &headless(), now);
+    assert_eq!(open.selected_account_id.as_deref(), Some("a"));
     for id in ["a", "b"] {
-        assert!(reasons(&blocked, id).iter().any(|reason| reason.starts_with("API_CREDIT_LIMIT:")), "{id}");
+        assert!(!reasons(&open, id).iter().any(|reason| reason.starts_with("API_CREDIT_LIMIT:")), "{id}");
     }
     let summaries = crate::quota_summary::summaries(&pair, &on(), &[], now);
     for id in ["a", "b"] {
         let summary = summaries.iter().find(|summary| summary.account_ids == [id.to_owned()]).unwrap();
-        assert_eq!(summary.kind, "resting", "{id}");
-        assert!(summary.api_credit.as_ref().unwrap().limit_reached, "{id}");
+        assert_eq!(summary.kind, "api-credit", "{id}");
+        assert!(!summary.api_credit.as_ref().unwrap().limit_reached, "{id}");
+    }
+    // 한 키가 상한에 닿아도 다른 키는 열려 있다.
+    let one_capped = [spent.clone(), api_account("a", 200.0, now), api_account("b", 150.0, now)];
+    let decision = decide(&one_capped, &on(), &headless(), now);
+    assert_eq!(decision.selected_account_id.as_deref(), Some("b"));
+    assert!(reasons(&decision, "a").iter().any(|reason| reason.starts_with("API_CREDIT_LIMIT:")));
+    assert!(!reasons(&decision, "b").iter().any(|reason| reason.starts_with("API_CREDIT_LIMIT:")));
+    let summaries = crate::quota_summary::summaries(&one_capped, &on(), &[], now);
+    let summary = |id: &str| summaries.iter().find(|summary| summary.account_ids == [id.to_owned()]).unwrap();
+    assert_eq!((summary("a").kind.as_str(), summary("a").api_credit.as_ref().unwrap().limit_reached), ("resting", true));
+    assert_eq!((summary("b").kind.as_str(), summary("b").api_credit.as_ref().unwrap().limit_reached), ("api-credit", false));
+    // 모든 키가 각자의 상한에 닿으면 아무 키도 고르지 않는다.
+    let all_capped = [spent.clone(), api_account("a", 200.0, now), api_account("b", 250.0, now)];
+    let blocked = decide(&all_capped, &on(), &headless(), now);
+    assert_eq!(blocked.selected_account_id, None);
+    for id in ["a", "b"] {
+        assert!(reasons(&blocked, id).iter().any(|reason| reason.starts_with("API_CREDIT_LIMIT:")), "{id}");
     }
     let roomy = [spent, api_account("a", 90.0, now), api_account("b", 20.0, now)];
     assert_eq!(decide(&roomy, &on(), &headless(), now).selected_account_id.as_deref(), Some("b"));
@@ -427,10 +445,11 @@ fn headless_request(id: &str) -> Acquire {
     request
 }
 
-/// 키를 지워도 이번 달 사용액은 월 상한 합계에 남는다: A가 쓰고 → A를 지우고 → B를 두어도 상한은 A의 사용액을 포함한다.
-/// 배정(`lease.acquire`)·경로 설명(`route.explain`)·스냅샷 요약과 합계가 모두 같은 원장 값을 쓰고, 지운 키는 후보·계정 목록에 나타나지 않는다.
+/// 키를 지워도 이번 달 사용액은 원장에 남지만(`apiCreditRemoved`, 표시용) 다른 Claude 키의 월 상한을 줄이지 않는다.
+/// 월 상한은 키마다 따로 적용하므로 A($150)를 지운 뒤에도 새 키 B는 자기 사용액만으로 $200까지 쓸 수 있다.
+/// 배정(`lease.acquire`)·경로 설명(`route.explain`)·스냅샷 요약이 모두 같은 기준이고, 지운 키는 후보·계정 목록에 나타나지 않는다.
 #[test]
-fn removed_key_spend_stays_in_the_combined_cap_for_allocation_and_snapshot() {
+fn removed_key_spend_is_reporting_only_and_does_not_reduce_another_keys_own_cap() {
     let fixture = Fixture::new();
     let now = now_ms();
     let removed_id = format!("ledger-removal-test-{}", new_id());
@@ -439,13 +458,24 @@ fn removed_key_spend_stays_in_the_combined_cap_for_allocation_and_snapshot() {
     fixture.service.dispatch("policy.update", json!({"expectedRevision": 1, "useApiCreditAfterLimit": true, "apiCreditMonthlyLimitUsd": 200.0})).unwrap();
     fixture.service.dispatch("account.remove", json!({"id": removed_id})).unwrap();
     assert!(accounts(&fixture.service.lock().unwrap().connection).unwrap().iter().all(|account| account.id != removed_id));
-    // 새 키 B는 합계($150) 안이라 배정된다.
+    // 새 키 B는 A의 지운 사용액과 무관하게 배정된다.
     fixture.save(&api_account("b", 0.0, now));
     let grant = fixture.service.acquire(headless_request("after-remove"), now).unwrap();
     assert!(grant.api_credit_fallback);
     assert_eq!(grant.account.id, "b");
-    // B가 $60을 쓰면 합계는 $210이다. A가 지워졌어도 상한($200)에 닿아 더는 배정하지 않는다.
-    record_api_credit(&mut fixture.service.lock().unwrap().connection, "b", Some(60.0), now).unwrap();
+    // B가 $60을 써도(A의 $150과 합쳐 $210) B 자신은 상한($200) 아래라 계속 배정된다.
+    record_api_credit(&mut fixture.service.lock().unwrap().connection, "b", None, Some(60.0), now).unwrap();
+    assert_eq!(fixture.service.acquire(headless_request("still-open"), now).unwrap().account.id, "b");
+    let snapshot = fixture.service.snapshot().unwrap();
+    assert_eq!(snapshot.accounts.iter().filter(|account| account.tool == "api").map(|account| account.id.as_str()).collect::<Vec<_>>(), ["b"]);
+    let removed = snapshot.api_credit_removed.expect("지운 키의 이번 달 사용액이 스냅샷에 실려야 한다");
+    assert_eq!((removed.period_start, removed.used_usd), (keys::period_start(now), 150.0));
+    let b = snapshot.quota_summaries.iter().find(|summary| summary.account_ids == ["b".to_owned()]).unwrap();
+    let facts = b.api_credit.as_ref().unwrap();
+    assert_eq!(facts.used_usd, 60.0);
+    assert!(!facts.limit_reached);
+    // B 자신이 상한($200)에 닿아야 더는 배정하지 않고 사유를 남긴다.
+    record_api_credit(&mut fixture.service.lock().unwrap().connection, "b", None, Some(140.0), now).unwrap();
     assert_eq!(fixture.service.acquire(headless_request("over-cap"), now).unwrap_err().code, "NO_ELIGIBLE_ACCOUNT");
     let explained = fixture.service.dispatch(
         "route.explain",
@@ -454,19 +484,55 @@ fn removed_key_spend_stays_in_the_combined_cap_for_allocation_and_snapshot() {
     assert!(explained["candidates"].as_array().unwrap().iter().any(|candidate| candidate["accountId"] == "b"
         && candidate["reasons"].as_array().unwrap().iter().any(|reason| reason.as_str().unwrap().starts_with("API_CREDIT_LIMIT:"))));
     assert!(explained["candidates"].as_array().unwrap().iter().all(|candidate| candidate["accountId"] != removed_id));
-    // 스냅샷: 합계 원장은 지운 키 몫만, 요약은 B의 사용액에 상한 도달을 알린다. 지운 키의 가짜 계정은 없다.
     let snapshot = fixture.service.snapshot().unwrap();
-    assert_eq!(snapshot.accounts.iter().filter(|account| account.tool == "api").map(|account| account.id.as_str()).collect::<Vec<_>>(), ["b"]);
-    let removed = snapshot.api_credit_removed.expect("지운 키의 이번 달 사용액이 스냅샷에 실려야 한다");
-    assert_eq!((removed.period_start, removed.used_usd), (keys::period_start(now), 150.0));
     let b = snapshot.quota_summaries.iter().find(|summary| summary.account_ids == ["b".to_owned()]).unwrap();
-    let facts = b.api_credit.as_ref().unwrap();
-    assert_eq!(facts.used_usd, 60.0);
-    assert!(facts.limit_reached);
+    assert!(b.api_credit.as_ref().unwrap().limit_reached);
     assert_eq!(b.kind, "resting");
 }
 
-/// 꺼 둔(enabled=false) 키의 사용액도 합계에 센다. 꺼 둔 키를 지워도 마찬가지다. 지운 뒤 같은 기간의 다음 달 값은 0부터다.
+/// 같은 키를 지웠다 다시 등록하면(식별자 `identity_key`가 같다) 지운 계정의 id를 이어 받아 이번 달 사용액이 그대로 따라온다(키별 월 상한 우회 방지).
+/// 다른 키는 식별자가 달라 새 id·0에서 시작한다. 기록에는 키 값이 아니라 식별자만 있다. 같은 id를 이미 쓰는 계정이 있으면 이어 받지 않는다.
+#[test]
+fn re_registering_the_same_key_resumes_its_monthly_spend_but_a_different_key_starts_fresh() {
+    let fixture = Fixture::new();
+    let now = now_ms();
+    fixture.save(&spent_claude(now));
+    fixture.save(&api_account("old", 180.0, now));
+    fixture.service.dispatch("policy.update", json!({"expectedRevision": 1, "useApiCreditAfterLimit": true, "apiCreditMonthlyLimitUsd": 200.0})).unwrap();
+    let identity = "apikey:old";
+    assert_eq!(store::reusable_api_key_id(&fixture.service.lock().unwrap().connection, identity).unwrap(), None);
+    fixture.service.dispatch("account.remove", json!({"id": "old"})).unwrap();
+    {
+        let store = fixture.service.lock().unwrap();
+        // 같은 식별자로 다시 등록하면 지운 계정 id를 이어 받고, 다른 식별자는 새 id다.
+        assert_eq!(store::reusable_api_key_id(&store.connection, identity).unwrap().as_deref(), Some("old"));
+        assert_eq!(store::reusable_api_key_id(&store.connection, "apikey:other").unwrap(), None);
+        let stored: String = store.connection.query_row("SELECT body FROM metadata WHERE key='apiKeyTombstone:apikey:old'", [], |row| row.get(0)).unwrap();
+        assert!(!stored.contains("sk-"), "{stored}");
+    }
+    // 이어 받은 id로 저장하면 원장의 이번 달 사용액($180)이 그대로 따라온다.
+    let mut again = api_account("old", 0.0, now);
+    again.api_credit = None;
+    save_account(&fixture.service.lock().unwrap().connection, &again).unwrap();
+    let resumed = account(&fixture.service.lock().unwrap().connection, "old").unwrap().api_credit.unwrap();
+    assert_eq!((resumed.period_start, resumed.used_usd), (keys::period_start(now), 180.0));
+    // 이미 그 id의 계정이 있으면 이어 받을 id가 없다.
+    assert_eq!(store::reusable_api_key_id(&fixture.service.lock().unwrap().connection, identity).unwrap(), None);
+    // 다른 키는 독립이라 자기 $200까지 쓸 수 있고, 다시 등록한 키는 $20만 남는다.
+    fixture.save(&api_account("fresh", 0.0, now));
+    let snapshot = fixture.service.snapshot().unwrap();
+    let summary = |id: &str| snapshot.quota_summaries.iter().find(|summary| summary.account_ids == [id.to_owned()]).unwrap().api_credit.clone().unwrap();
+    assert_eq!((summary("old").used_usd, summary("old").limit_reached), (180.0, false));
+    assert_eq!((summary("fresh").used_usd, summary("fresh").limit_reached), (0.0, false));
+    record_api_credit(&mut fixture.service.lock().unwrap().connection, "old", None, Some(25.0), now).unwrap();
+    let snapshot = fixture.service.snapshot().unwrap();
+    let old = snapshot.quota_summaries.iter().find(|summary| summary.account_ids == ["old".to_owned()]).unwrap();
+    assert!(old.api_credit.as_ref().unwrap().limit_reached);
+    let decision = fixture.service.acquire(headless_request("fresh-key"), now).unwrap();
+    assert_eq!(decision.account.id, "fresh");
+}
+
+/// 꺼 둔(enabled=false) 키와 지운 꺼 둔 키의 사용액도 원장에 남아 `apiCreditRemoved`로 보이지만 다른 키의 상한에는 들어가지 않는다. 지운 뒤 같은 기간의 다음 달 값은 0부터다.
 #[test]
 fn disabled_and_removed_disabled_keys_still_count_and_months_roll_over() {
     let fixture = Fixture::new();
@@ -477,23 +543,23 @@ fn disabled_and_removed_disabled_keys_still_count_and_months_roll_over() {
     off.enabled = false;
     let live = api_account("live", 60.0, now);
     let spent = spent_claude(now);
-    // 꺼 둔 키 $150 + 살아 있는 키 $60 = $210 > $200: 꺼 둔 키도 합계에 든다.
-    let blocked = decide(&[spent.clone(), off.clone(), live.clone()], &capped, &headless(), now);
-    assert_eq!(blocked.selected_account_id, None);
-    assert!(reasons(&blocked, "live").iter().any(|reason| reason.starts_with("API_CREDIT_LIMIT:")));
-    // 꺼 둔 키를 지운 뒤에도 같은 합계다.
+    // 꺼 둔 키 $150 + 살아 있는 키 $60: 상한은 키마다 따로라 살아 있는 키는 계속 후보다(꺼 둔 키는 후보가 아니다).
+    let open = decide(&[spent.clone(), off.clone(), live.clone()], &capped, &headless(), now);
+    assert_eq!(open.selected_account_id.as_deref(), Some("live"));
+    assert!(!reasons(&open, "live").iter().any(|reason| reason.starts_with("API_CREDIT_LIMIT:")));
+    // 꺼 둔 키를 지운 뒤에도 같다.
     fixture.save(&spent);
     fixture.save(&off);
     fixture.save(&live);
     fixture.service.dispatch("policy.update", json!({"expectedRevision": 1, "useApiCreditAfterLimit": true, "apiCreditMonthlyLimitUsd": 200.0})).unwrap();
     fixture.service.dispatch("account.remove", json!({"id": removed_id})).unwrap();
-    assert_eq!(fixture.service.acquire(headless_request("disabled-removed"), now).unwrap_err().code, "NO_ELIGIBLE_ACCOUNT");
+    assert_eq!(fixture.service.acquire(headless_request("disabled-removed"), now).unwrap().account.id, "live");
     let mut store = fixture.service.lock().unwrap();
     assert_eq!(api_credit_removed(&store.connection, keys::ApiProvider::Anthropic, now).unwrap().used_usd, 150.0);
     // 월 경계: 다음 달에는 지운 키의 이전 달 사용액이 합계에서 빠지고, 이전 달 행은 원장에 그대로 남는다.
     let next = keys::period_start(now) + 32 * 86_400_000;
     assert_eq!(api_credit_removed(&store.connection, keys::ApiProvider::Anthropic, next).unwrap().used_usd, 0.0);
-    record_api_credit(&mut store.connection, "live", Some(5.0), next).unwrap();
+    record_api_credit(&mut store.connection, "live", None, Some(5.0), next).unwrap();
     let this_month = account(&store.connection, "live").unwrap().api_credit.unwrap();
     assert_eq!((this_month.period_start, this_month.used_usd), (keys::period_start(next), 5.0));
     assert_eq!(api_credit_removed(&store.connection, keys::ApiProvider::Anthropic, now).unwrap().used_usd, 150.0);
@@ -537,6 +603,6 @@ fn saving_an_api_account_never_touches_the_ledger() {
     fixture.save(&api_account("api", 4.0, now));
     fixture.service.dispatch("account.update", json!({"id": "api", "enabled": false})).unwrap();
     fixture.service.dispatch("account.update", json!({"id": "api", "label": "renamed"})).unwrap();
-    record_api_credit(&mut fixture.service.lock().unwrap().connection, "api", Some(1.0), now).unwrap();
+    record_api_credit(&mut fixture.service.lock().unwrap().connection, "api", None, Some(1.0), now).unwrap();
     assert_eq!(account(&fixture.service.lock().unwrap().connection, "api").unwrap().api_credit.unwrap().used_usd, 5.0);
 }

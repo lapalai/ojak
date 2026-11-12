@@ -806,6 +806,30 @@ fn codex_one_shot(args: &[OsString]) -> bool {
     false
 }
 
+/// 기본 설정의 MCP 서버를 덧붙일 실행인지. Claude의 `--strict-mcp-config`는 MCP를 끄겠다는 뜻이라(할당량·신원 조회도 쓴다)
+/// 켜지 않는다. `--safe-mode`는 공식 CLI가 MCP를 모두 끄므로 건드리지 않는다.
+pub fn wants_shared_mcp(tool: &str, args: &[OsString]) -> bool {
+    if tool != "claude" {
+        return false;
+    }
+    let mut index = 0;
+    while index < args.len() {
+        let Some(text) = args[index].to_str() else { return false };
+        if text == "--" {
+            break;
+        }
+        let (name, inline) = text.split_once('=').map_or((text, false), |(name, _)| (name, true));
+        if matches!(name, "--strict-mcp-config" | "--safe-mode") {
+            return false;
+        }
+        if !inline && takes_option_value(tool, name) {
+            index += 1;
+        }
+        index += 1;
+    }
+    true
+}
+
 /// 대화 기록을 남기지 않는 실행인지. 기록이 없으면 한도 소진 증거도, 이어 열 대화도 없다.
 pub fn is_ephemeral(args: &[OsString]) -> bool {
     args.iter()
@@ -875,6 +899,22 @@ mod tests {
         for interactive in [&[][..], &["질문"], &["resume"], &["exec", "resume", "--last", "계속"], &["exec", "--model", "x", "resume"], &["-p", "질문"], &["login"], &["--", "exec"]] {
             assert!(!non_interactive("codex", &args(interactive)), "{interactive:?}");
         }
+    }
+
+    #[test]
+    fn shared_mcp_is_never_attached_to_runs_that_turn_mcp_off() {
+        assert!(wants_shared_mcp("claude", &args(&["-p", "질문"])));
+        assert!(wants_shared_mcp("claude", &args(&["--model", "sonnet"])));
+        // 할당량·신원 조회가 쓰는 엄격 모드와 안전 모드는 MCP를 끄는 실행이다.
+        assert!(!wants_shared_mcp("claude", &args(&["-p", "--strict-mcp-config", "질문"])));
+        assert!(!wants_shared_mcp("claude", &args(&["--safe-mode"])));
+        // `--` 뒤는 프롬프트 문장이다.
+        assert!(wants_shared_mcp("claude", &args(&["--", "--strict-mcp-config"])));
+        // 옵션 값에 포함된 글자는 MCP를 끄는 플래그가 아니다.
+        assert!(wants_shared_mcp("claude", &args(&["--append-system-prompt", "--strict-mcp-config", "-p", "질문"])));
+        assert!(wants_shared_mcp("claude", &args(&["--system-prompt=--safe-mode", "-p", "질문"])));
+        assert!(!wants_shared_mcp("claude", &args(&["--append-system-prompt", "--safe-mode", "--strict-mcp-config"])));
+        assert!(!wants_shared_mcp("codex", &args(&["exec", "질문"])));
     }
 
     #[test]

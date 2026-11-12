@@ -190,6 +190,8 @@ pub(crate) struct Candidate {
     pub api_credit: bool,
     /// API 키 후보의 이번 달 추정 사용액(USD). 새 대화에서 덜 쓴 키를 먼저 고르는 데만 쓴다(진행 중 대화는 고정 유지). 구독 후보는 0.
     pub api_used: f64,
+    /// API 키 후보가 후보를 만들 때(입장 시점) 속한 크레딧 풀 id. 응답이 끝난 뒤 사용액을 이 풀에 쌓는다(도중 풀 이동과 무관). 구독 후보·풀 밖 키는 `None`.
+    pub api_pool: Option<String>,
     /// 소비 균형 모드에서 구독이 남아 있어도 새 대화에 선제적으로 쓸 수 있는 API 키 후보일 때만 `Some`. 구독 후보는 `None`.
     /// 허용 기간이 진행 중이고, 사용량 미확인 요청이 없고, 남은 예산이 있고, 월 상한 아래일 때만 채운다.
     pub proactive: Option<Proactive>,
@@ -200,12 +202,14 @@ pub(crate) struct Candidate {
     pub use_before_reset_ms: i64,
 }
 
-/// 선제 사용이 열린 API 크레딧 후보의 판정 입력. 사용자가 확인한 허용 기간 기준의 값이며 Console 잔액이 아니다.
-#[derive(Debug, Clone, Copy, PartialEq)]
+/// 선제 사용이 열린 API 크레딧 후보의 판정 입력. 그 키가 속한 풀 기준의 값이며 Console 잔액이 아니다.
+#[derive(Debug, Clone, PartialEq)]
 pub(crate) struct Proactive {
+    /// 키가 속한 풀 id. 같은 풀의 키는 잔액을 나눠 쓰므로 진행 중 대화 예약도 풀 단위로 센다.
+    pub pool: String,
     /// (남은 예산 비율) ÷ (남은 기간 비율). 구독 한도의 같은 비율과 직접 비교한다.
     pub pace: f64,
-    /// 허용 기간에 남은 추정 예산(USD).
+    /// 풀에 남은 추정 예산(USD).
     pub remaining_usd: f64,
 }
 /// 선제 사용으로 새 대화를 받으려면 남아 있어야 하는 최소 예산(USD). 한 요청의 실제 비용은 미리 알 수 없어서 보수적 여유를 둔다.
@@ -213,7 +217,7 @@ pub(crate) struct Proactive {
 const PROACTIVE_MIN_REMAINING_USD: f64 = 5.0;
 
 /// 정책의 추가 과금 경로 옵트인. 모두 꺼져 있으면(기본) 브릿지 선택은 바뀌지 않는다.
-#[derive(Debug, Clone, Copy, Default)]
+#[derive(Debug, Clone, Default)]
 pub(crate) struct PaidPolicy {
     pub credits: bool,
     pub extra: bool,
@@ -222,19 +226,20 @@ pub(crate) struct PaidPolicy {
     pub stale_seconds: u64,
     /// API 크레딧 fallback 옵트인, 월 상한(USD), 소진 관측 신선도 기준(ms). 옵트인과 무관하게 정책 값을 그대로 담는다.
     pub api: bool,
+    /// Claude 키마다 따로 적용하는 월 상한(USD). 합계가 아니다.
     pub api_limit_usd: f64,
     pub api_fresh_ms: i64,
     /// 소비 균형 모드이고 `balanceApiCredit`·`useApiCreditAfterLimit`가 모두 켜졌는지.
     pub balance: bool,
-    /// 사용자가 확인한 API 크레딧 허용 기간. 있으면 한도 뒤 fallback도 진행 중일 때만 열린다.
-    pub grant: Option<scheduler::GrantTerms>,
+    /// 사용자가 확인한 크레딧 풀. 키가 풀에 속하면 한도 뒤 fallback도 그 풀이 진행 중일 때만 열린다.
+    pub grants: Vec<aam_protocol::ApiCreditGrant>,
     pub balanced_mode: bool,
     /// 소비 균형 모드일 때만 `expiringWindowHours`를 ms로 담는다. 그 밖의 모드는 0(리셋 전 사용 꺼짐).
     pub use_before_reset_ms: i64,
-    /// OpenAI API 키 fallback 옵트인과 월 상한(USD). Claude 쪽 `api`·`api_limit_usd`와 독립이다. OpenAI에는 허용 기간·선제 사용이 없다.
+    /// OpenAI API 키 fallback 옵트인과 월 상한(USD). Claude 쪽 `api`·`api_limit_usd`와 독립이다. OpenAI에는 풀·선제 사용이 없다.
     pub openai_api: bool,
     pub openai_api_limit_usd: f64,
-    /// 지운 키의 이번 달 사용액(공급자별)과 현재 허용 기간(Claude)의 합산 사용액·미확인 요청 수.
+    /// 지운 키의 이번 달 사용액(공급자별)과 풀별(Claude) 사용액·미확인 요청 수.
     pub ledger: scheduler::ApiLedger,
 }
 impl PaidPolicy {
@@ -253,7 +258,7 @@ impl PaidPolicy {
             balance: policy.allocation_mode == aam_protocol::AllocationMode::ExpiryBalanced && policy.balance_api_credit && policy.use_api_credit_after_limit,
             openai_api: policy.use_openai_api_after_limit,
             openai_api_limit_usd: policy.openai_api_monthly_limit_usd,
-            grant: scheduler::GrantTerms::of(policy),
+            grants: policy.api_credit_grants.clone(),
             ledger,
         }
     }
@@ -538,26 +543,36 @@ pub(crate) fn choose(
         return Some(index);
     }
     let balanced = pool.iter().any(|index| candidates[*index].balanced);
-    // 선제 API는 새 대화를 구독보다 먼저 받는 경우에만 고른다: 구독의 가장 큰 pace보다 API pace가 크고(일정보다 덜 썼고),
-    // 이미 진행 중인 API 대화마다 최소 예산을 예약해 두고도 남을 때만(동시 입장 상한). 예약은 보수적 휴리스틱이며 하드 상한이 아니다.
+    // 선제 API는 새 대화를 구독보다 먼저 받는 경우에만 고른다: 구독의 가장 큰 pace보다 그 키가 속한 풀의 pace가 크고(일정보다 덜 썼고),
+    // 그 풀의 키로 이미 진행 중인 대화마다 최소 예산을 예약해 두고도 남을 때만(동시 입장 상한, 풀마다 따로). 예약은 보수적 휴리스틱이며 하드 상한이 아니다.
+    // 여러 풀이 열려 있으면 pace가 가장 큰(만료 대비 가장 덜 쓴) 풀을 먼저 쓰고, 같은 풀 안에서는 이번 달 덜 쓴 키를 먼저 쓴다.
     // 리셋 전 사용 후보가 있으면 그 남은 양이 선제 API보다 먼저다(API 허용 기간은 아직 시간이 남는 반면 구독 잔량은 곧 사라진다).
     if balanced && !proactive.is_empty() && !pool.iter().any(|index| rush(*index).is_some()) {
         let best_subscription = pool.iter().filter(|index| !candidates[**index].api_credit).filter_map(|index| weekly_pace(&candidates[*index].buckets, model, now)).fold(None, |max: Option<f64>, value| Some(max.map_or(value, |current| current.max(value))));
-        let api_keys: Vec<&str> = candidates.iter().filter(|candidate| candidate.api_credit).map(|candidate| candidate.key.as_str()).collect();
-        let in_flight = stickies
-            .iter()
-            .filter(|(id, sticky)| Some(id.as_str()) != session && api_keys.contains(&sticky.key.as_str()) && now - sticky.last_used < ACTIVE_MS)
-            .count();
+        let in_flight = |pool_id: &str| {
+            let keys: Vec<&str> = candidates
+                .iter()
+                .filter(|candidate| candidate.proactive.as_ref().is_some_and(|facts| facts.pool == pool_id))
+                .map(|candidate| candidate.key.as_str())
+                .collect();
+            stickies
+                .iter()
+                .filter(|(id, sticky)| Some(id.as_str()) != session && keys.contains(&sticky.key.as_str()) && now - sticky.last_used < ACTIVE_MS)
+                .count()
+        };
         let best_api = proactive
             .iter()
             .copied()
             .filter(|index| {
-                let facts = candidates[*index].proactive.expect("filtered");
+                let facts = candidates[*index].proactive.as_ref().expect("filtered");
                 facts.pace >= 1.0
                     && best_subscription.is_some_and(|pace| facts.pace > pace)
-                    && facts.remaining_usd >= PROACTIVE_MIN_REMAINING_USD * (in_flight as f64 + 1.0)
+                    && facts.remaining_usd >= PROACTIVE_MIN_REMAINING_USD * (in_flight(&facts.pool) as f64 + 1.0)
             })
-            .min_by(|a, b| candidates[*a].api_used.total_cmp(&candidates[*b].api_used).then(candidates[*a].key.cmp(&candidates[*b].key)));
+            .min_by(|a, b| {
+                let pace = |index: usize| candidates[index].proactive.as_ref().map_or(0.0, |facts| facts.pace);
+                pace(*b).total_cmp(&pace(*a)).then(candidates[*a].api_used.total_cmp(&candidates[*b].api_used)).then(candidates[*a].key.cmp(&candidates[*b].key))
+            });
         if let Some(index) = best_api {
             return Some(index);
         }
@@ -1058,7 +1073,7 @@ impl Bridge {
             let State { blocks, gateways, .. } = &mut *state;
             blocks.retain(|block| block.until > now && !refreshed.as_ref().is_some_and(|accounts| {
                 gateways.iter().find(|gateway| gateway.key() == block.key).is_some_and(|gateway| {
-                    let (buckets, enabled, _, _) = account_view(gateway, accounts, None, PaidPolicy::default(), now);
+                    let (buckets, enabled, _, _) = account_view(gateway, accounts, None, &PaidPolicy::default(), now);
                     enabled && quota_recovered(block, &buckets, now)
                 })
             }));
@@ -1581,17 +1596,16 @@ impl Bridge {
         respond(client, 200, &json!({ "providers": providers }));
     }
 
-    fn candidates(&self, provider: &str, accounts: &[Account], pins: &BTreeMap<String, String>, paid: PaidPolicy, now: i64) -> Vec<(Candidate, u16)> {
+    fn candidates(&self, provider: &str, accounts: &[Account], pins: &BTreeMap<String, String>, paid: &PaidPolicy, now: i64) -> Vec<(Candidate, u16)> {
         let pin = pins
             .get(aam_protocol::pin_provider(provider))
             .and_then(|id| accounts.iter().find(|account| &account.id == id));
         use aam_adapters::api_credit::ApiProvider;
         // 요청 공급자(`openai-codex`)와 API 키 gateway의 공급자(`openai`)는 이름이 다르다. 대응하는 API 키 공급자만 같은 풀에 올린다.
         let api_provider = ApiProvider::of_request(provider);
-        let total = |api: ApiProvider| scheduler::api_total_used(accounts, api, paid.ledger.removed(api), now);
-        let (claude_total, openai_total) = (total(ApiProvider::Anthropic), total(ApiProvider::OpenAi));
+        // OpenAI 상한은 모든 OpenAI 키의 합계(지운 키 포함)로 본다. Anthropic 상한은 키마다 따로 적용하므로 합계를 만들지 않는다.
+        let openai_total = scheduler::api_total_used(accounts, ApiProvider::OpenAi, paid.ledger.removed(ApiProvider::OpenAi), now);
         let openai_unmetered = scheduler::api_unmetered(accounts, ApiProvider::OpenAi, paid.ledger.openai_removed_unmetered, now);
-        let grant = paid.grant.map(|terms| scheduler::GrantView::at(terms, &paid.ledger, now));
         let mut state = self.state();
         state
             .gateways
@@ -1600,26 +1614,32 @@ impl Bridge {
             .map(|gateway| {
                 let healthy = gateway.running() && gateway.unhealthy_until <= now;
                 let candidate = if gateway.api_credit {
-                    // 키 계정은 한도 버킷이 없다. 정책이 켜져 있고 전체 키의 이번 달 합계가 상한 미만일 때만 후보로 올리며,
+                    // 키 계정은 한도 버킷이 없다. 정책이 켜져 있고 Claude 키는 그 키 자신의 이번 달 사용액이, OpenAI 키는 전체 키의 합계가 상한 미만일 때만 후보로 올리며,
                     // 일반 후보로는 절대 쓰이지 않는다(`choose`). 여러 키 중에서는 이번 달에 덜 쓴 키를 먼저 쓴다(`api_used`).
-                    // 사용자가 허용 기간을 확인해 둔 경우 그 기간이 진행 중일 때만(시작 전·만료·소진이면 한도 뒤 fallback도) 연다.
+                    // 키가 사용자가 확인한 풀에 속하면 그 풀이 진행 중일 때만(시작 전·만료·소진이면 한도 뒤 fallback도) 연다.
                     let account = gateway.native_account.as_deref().and_then(|id| accounts.iter().find(|account| account.id == id));
-                    let grant_open = grant.is_none_or(|view| view.state == scheduler::GrantState::Active);
+                    let pool = gateway
+                        .native_account
+                        .as_deref()
+                        .and_then(|id| paid.grants.iter().find(|grant| grant.account_ids.iter().any(|key| key == id)))
+                        .map(|grant| (grant.id.clone(), scheduler::GrantView::of(grant, &paid.ledger, now)));
+                    let grant_open = pool.as_ref().is_none_or(|(_, view)| view.state == scheduler::GrantState::Active);
                     let api = ApiProvider::of(&gateway.provider).unwrap_or(ApiProvider::Anthropic);
                     let usable = account.is_some_and(|account| match api {
-                        ApiProvider::Anthropic => paid.api && grant_open && api_key::usable(api, account, claude_total, paid.api_limit_usd),
+                        ApiProvider::Anthropic => paid.api && grant_open && api_key::usable(api, account, scheduler::api_credit_used(account, now), paid.api_limit_usd),
                         // OpenAI에는 허용 기간·선제 사용이 없고, 금액을 읽지 못한 요청이 한 번이라도 있으면 이번 달은 더 쓰지 않는다.
                         ApiProvider::OpenAi => paid.openai_api && !openai_unmetered && api_key::usable(api, account, openai_total, paid.openai_api_limit_usd),
                     });
                     let api_used = account.map_or(0.0, |account| crate::scheduler::api_credit_used(account, now));
-                    // 소비 균형의 선제 사용: 모드·옵트인·진행 중 허용 기간·사용량 확인(미확인 요청 없음)이 모두 맞을 때만 사실을 채운다.
-                    let proactive = grant
-                        .filter(|view| api == ApiProvider::Anthropic && paid.balance && usable && view.state == scheduler::GrantState::Active && view.unmetered == 0)
-                        .map(|view| Proactive { pace: view.pace(now), remaining_usd: view.remaining });
-                    Candidate { key: gateway.key(), buckets: Vec::new(), healthy, enabled: usable, pinned: false, paid_fallback: usable.then_some(paid.api_fresh_ms), api_credit: true, api_used, proactive, balanced: paid.balanced_mode && api == ApiProvider::Anthropic, use_before_reset_ms: 0 }
+                    // 소비 균형의 선제 사용: 모드·옵트인·진행 중인 풀·사용량 확인(미확인 요청 없음)이 모두 맞을 때만 사실을 채운다.
+                    let api_pool = pool.as_ref().map(|(id, _)| id.clone());
+                    let proactive = pool
+                        .filter(|(_, view)| api == ApiProvider::Anthropic && paid.balance && usable && view.state == scheduler::GrantState::Active && view.unmetered == 0)
+                        .map(|(pool, view)| Proactive { pool, pace: view.pace(now), remaining_usd: view.remaining });
+                    Candidate { key: gateway.key(), buckets: Vec::new(), healthy, enabled: usable, pinned: false, paid_fallback: usable.then_some(paid.api_fresh_ms), api_credit: true, api_used, api_pool, proactive, balanced: paid.balanced_mode && api == ApiProvider::Anthropic, use_before_reset_ms: 0 }
                 } else {
                     let (buckets, enabled, pinned, paid_fallback) = account_view(gateway, accounts, pin, paid, now);
-                    Candidate { key: gateway.key(), buckets, healthy, enabled, pinned, paid_fallback, api_credit: false, api_used: 0.0, proactive: None, balanced: paid.balanced_mode, use_before_reset_ms: paid.use_before_reset_ms }
+                    Candidate { key: gateway.key(), buckets, healthy, enabled, pinned, paid_fallback, api_credit: false, api_used: 0.0, api_pool: None, proactive: None, balanced: paid.balanced_mode, use_before_reset_ms: paid.use_before_reset_ms }
                 };
                 (candidate, gateway.port)
             })
@@ -1695,7 +1715,7 @@ impl Bridge {
         let mut last_limited: Option<Vec<u8>> = None;
         loop {
             let now = now_ms();
-            let mut candidates = self.candidates(&provider, &accounts, &pins, paid, now);
+            let mut candidates = self.candidates(&provider, &accounts, &pins, &paid, now);
             // API 키 후보만 남았으면 구독 후보는 없는 것이다. 구독 쪽 연결 오류·로그인 안내를 가리지 않는다.
             let no_subscription = candidates.iter().all(|(candidate, _)| candidate.api_credit);
             if no_subscription {
@@ -1715,7 +1735,7 @@ impl Bridge {
             for _ in 0..20 {
                 if tried.is_empty() && candidates.iter().any(|(c, _)| !c.healthy) && self.starting_up(now) {
                     std::thread::sleep(Duration::from_millis(500));
-                    candidates = self.candidates(&provider, &accounts, &pins, paid, now_ms());
+                    candidates = self.candidates(&provider, &accounts, &pins, &paid, now_ms());
                 } else {
                     break;
                 }
@@ -1875,7 +1895,7 @@ impl Bridge {
                 finish(client);
                 // 오류 응답(4xx·5xx)은 과금되지 않았으므로 요청 수에도 넣지 않는다.
                 if api_key::succeeded(&head) {
-                    self.record_api_usage(&candidate.key, &model, usage);
+                    self.record_api_usage(&candidate.key, candidate.api_pool.as_deref(), &model, usage);
                 }
                 return;
             }
@@ -1899,13 +1919,13 @@ impl Bridge {
         self.state().gateways.iter().find(|gateway| gateway.api_credit && gateway.key() == key).and_then(|gateway| gateway.native_account.clone())
     }
 
-    /// 한 요청의 추정 비용을 월 누적에 더한다. usage를 못 읽었거나 단가를 모르면 "미확인 요청"으로 센다. 비용·계정 외 값은 기록하지 않는다.
-    /// 단가표는 키의 공급자(gateway 키 `<공급자>|…`)로 고른다. 다른 공급자의 단가는 쓰지 않는다.
-    fn record_api_usage(&self, key: &str, model: &str, usage: Option<aam_adapters::api_credit::Usage>) {
+    /// 한 요청의 추정 비용을 월 누적과, 후보를 만들 때(입장 시점) 캡처한 풀(`pool`)에 더한다. usage를 못 읽었거나 단가를 모르면 "미확인 요청"으로 센다.
+    /// 단가표는 키의 공급자(gateway 키 `<공급자>|…`)로 고른다. 다른 공급자의 단가는 쓰지 않는다. 비용·계정 외 값은 기록하지 않는다.
+    fn record_api_usage(&self, key: &str, pool: Option<&str>, model: &str, usage: Option<aam_adapters::api_credit::Usage>) {
         let Some(id) = self.api_account_id(key) else { return };
         let cost = aam_adapters::api_credit::ApiProvider::of(key_provider(key)).and_then(|api| usage.and_then(|usage| aam_adapters::api_credit::cost_usd(api, model, usage)));
         if let Ok(mut store) = self.service.lock() {
-            let _ = crate::store::record_api_credit(&mut store.connection, &id, cost, now_ms());
+            let _ = crate::store::record_api_credit(&mut store.connection, &id, pool, cost, now_ms());
         }
     }
 
@@ -2079,7 +2099,7 @@ fn parse_identity(identity: &str) -> (String, String) {
 /// AAM이 관측한 같은 계정의 사용량 버킷과 배정 포함 여부.
 /// 도구별 연결이 여러 개여도 같은 버킷은 최신 관측 하나만 쓰고, 연결 중 하나라도 배정에서 빼면 omp에서도 뺀다.
 /// 세 번째 값은 이 gateway 계정이 공급자 수동 배정 계정(`pin`)과 같은 실제 계정인지다.
-fn account_view(gateway: &Gateway, accounts: &[Account], pin: Option<&Account>, paid: PaidPolicy, now: i64) -> (Vec<QuotaBucket>, bool, bool, Option<i64>) {
+fn account_view(gateway: &Gateway, accounts: &[Account], pin: Option<&Account>, paid: &PaidPolicy, now: i64) -> (Vec<QuotaBucket>, bool, bool, Option<i64>) {
     let provider = match gateway.provider.as_str() {
         "openai-codex" => "openai",
         "google-antigravity" => "google",
@@ -3212,7 +3232,7 @@ mod tests {
         }
     }
     fn candidate(key: &str, buckets: Vec<QuotaBucket>) -> Candidate {
-        Candidate { key: key.into(), buckets, healthy: true, enabled: true, pinned: false, paid_fallback: None, api_credit: false, api_used: 0.0, proactive: None, balanced: false, use_before_reset_ms: 0 }
+        Candidate { key: key.into(), buckets, healthy: true, enabled: true, pinned: false, paid_fallback: None, api_credit: false, api_used: 0.0, api_pool: None, proactive: None, balanced: false, use_before_reset_ms: 0 }
     }
     const DAY: i64 = 86_400_000;
 
@@ -3909,12 +3929,12 @@ mod tests {
             identity_key: Some("xai-oauth|subject:subject-a|workspace:".into()),
             enabled: false, ..Account::default()
         };
-        let (_, enabled, pinned, _) = account_view(&gateway, std::slice::from_ref(&account), Some(&account), PaidPolicy::default(), 0);
+        let (_, enabled, pinned, _) = account_view(&gateway, std::slice::from_ref(&account), Some(&account), &PaidPolicy::default(), 0);
         assert!(!enabled);
         assert!(pinned);
         let mut other = account.clone();
         other.identity_key = Some("xai-oauth|subject:subject-b|workspace:".into());
-        let (_, enabled, pinned, _) = account_view(&gateway, std::slice::from_ref(&other), Some(&other), PaidPolicy::default(), 0);
+        let (_, enabled, pinned, _) = account_view(&gateway, std::slice::from_ref(&other), Some(&other), &PaidPolicy::default(), 0);
         assert!(enabled);
         assert!(!pinned);
     }
@@ -3943,18 +3963,18 @@ mod tests {
         let none = HashMap::new();
         // 인증된 Ultra처럼 새 관측에 5시간 창이 없으면, 예전 관측에 남은 소진된 5시간 한도는 계정을 막지 않는다.
         let rows = five_hour_rows(now, 30_000);
-        let (buckets, _, _, _) = account_view(&gateway, &rows, None, PaidPolicy::default(), now);
+        let (buckets, _, _, _) = account_view(&gateway, &rows, None, &PaidPolicy::default(), now);
         assert!(buckets.iter().all(|bucket| !scheduler::short_window(bucket)), "{buckets:?}");
         assert_eq!(choose(&[candidate("a", buckets)], "anthropic", "claude-opus-5-5", None, &none, &[], &[], 0.0, now), Some(0));
         // 새 관측이 없는(공식 관측이 낡은) 계정의 5시간 한도는 그대로 남아 막는다.
         let rows = five_hour_rows(now, 2 * 3_600_000);
-        let (buckets, _, _, _) = account_view(&gateway, &rows, None, PaidPolicy::default(), now);
+        let (buckets, _, _, _) = account_view(&gateway, &rows, None, &PaidPolicy::default(), now);
         assert!(buckets.iter().any(|bucket| scheduler::short_window(bucket)));
         assert_eq!(choose(&[candidate("a", buckets)], "anthropic", "claude-opus-5-5", None, &none, &[], &[], 0.0, now), None);
         // 새 관측도 5시간 한도를 보고하면(다른 ID) 5시간 창은 여전히 있는 것이다.
         let mut rows = five_hour_rows(now, 30_000);
         rows[0].buckets.push(bucket("5h-official", None, 10.0, DAY / 10, now));
-        let (buckets, _, _, _) = account_view(&gateway, &rows, None, PaidPolicy::default(), now);
+        let (buckets, _, _, _) = account_view(&gateway, &rows, None, &PaidPolicy::default(), now);
         assert!(buckets.iter().any(|bucket| bucket.id == "5h"));
     }
 
@@ -4952,7 +4972,10 @@ mod tests {
         Candidate { balanced: true, ..candidate }
     }
     fn proactive_key(key: &str, pace: f64, remaining_usd: f64) -> Candidate {
-        Candidate { proactive: Some(Proactive { pace, remaining_usd }), ..balanced(api_key_candidate(key, Some(FRESH))) }
+        pooled_key(key, "pool-a", pace, remaining_usd)
+    }
+    fn pooled_key(key: &str, pool: &str, pace: f64, remaining_usd: f64) -> Candidate {
+        Candidate { proactive: Some(Proactive { pool: pool.into(), pace, remaining_usd }), ..balanced(api_key_candidate(key, Some(FRESH))) }
     }
     const KEY_A: &str = "anthropic|apikey:aaaaaaaaaaaa";
     const KEY_B: &str = "anthropic|apikey:bbbbbbbbbbbb";
@@ -5018,6 +5041,31 @@ mod tests {
         // 구독이 한도를 다 쓴 뒤의 기존 fallback은 소비 균형 모드에서도 같은 후보 규칙(`paid_fallback`)으로 열린다.
         let spent_sub = balanced(spent("sub", now));
         assert_eq!(choose(&[spent_sub, api_key_candidate(KEY_B, Some(FRESH))], "anthropic", OPUS, None, &none, &[], &[], 0.0, now), Some(1));
+    }
+
+    /// 풀이 여럿이면 만료 대비 가장 덜 쓴(pace가 큰) 풀의 키가 새 대화를 먼저 받고, 진행 중 대화 예약은 풀마다 따로 센다:
+    /// 다른 풀의 진행 중 대화가 이 풀의 남은 예산을 깎지 않는다.
+    #[test]
+    fn expiry_balanced_prefers_the_most_behind_pool_and_reserves_budget_per_pool() {
+        let now = 1_000_000_000_000;
+        let none = HashMap::new();
+        let slow = balanced(candidate("sub", vec![bucket("7d", None, 90.0, 6 * DAY, now)]));
+        // 이번 달 사용액은 A가 더 적지만, B 풀이 만료 대비 더 많이 남았으므로(pace 3.0 > 1.5) B가 먼저다.
+        let a = Candidate { api_used: 1.0, ..pooled_key(KEY_A, "pool-a", 1.5, 100.0) };
+        let b = Candidate { api_used: 50.0, ..pooled_key(KEY_B, "pool-b", 3.0, 100.0) };
+        assert_eq!(choose(&[slow.clone(), a.clone(), b.clone()], "anthropic", OPUS, None, &none, &[], &[], 0.0, now), Some(2));
+        assert_eq!(choose(&[slow.clone(), b.clone(), a.clone()], "anthropic", OPUS, None, &none, &[], &[], 0.0, now), Some(1));
+        // A 풀에 진행 중 대화가 두 개 있어도 B 풀($9 남음)은 자기 풀의 진행 대화(0개)만 예약하므로 새 대화를 받는다.
+        let tight_b = pooled_key(KEY_B, "pool-b", 3.0, 9.0);
+        let mut running_a = HashMap::new();
+        for id in ["a-1", "a-2"] {
+            running_a.insert(id.to_owned(), Sticky { key: KEY_A.into(), model: OPUS.into(), cwd: None, last_used: now, requests: 1 });
+        }
+        assert_eq!(choose(&[slow.clone(), a.clone(), tight_b.clone()], "anthropic", OPUS, Some("new"), &running_a, &[], &[], 0.0, now), Some(2));
+        // 같은 풀의 진행 중 대화는 예약에 들어간다: B 풀 대화 하나가 진행 중이면 $9로는 새 대화를 열지 않고 A로 간다.
+        let mut running_b = HashMap::new();
+        running_b.insert("b-1".to_owned(), Sticky { key: KEY_B.into(), model: OPUS.into(), cwd: None, last_used: now, requests: 1 });
+        assert_eq!(choose(&[slow.clone(), a.clone(), tight_b], "anthropic", OPUS, Some("new"), &running_b, &[], &[], 0.0, now), Some(1));
     }
 
     #[test]
@@ -5131,26 +5179,63 @@ mod tests {
     }
 
     #[test]
-    fn api_key_usable_requires_enabled_authenticated_and_combined_monthly_room() {
+    fn api_key_usable_requires_enabled_authenticated_and_room_under_its_own_monthly_cap() {
         let now = 1_793_361_600_000; // 2026-10-30T12:00:00Z
-        let total = |accounts: &[Account]| scheduler::api_total_used(accounts, aam_adapters::api_credit::ApiProvider::Anthropic, 0.0, now);
+        let anthropic = aam_adapters::api_credit::ApiProvider::Anthropic;
         let key = api_account("k", None, now);
-        assert!(api_key::usable(aam_adapters::api_credit::ApiProvider::Anthropic, &key, 0.0, 200.0));
-        assert!(api_key::usable(aam_adapters::api_credit::ApiProvider::Anthropic, &key, 199.99, 200.0));
-        assert!(!api_key::usable(aam_adapters::api_credit::ApiProvider::Anthropic, &key, 200.0, 200.0));
-        assert!(!api_key::usable(aam_adapters::api_credit::ApiProvider::Anthropic, &key, 0.0, 0.0));
-        // 상한은 모든 키의 합계다: 각각 $150인 키 둘이면 $300이라 둘 다 쓰지 않는다(키 수가 상한을 늘리지 않는다).
+        assert!(api_key::usable(anthropic, &key, 0.0, 200.0));
+        assert!(api_key::usable(anthropic, &key, 199.99, 200.0));
+        assert!(!api_key::usable(anthropic, &key, 200.0, 200.0));
+        assert!(!api_key::usable(anthropic, &key, 0.0, 0.0));
+        // Claude 상한은 키마다 따로다: 각각 $150인 키 둘은 합계가 $300이어도 둘 다 쓸 수 있고, 한 키가 $200에 닿아도 다른 키는 열려 있다.
         let pair = [api_account("a", Some(150.0), now), api_account("b", Some(150.0), now)];
-        assert!((total(&pair) - 300.0).abs() < 1e-9);
-        assert!(pair.iter().all(|account| !api_key::usable(aam_adapters::api_credit::ApiProvider::Anthropic, account, total(&pair), 200.0)));
-        // 구독 계정의 값은 합계에 들어가지 않고, 지난달 누적은 0으로 본다.
+        assert!(pair.iter().all(|account| api_key::usable(anthropic, account, scheduler::api_credit_used(account, now), 200.0)));
+        let capped = [api_account("a", Some(200.0), now), api_account("b", Some(150.0), now)];
+        let open: Vec<bool> = capped.iter().map(|account| api_key::usable(anthropic, account, scheduler::api_credit_used(account, now), 200.0)).collect();
+        assert_eq!(open, [false, true]);
+        // 합계(표시·OpenAI용)는 구독 계정의 값을 넣지 않고, 지난달 누적은 0으로 본다.
+        let total = |accounts: &[Account]| scheduler::api_total_used(accounts, anthropic, 0.0, now);
         let last_month = Account { api_credit: Some(aam_protocol::ApiCreditState { period_start: aam_adapters::api_credit::period_start(now) - 86_400_000, used_usd: 500.0, unmetered_requests: 3, updated_at: now }), ..api_account("old", None, now) };
         let mixed = [last_month, api_account("c", Some(10.0), now), Account { tool: "claude".into(), ..api_account("sub", Some(999.0), now) }];
         assert!((total(&mixed) - 10.0).abs() < 1e-9);
-        assert!(!api_key::usable(aam_adapters::api_credit::ApiProvider::Anthropic, &Account { enabled: false, ..api_account("k", None, now) }, 0.0, 200.0));
-        assert!(!api_key::usable(aam_adapters::api_credit::ApiProvider::Anthropic, &Account { auth_status: "auth-required".into(), ..api_account("k", None, now) }, 0.0, 200.0));
-        assert!(!api_key::usable(aam_adapters::api_credit::ApiProvider::Anthropic, &Account { tool: "claude".into(), ..api_account("k", None, now) }, 0.0, 200.0));
+        assert!(!api_key::usable(anthropic, &Account { enabled: false, ..api_account("k", None, now) }, 0.0, 200.0));
+        assert!(!api_key::usable(anthropic, &Account { auth_status: "auth-required".into(), ..api_account("k", None, now) }, 0.0, 200.0));
+        assert!(!api_key::usable(anthropic, &Account { tool: "claude".into(), ..api_account("k", None, now) }, 0.0, 200.0));
         assert_eq!(api_key::next_period_start(now), 1_793_491_200_000);
+    }
+
+    /// `candidates()`: 같은 풀의 두 키가 각각 상한($200) 아래면 합계가 $300이어도 둘 다 후보이고, 한 키가 상한에 닿아도 다른 키는 열려 있다.
+    /// 지운 키의 원장 사용액($500)은 다른 키를 막지 않는다. 선제 사용 사실(`proactive`)도 상한에 닿은 키에는 없고 다른 키에는 남는다.
+    #[test]
+    fn bridge_candidates_apply_the_monthly_cap_to_each_claude_key_independently() {
+        let h = harness(Duration::from_secs(10));
+        let now = now_ms();
+        for id in ["key-a", "key-b"] {
+            h.bridge.state().gateways.push(Gateway {
+                provider: "anthropic".into(), identity: format!("apikey:{id}"), email: String::new(), org: String::new(),
+                native_account: Some(id.into()), api_credit: true, native_port: 1, port: free_port(), child: None, spawned_at: 0, unhealthy_until: 0,
+            });
+        }
+        let policy = aam_protocol::Policy {
+            use_api_credit_after_limit: true,
+            api_credit_monthly_limit_usd: 200.0,
+            allocation_mode: aam_protocol::AllocationMode::ExpiryBalanced,
+            balance_api_credit: true,
+            api_credit_grants: vec![aam_protocol::ApiCreditGrant {
+                id: "pool".into(), account_ids: vec!["key-a".into(), "key-b".into()], budget_usd: 1000.0,
+                starts_at: now - DAY, expires_at: now + 10 * DAY, confirmed_at: now - DAY, source: "manual".into(),
+                expiry_source: aam_protocol::ExpirySource::Exact, billing_estimate: None,
+            }],
+            ..aam_protocol::Policy::default()
+        };
+        let paid = PaidPolicy::of(&policy, scheduler::ApiLedger { removed_usd: 500.0, ..Default::default() });
+        let view = |accounts: &[Account]| -> Vec<(bool, bool)> {
+            h.bridge.candidates("anthropic", accounts, &BTreeMap::new(), &paid, now).into_iter().map(|(candidate, _)| (candidate.enabled, candidate.proactive.is_some())).collect()
+        };
+        let both_below = [api_account("key-a", Some(150.0), now), api_account("key-b", Some(150.0), now)];
+        assert_eq!(view(&both_below), [(true, true), (true, true)]);
+        let a_capped = [api_account("key-a", Some(200.0), now), api_account("key-b", Some(150.0), now)];
+        assert_eq!(view(&a_capped), [(false, false), (true, true)]);
     }
 
     #[test]
@@ -5344,9 +5429,9 @@ mod tests {
         });
         let gateway_key = format!("anthropic|{identity}");
         assert_eq!(h.bridge.api_account_id(&gateway_key).as_deref(), Some("api-2"));
-        h.bridge.record_api_usage(&gateway_key, OPUS, Some(aam_adapters::api_credit::Usage { input: 1_000_000, output: 0, cache_read: 0, cache_write: 0 }));
-        h.bridge.record_api_usage(&gateway_key, "claude-future-9", Some(aam_adapters::api_credit::Usage { input: 1, output: 1, cache_read: 0, cache_write: 0 }));
-        h.bridge.record_api_usage(&gateway_key, OPUS, None);
+        h.bridge.record_api_usage(&gateway_key, None, OPUS, Some(aam_adapters::api_credit::Usage { input: 1_000_000, output: 0, cache_read: 0, cache_write: 0 }));
+        h.bridge.record_api_usage(&gateway_key, None, "claude-future-9", Some(aam_adapters::api_credit::Usage { input: 1, output: 1, cache_read: 0, cache_write: 0 }));
+        h.bridge.record_api_usage(&gateway_key, None, OPUS, None);
         let state = crate::store::account(&h.bridge.service.lock().unwrap().connection, "api-2").unwrap().api_credit.unwrap();
         assert!((state.used_usd - 4.0).abs() < 1e-9, "{}", state.used_usd);
         assert_eq!(state.unmetered_requests, 2);

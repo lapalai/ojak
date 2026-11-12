@@ -2,7 +2,7 @@ import { useState } from "react";
 import { ShieldCheck } from "lucide-react";
 import { rpc } from "./api";
 import { ActionFeedback, Badge, Busy, Modal, Switch } from "./components";
-import { API_KEY_PROVIDERS, apiAccountUsage, apiAccounts, apiCreditAmount, apiCreditNotes, apiKeyAddParams, apiKeyProvider, apiKeyTotals } from "./api-credit";
+import { API_KEY_PROVIDERS, apiAccounts, apiCreditAmount, apiCreditNotes, apiCreditSpend, apiKeyAddParams, apiKeyCap, apiKeyProvider, apiKeyTotals } from "./api-credit";
 import { privacyText, useAction } from "./state";
 import { t } from "./i18n";
 import type { Account, ApiKeyProvider, Snapshot } from "./types";
@@ -70,13 +70,14 @@ export function ApiKeyPanel({ snapshot, masked, online, onReload }: { snapshot: 
   return <div className="panel api-keys">
     <header><ShieldCheck size={15} className="muted" /><h2>{t("apiKey.title")}</h2></header>
     {keys.length ? <table><tbody>{keys.map(account => {
-      const usage = apiAccountUsage(account, snapshot.generatedAt);
+      const provider = apiKeyProvider(account);
+      const cap = apiKeyCap(account, totals.anthropic.limitUsd, snapshot.generatedAt);
       const rejected = account.authStatus !== "authenticated";
       const name = privacyText(account.label, masked);
       return <tr key={account.id} className={account.enabled ? undefined : "muted"}>
         <td>{name} <Badge tone={apiKeyProvider(account) === "openai" ? "accent" : "neutral"}>{t(apiKeyProvider(account) === "openai" ? "apiKey.provider.openai" : "apiKey.provider.anthropic")}</Badge></td>
         <td className="muted"><code>{account.identityKey ?? "apikey:…"}</code></td>
-        <td className="muted">{t("apiKey.usage", { used: usdUsed(usage.usedUsd) })}{usage.unmeteredRequests > 0 && <> · {t(apiKeyProvider(account) === "openai" ? "apiKey.unmetered.openai" : "apiKey.unmetered")}</>}</td>
+        <td className="muted">{provider === "openai" ? t("apiKey.usage", { used: usdUsed(cap.usedUsd) }) : <>{apiCreditAmount(cap.usedUsd, cap.limitUsd)}{cap.reached && <> · <strong>{t("apiKey.capReached")}</strong></>}</>}{cap.unmeteredRequests > 0 && <> · {t(provider === "openai" ? "apiKey.unmetered.openai" : "apiKey.unmetered")}</>}</td>
         <td className="num">
           {rejected && <Badge tone="warning">{t("apiKey.rejected")}</Badge>}
           <Switch checked={account.enabled} label={t("apiKey.enable.aria", { name })} disabled={!online || updateAction.pending}
@@ -87,7 +88,7 @@ export function ApiKeyPanel({ snapshot, masked, online, onReload }: { snapshot: 
       </tr>;
     })}</tbody></table> : <div className="empty">{t("apiKey.empty")}</div>}
     {!removing && !renaming && <ActionFeedback error={removeAction.error ?? updateAction.error} message={removeAction.message ?? updateAction.message} />}
-    {API_KEY_PROVIDERS.filter(item => totals[item].keys > 0).map(item => <p key={item} className="field-help api-key-total">{t("apiKey.total", { provider: t(item === "openai" ? "apiKey.provider.openai" : "apiKey.provider.anthropic"), amount: apiCreditAmount(totals[item].usedUsd, totals[item].limitUsd) })}</p>)}
+    {API_KEY_PROVIDERS.filter(item => totals[item].keys > 0).map(item => <p key={item} className="field-help api-key-total">{item === "openai" ? t("apiKey.total", { provider: t("apiKey.provider.openai"), amount: apiCreditAmount(totals[item].usedUsd, totals[item].limitUsd) }) : t("apiKey.total.anthropic", { provider: t("apiKey.provider.anthropic"), amount: apiCreditSpend(totals[item].usedUsd) })}</p>)}
     {totals.anthropic.keys > 0 && <p className="field-help">{t("apiKey.sharedBalance")}</p>}
     {totals.openai.keys > 0 && <p className="field-help">{t("apiKey.openaiNote")}</p>}
     <div className="row-actions"><span className="hint">{t("apiKey.hint")}</span><button type="button" className="button" disabled={!online} onClick={() => setAdding(true)}>{t("apiKey.add")}</button></div>

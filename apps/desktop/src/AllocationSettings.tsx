@@ -6,9 +6,10 @@ import { canonicalProvider, groupAccounts, isCurrentGroup, privacyText, projectN
 import type { AccountGroup } from "./state";
 import { PROVIDER_ORDER } from "./types";
 import type { Account, Policy, ProjectRoute, Snapshot } from "./types";
-import { DEFAULT_API_CREDIT_LIMIT_USD, DEFAULT_OPENAI_API_LIMIT_USD, MAX_API_CREDIT_LIMIT_USD, MAX_OPENAI_API_LIMIT_USD, MIN_OPENAI_API_LIMIT_USD, apiAccounts, apiCreditAmount, apiCreditUsage, paidPolicyPatch } from "./api-credit";
+import { DEFAULT_API_CREDIT_LIMIT_USD, DEFAULT_OPENAI_API_LIMIT_USD, MAX_API_CREDIT_LIMIT_USD, MAX_OPENAI_API_LIMIT_USD, MIN_OPENAI_API_LIMIT_USD, apiAccounts, apiCreditAmount, apiCreditSpend, apiCreditUsage, apiKeyCap, paidPolicyPatch } from "./api-credit";
 import { MAX_CONCURRENCY, concurrencyRows, concurrencyUpdateIds, concurrencyValue } from "./allocation";
 import { t } from "./i18n";
+import { usdLimit } from "./limits";
 import { ALLOCATION_MODES, MODE_TEXT, allocationModeOf } from "./allocation-mode";
 import { ApiCreditGrantPanel } from "./ApiCreditGrantPanel";
 
@@ -39,6 +40,7 @@ export function CreditSettings({ snapshot, online, masked, onReload, onClose }: 
   const openaiKeys = apiAccounts(snapshot.accounts, "openai");
   const usage = apiCreditUsage(snapshot.accounts, snapshot.generatedAt, snapshot.apiCreditRemoved, "anthropic");
   const openaiUsage = apiCreditUsage(snapshot.accounts, snapshot.generatedAt, snapshot.openaiApiRemoved, "openai");
+  const shownApiLimit = apiLimitValid ? apiLimitValue : baseLimit;
   const valid = apiLimitValid && openaiLimitValid;
   function save() {
     if (!online || stale || !changed || !valid) return;
@@ -60,7 +62,14 @@ export function CreditSettings({ snapshot, online, masked, onReload, onClose }: 
     <div className="api-credit-settings">
       <label className="api-credit-limit">{t("policy.apiCreditLimit")} <input type="number" min={1} max={MAX_API_CREDIT_LIMIT_USD} step={1} value={apiLimit} aria-label={t("policy.apiCreditLimitAria")} aria-invalid={!apiLimitValid} disabled={!online || action.pending} onChange={event => setApiLimit(event.target.value)} />USD</label>
       {!apiLimitValid && <p className="gate-reason" role="alert">{t("policy.apiCreditLimitInvalid")}</p>}
-      {keys.length === 0 ? <p className="field-help">{t("policy.apiCreditNoKey")}</p> : <p className="field-help">{t("policy.apiCreditUsage", { amount: apiCreditAmount(usage.usedUsd, apiLimitValid ? apiLimitValue : baseLimit) })}</p>}
+      {keys.length === 0 ? <p className="field-help">{t("policy.apiCreditNoKey")}</p> : <>
+        <p className="field-help">{t("policy.apiCreditPerKeyCap", { limit: usdLimit(shownApiLimit) })}</p>
+        <ul className="field-help api-credit-guide api-credit-keys" aria-label={t("policy.apiCreditLimit")}>{keys.map(key => {
+          const cap = apiKeyCap(key, shownApiLimit, snapshot.generatedAt);
+          return <li key={key.id}>{t("policy.apiCreditKeyUsage", { name: privacyText(key.email ?? key.label, masked), amount: apiCreditAmount(cap.usedUsd, cap.limitUsd) })}{cap.reached && <> · <strong>{t("policy.apiCreditKeyCapped")}</strong></>}</li>;
+        })}</ul>
+        <p className="field-help">{t("policy.apiCreditUsage", { amount: apiCreditSpend(usage.usedUsd) })}</p>
+      </>}
       {usage.unmeteredRequests > 0 && <p className="gate-reason" role="status">{t("policy.apiCreditUnmetered", { count: usage.unmeteredRequests })}</p>}
       <ul className="field-help api-credit-guide"><li>{t("policy.apiCreditGuideCredit")}</li><li>{t("policy.apiCreditGuideReload")}</li><li>{t("policy.apiCreditGuideCap")}</li></ul>
     </div>
