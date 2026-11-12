@@ -114,9 +114,11 @@ npx tauri signer generate -w "$HOME/.tauri/ojak.key"
 - 실제 Claude 2.1.322와 격리 HOME·로컬 stdio MCP 서버로 두 프로필의 연결, 등록 변경·삭제, 프로젝트 범위, 동시 파일 수명과 인증 보존을 확인했다. 최종 project 거부/user fallback 및 계정별 비활성화 9개 시나리오도 실제 handshake·프로세스 시작 표식으로 확인했다. 외부 API 호출과 실제 계정 인증 변경은 하지 않았다.
 - Mac 설치 앱·CLI는 0.24.0이다. 설치된 `aam --version`과 `claude mcp --help`에서 새 기본 등록 공유 안내를 확인했다. 정상 종료 시 파일을 지우고, 강제 종료 잔여 파일은 살아 있는 native 프로세스를 위해 비공개 상태로 보존한다.
 - 안전한 `aam service restart`가 `SESSION_BUSY`로 거절하여 실행 서비스 0.23.1과 진행 중 세션은 유지했다. 강제 재시작하지 않았으며 계정당 월 상한 $200·크레딧 풀 2개 보존을 확인했다. MCP 공유는 새 launcher의 다음 Claude 실행부터 적용된다.
-- Windows CLI 2.1.322의 프로젝트 키 경로 규칙은 격리 설정으로 확인했다. 추가 검증 시 두 원격 Orca runtime이 연결되지 않았으며 Windows 0.24.0 설치·실제 MCP 연결을 완료했다고 기록하지 않는다. 최종 Windows Rust 검증은 PR CI 대상이다.
+- Windows 원격 연결 복구 후 실제 설치된 Claude 2.1.317과 격리한 2.1.322에서 stdio MCP handshake, user·local 범위, 계정별 정의·비활성화, 등록 변경·삭제 및 인증 보존을 확인했다. 하위 폴더에서 git 루트의 `.claude/settings.local.json`을 원본과 달리 적용하는 차이가 드러나 0.24.1 후보에서 Windows의 cwd 전용 범위와 macOS 범위를 분리했다. 후보의 최종 native 재검증·CI·설치 파일 증거는 PR #63에 기록한다.
 - CI의 macOS 14 runner 종료는 15로 이관했고, 새 runner에서 드러난 native HTTP 테스트의 nonblocking 소켓 상속 경합도 fixture에서 고쳤다. 실제 Mac 소켓에서 수정 전 즉시 `WouldBlock`, blocking 설정 후 지연 도착 바이트 수신을 확인했다. 운영 listener 동작은 바꾸지 않았다.
 - PR #63은 리뷰 요청 상태다. 앱 0.24.0 및 omp 18.18.9 공개 릴리스는 아직 만들지 않았으며 필수 CI·리뷰·동일 draft 자산 검증을 건너뛰지 않는다.
+- 커밋 `06c88e8`의 macOS 15·Windows 필수 CI는 push/PR 모두 통과했고 Windows NSIS 설치 파일도 빌드됐다. Windows 기존 omp `18.12.0-ojak.2` 복사본에서 후보 `18.18.9-ojak.1`로 실제 교체·정확한 rollback을 다시 확인했다. 후보의 공개 채널 조회는 채널이 뒤처졌음을 알리고 파일 해시를 보존했다.
+- 사용자가 Windows의 현재 작업 유지를 선택하여 설치·재시작은 보류했다. SQLite backup API로 비공개 DB 백업을 만들었고 기존 앱·서비스 `0.22.5` 및 omp `18.12.0-ojak.2`의 버전·바이트 보존을 확인했다. 실행 중인 15개 omp의 파일 잠금과 원격 `desktop-control` 권한 제한은 우회하지 않는다. 후보 파일 준비를 실제 설치 완료로 기록하지 않는다.
 
 ## 2026-11-12 omp 원본 추적·18.18.9 로컬 검증
 

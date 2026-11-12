@@ -248,11 +248,15 @@ fn rejected_project_names(cwd: &Path, profile: &Path, own: Option<&Value>, key: 
     if let Some(entry) = own.and_then(|config| project(config, key)) {
         collect(entry, &mut names);
     }
-    // cwd의 두 설정과 git 루트의 local 설정만 적용된다. 중간·상위 폴더 설정은 적용하지 않는다.
-    let root_local = cwd.ancestors()
-        .find(|dir| dir.join(".git").exists())
-        .filter(|root| *root != cwd)
-        .map(|root| root.join(".claude/settings.local.json"));
+    // macOS 2.1.322는 git 루트의 local 설정도 읽지만, Windows 2.1.317/2.1.322는 cwd 설정만 읽는다.
+    let root_local = if cfg!(windows) {
+        None
+    } else {
+        cwd.ancestors()
+            .find(|dir| dir.join(".git").exists())
+            .filter(|root| *root != cwd)
+            .map(|root| root.join(".claude/settings.local.json"))
+    };
     let paths = [
         profile.join("settings.json"),
         cwd.join(".claude/settings.json"),
@@ -479,7 +483,8 @@ mod tests {
         assert!(!overlay(&file).contains_key("dup"));
         for (path, cwd, falls_back) in [
             ("profile/settings.json", &deep, true),
-            ("repo/.claude/settings.local.json", &deep, true),
+            ("repo/.claude/settings.local.json", &deep, !cfg!(windows)),
+            ("repo/.claude/settings.local.json", &repo, true),
             ("repo/.claude/settings.json", &repo, true),
             ("repo/.claude/settings.json", &deep, false),
             ("repo/a/.claude/settings.local.json", &deep, false),
