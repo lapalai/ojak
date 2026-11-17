@@ -14,6 +14,19 @@ import { overviewOf, qualifiedLabel, quotaTone, watchable, watchedMembers } from
 import type { Overview, UsageRow, When } from "./overview";
 import type { Account, AccountQuotaSummary as Verdict, ApiError, ToolStatus } from "./types";
 import type { AccountWork } from "./usage-activity";
+import type { KeyCreditView } from "./credit-view";
+
+/// API 키 행의 한도 칸에 넣을 크레딧 한 줄. 구독 한도(%)가 아니라 금액·만료다.
+function keyCreditLine(credit: KeyCreditView): { text: string; tone: "good" | "warn" | "muted" } {
+  switch (credit.state) {
+    case "unset": return { text: t("usage.keyCredit.unset"), tone: "warn" };
+    case "active": return credit.remainingUsd === null ? { text: t("apiKey.credit.statusUnknown"), tone: "muted" } : { text: t("usage.keyCredit.left", { amount: usdUsed(credit.remainingUsd) }), tone: "good" };
+    case "expired": return { text: credit.remainingUsd !== null && credit.remainingUsd > 0 ? t("usage.keyCredit.expired", { amount: usdUsed(credit.remainingUsd) }) : t("usage.keyCredit.expiredUnknown"), tone: "warn" };
+    case "exhausted": return { text: t("usage.keyCredit.exhausted"), tone: "muted" };
+    case "upcoming": return { text: t("usage.keyCredit.upcoming", { time: shortTime(credit.grant!.startsAt) }), tone: "muted" };
+    case "unknown": return { text: t("apiKey.credit.statusUnknown"), tone: "muted" };
+  }
+}
 
 export function formatPercent(value: number): string {
   return value >= 10 ? String(Math.round(value)) : String(Math.round(value * 10) / 10);
@@ -117,6 +130,10 @@ export interface AccountDetailsProps {
   accounts: readonly Account[];
   onReload: () => Promise<void>;
   watch: WatchControl;
+  /// API 키 행의 크레딧 상태. 구독 행은 null이다.
+  credit: KeyCreditView | null;
+  /// 이 키의 금액·기간을 연다. 서비스가 꺼져 있거나 구독 행이면 null이다.
+  onManageCredit: (() => void) | null;
 }
 
 export interface AccountRowProps extends AccountDetailsProps {
@@ -154,16 +171,22 @@ export function AccountRow(props: AccountRowProps) {
         </span>
       </button>
       <div className={`acc-state ${online ? overview?.tone ?? "neutral" : "neutral"}`} title={reason ?? undefined}><span className="dot" aria-hidden="true" /><span className="acc-state-text">{status}</span></div>
-      <div className="acc-limit">{common.length ? common.map(({ quota, reading }) => {
+      <div className="acc-limit">{props.credit ? (() => {
+        const line = keyCreditLine(props.credit);
+        return <span className={`acc-credit ${line.tone}`}>{line.text}</span>;
+      })() : common.length ? common.map(({ quota, reading }) => {
         const tone = quotaTone(reading, overview?.blockedBy ?? null, reserve);
         return <div className={`acc-mini-quota ${tone}`} key={quota.label}>
           <div className="lim"><span className="lim-label">{limitLabel(quota.label)}</span><b>{reading.spent ? t("usage.quota.spent") : t("usage.quota.left", { value: formatPercent(reading.left ?? 0) })}</b></div>
           <div className={`bar mini ${tone}`} aria-hidden="true"><i style={{ width: `${reading.left ?? 0}%` }} /></div>
         </div>;
       }) : !modelLimit && <span className="muted">{t("usage.limit.none")}</span>}
-        {modelLimit && <small className="lim-model">{limitLabel(qualifiedLabel(modelLimit.label, modelLimit.model))} · {modelLimit.spent ? t("usage.quota.spent") : t("usage.quota.left", { value: formatPercent(modelLimit.left ?? 0) })}</small>}
+        {!props.credit && modelLimit && <small className="lim-model">{limitLabel(qualifiedLabel(modelLimit.label, modelLimit.model))} · {modelLimit.spent ? t("usage.quota.spent") : t("usage.quota.left", { value: formatPercent(modelLimit.left ?? 0) })}</small>}
       </div>
-      <div className="acc-when">{overview?.when ? overview.when.at !== null
+      <div className="acc-when">{props.credit?.grant && (props.credit.state === "active" || props.credit.state === "unknown")
+        ? <time dateTime={new Date(props.credit.grant.expiresAt).toISOString()} title={fullTime(props.credit.grant.expiresAt)}>{t("usage.keyCredit.expires", { time: shortTime(props.credit.grant.expiresAt) })}</time>
+        : props.credit ? <span className="muted">—</span>
+        : overview?.when ? overview.when.at !== null
         ? <time dateTime={new Date(overview.when.at).toISOString()} title={fullTime(overview.when.at)}>{whenText(overview.when)}</time>
         : <span className="muted">{whenText(overview.when)}</span> : <span className="muted">—</span>}</div>
       <AccountActions {...props} overview={overview} compact />
@@ -220,6 +243,12 @@ export function AccountDetails(props: AccountDetailsProps) {
   return <div className="acc-detail">
     {overview && verdict && <p className={`detail-status ${online ? overview.tone : "neutral"}`}><span className="dot" />{online ? stateLabel(overview, verdict) : t("usage.dashboard.offline")}</p>}
     <AccountActions {...props} overview={overview} />
+    {props.credit && <section aria-label={t("usage.detail.credit")} className="acc-credit-detail">
+      <h4>{t("usage.detail.credit")}</h4>
+      {(() => { const line = keyCreditLine(props.credit); return <p className={`acc-credit ${line.tone}`}>{line.text}</p>; })()}
+      {props.credit.grant && <p className="sub">{t(props.credit.state === "expired" ? "grant.expired" : "grant.expires", { time: fullTime(props.credit.grant.expiresAt) })}{props.credit.shared && <> · {t("apiKey.credit.shared")}</>}</p>}
+      {props.onManageCredit && <button type="button" onClick={props.onManageCredit}>{t("usage.credit.manage")}</button>}
+    </section>}
     <section aria-label={t("usage.dashboard.currentWork")}>
       <h4>{t("usage.dashboard.currentWork")}</h4>
       {props.work.length ? <ul className="current-work">{props.work.map(work => <li key={work.id}>
@@ -246,7 +275,8 @@ export function AccountDetails(props: AccountDetailsProps) {
           </p>}
           {row.notes.filter(note => !(verdict?.kind === "excluded" && note === t("allocation.excluded"))).map(note => <p className="note" key={note}>{note}</p>)}
           {group && canPin && <button type="button" className="text-button pin-button" disabled={!online || pinPending} onClick={props.onChoose}>{t("usage.dashboard.choose")}</button>}
-          {group && <ResetCreditsPanel key={group.primary.id} accountId={group.primary.id} name={name} online={online} onReload={props.onReload} />}
+          {group && <ResetCreditsPanel key={group.primary.id} accountId={group.primary.id} name={name} online={online}
+            supportsWeb={group.primary.tool === "claude" || (group.primary.tool === "omp" && (group.primary.identityKey ?? "").split("|")[0] === "anthropic")} onReload={props.onReload} />}
         </section>
         {row.quotas.length > 0 && <section aria-label={t("usage.detail.limits")}>
           <h4>{t("usage.detail.limits")}</h4>

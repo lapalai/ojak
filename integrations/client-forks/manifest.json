@@ -4,11 +4,11 @@
     {
       "directory": "oh-my-pi",
       "repository": "https://github.com/can1357/oh-my-pi.git",
-      "tag": "v18.15.0",
-      "revision": "3fedf8d53267e32a6d7521ce725fdcc4a36fdc67",
-      "version": "18.15.0-ojak.1",
+      "tag": "v18.18.9",
+      "revision": "50da2d357039404a81d7c64622740ce13e4c54b4",
+      "version": "18.18.9-ojak.1",
       "admissionContract": 1,
-      "sha256": "22dd50e09f29b476e5e3ba7ee11af2e9aa348ea90704a583f23b696762f2da7f"
+      "sha256": "893e79b2784f05bb93a5b4ce92797f06cdf44f2138538fb27d5340277ce0a17e"
     },
     {
       "directory": "orca",

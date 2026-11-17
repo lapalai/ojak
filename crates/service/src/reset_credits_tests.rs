@@ -22,7 +22,7 @@ impl Fixture {
         let quote_id = new_id();
         let quote = Quote { owner: owner(&auth()).unwrap(), binding: binding_fingerprint(&account).unwrap(), after_request: None,
             inventory: ResetInventory { account_id: id.into(), state: "known".into(), available_count: Some(1), redeemable_count: Some(1),
-                credits: vec![credit()], observed_at: now_ms(), quote_id: Some(quote_id.clone()), operation: None } };
+                credits: vec![credit()], observed_at: now_ms(), quote_id: Some(quote_id.clone()), operation: None, lookup_reason: None, source: "oauth".into(), web: None } };
         set_metadata(&store.connection, &quote_key(id), &quote).unwrap();
         RedeemRequest { account_id: id.into(), quote_id, credit_id: "credit-a".into(), request_id: new_id(), confirmed: true }
     }
@@ -33,9 +33,13 @@ impl Drop for Fixture {
 fn auth() -> Auth { Auth { provider: "openai-codex", access: "fixture-only".into(), account_id: Some("physical-account".into()), email: None, org_id: None } }
 fn credit() -> ResetCredit {
     ResetCredit { id: "credit-a".into(), program: "codex_rate_limits".into(), remaining_count: 1, usable: true,
-        expires_at: None, starts_at: None, clears: vec!["openai-codex:rate_limits".into()], requires_limit: true, status: "available".into() }
+        expires_at: None, starts_at: None, clears: vec!["openai-codex:rate_limits".into()], requires_limit: true, status: "available".into(),
+        reset_type: "provider".into(), gives_back_weekly: false, blocking: vec![], unavailable_reason: None, cooldown_until: None }
 }
 fn inventory_body() -> serde_json::Value { json!({"credits":[{"id":"credit-a","status":"available"}],"available_count":1}) }
+fn known(credits: Vec<ResetCredit>) -> Inventory {
+    Inventory { state: "known", reason: None, available: Some(1), redeemable: Some(1), credits }
+}
 
 #[test]
 fn concurrent_aliases_claim_one_physical_account_and_repeats_do_not_dispatch() {
@@ -118,7 +122,8 @@ fn restart_distinguishes_unsubmitted_work_from_an_ambiguous_sent_request() {
     assert_eq!(record.operation.state, "unknown");
     let mut offer = credit(); offer.program = "cedar_ember".into(); offer.remaining_count = 3;
     record.credit = offer.clone(); offer.remaining_count = 2;
-    let mut current = Inventory { available: 2, redeemable: 2, credits: vec![offer] };
+    let mut current = known(vec![offer]);
+    current.available = Some(2); current.redeemable = Some(2);
     assert!(!reconcile(&mut record, &current), "a partial balance decrease does not prove this request completed");
     current.credits[0].remaining_count = 0;
     assert!(reconcile(&mut record, &current));
@@ -128,4 +133,61 @@ fn restart_distinguishes_unsubmitted_work_from_an_ambiguous_sent_request() {
     assert!(!reconcile(&mut record, &current));
     current.credits[0].expires_at = Some(now_ms() + 86_400_000);
     assert!(reconcile(&mut record, &current));
+}
+
+/// Rewrites the stored quote the way an earlier or limited lookup would have left it.
+fn edit_quote(fixture: &Fixture, id: &str, change: impl FnOnce(&mut Quote)) {
+    let store = fixture.service().lock().unwrap();
+    let mut quote: Quote = metadata(&store.connection, &quote_key(id)).unwrap().unwrap();
+    change(&mut quote);
+    set_metadata(&store.connection, &quote_key(id), &quote).unwrap();
+}
+
+#[test]
+fn a_restricted_or_unknown_inventory_never_authorizes_a_redeem_even_with_a_quote_and_usable_offer() {
+    let fixture = Fixture::new(); let service = fixture.service();
+    let request = fixture.quote("account-a");
+    edit_quote(&fixture, "account-a", |quote| { quote.inventory.state = "restricted".into(); quote.inventory.lookup_reason = Some("surface".into()); });
+    assert_eq!(service.reset_begin(&request).err().unwrap().code, "RESET_OFFER_CHANGED");
+    // The cached read of a restricted inventory carries no confirmation and no totals, but keeps the offers visible.
+    let cached = service.reset_read(ReadRequest { account_id: "account-a".into(), refresh: false }).unwrap();
+    assert_eq!((cached.state.as_str(), cached.quote_id.is_none(), cached.lookup_reason.as_deref()), ("restricted", true, Some("surface")));
+    assert_eq!(cached.credits.len(), 1);
+}
+
+#[test]
+fn old_records_unknown_types_and_stale_reads_cannot_authorize_a_use() {
+    let fixture = Fixture::new(); let service = fixture.service();
+    let request = fixture.quote("account-a");
+    edit_quote(&fixture, "account-a", |quote| { quote.inventory.credits[0].reset_type = "unknown".into(); });
+    assert_eq!(service.reset_begin(&request).err().unwrap().code, "RESET_OFFER_CHANGED");
+    edit_quote(&fixture, "account-a", |quote| {
+        quote.inventory.credits[0].reset_type = "provider".into();
+        quote.inventory.credits[0].unavailable_reason = Some("blocked".into());
+    });
+    assert_eq!(service.reset_begin(&request).err().unwrap().code, "RESET_OFFER_CHANGED");
+    // A stored credit without the new fields deserializes as an unknown type with no spend authority.
+    let old: ResetCredit = serde_json::from_value(json!({"id":"credit-a","program":"cedar_ember","remainingCount":1,"usable":true,
+        "expiresAt":null,"startsAt":null,"clears":["anthropic:5h"],"requiresLimit":true,"status":"available"})).unwrap();
+    assert_eq!((old.reset_type.as_str(), old.gives_back_weekly, old.blocking.is_empty()), ("unknown", false, true));
+    // After the freshness window the cached balance is withdrawn and its offers stop being selectable.
+    edit_quote(&fixture, "account-a", |quote| {
+        quote.inventory.credits[0].unavailable_reason = None;
+        quote.inventory.observed_at = now_ms() - 400_000;
+    });
+    let stale = service.reset_read(ReadRequest { account_id: "account-a".into(), refresh: false }).unwrap();
+    assert_eq!((stale.state.as_str(), stale.available_count, stale.quote_id.is_none(), stale.lookup_reason.as_deref()), ("unknown", None, true, Some("stale")));
+    assert!(!stale.credits[0].usable);
+}
+
+#[test]
+fn a_limited_view_cannot_settle_an_ambiguous_request_and_a_fresh_offer_must_come_from_a_known_read() {
+    let fixture = Fixture::new(); let service = fixture.service();
+    let request = fixture.quote("account-a"); let (mut record, _) = service.reset_begin(&request).unwrap();
+    record.operation.state = "unknown".into();
+    let mut gone = credit(); gone.remaining_count = 0; gone.status = "redeemed".into();
+    let mut restricted = known(vec![gone]);
+    restricted.state = "restricted";
+    assert!(!reconcile(&mut record, &restricted));
+    assert!(reconcile(&mut record, &known(restricted.credits.clone())));
 }

@@ -5,6 +5,7 @@ import { parseLoginStatus, startArgs } from "./login";
 import { parseLocalUsageReport } from "./local-usage";
 import type { LocalUsageReport, UsageRange } from "./local-usage";
 import type { LoginRequest, LoginStatus } from "./login";
+import { parseResetWebStatus } from "./resets";
 import { parseAllocation } from "./allocation";
 import type { ToolAllocation } from "./allocation";
 import type { BusyReport, RestartReport } from "./serviceRestart";
@@ -143,6 +144,14 @@ export const setupStatus = async () => parseSetupStatus(await native<SetupStatus
 export const setupCheck = async () => parseSetupStatus(await native<SetupStatus>("setup_install", { check: true, withOmp: false }));
 export const setupInstall = async (withOmp = false) => parseSetupStatus(await native<SetupStatus>("setup_install", { check: false, withOmp }));
 export const openHomepage = () => native<{ opened: boolean }>("open_homepage");
+/// 고정된 Claude 공식 사용량 페이지를 연다. 웹뷰가 주소를 정하지 않는다.
+export const openClaudeUsage = () => native<{ opened: boolean }>("open_claude_usage");
+/// 계정에 묶인 Claude 웹 연결. 앱이 격리된 웹 창을 열어 로그인하게 하고, 쿠키·토큰은 화면에 오지 않는다. 응답은 연결 상태일 뿐 성공한 조회가 아니다.
+export const connectResetWeb = async (accountId: string) => parseResetWebStatus(await native<unknown>("connect_reset_web", { accountId }));
+/// 이 계정에 묶인 격리 프로필로 Claude 공식 페이지를 연다(수동 사용용). 연결이 없으면 열리지 않는다.
+export const openResetWeb = (accountId: string) => native<{ opened: boolean }>("open_reset_web", { accountId });
+/// 이 계정의 웹 프로필만 지우고 연결을 끊는다. 이후에야 OAuth 조회로 돌아간다.
+export const disconnectResetWeb = async (accountId: string) => parseResetWebStatus(await native<unknown>("disconnect_reset_web", { accountId }));
 export const getAutostart = () => native<boolean>("get_autostart");
 export const setAutostart = (enabled: boolean) => native<boolean>("set_autostart", { enabled });
 export const quitApp = (mode: "keep" | "deactivate") => native<string>("quit_app", { mode });
@@ -165,4 +174,7 @@ export const localUsage = async (range: UsageRange): Promise<LocalUsageReport> =
 
 export function assertOpened(result: { opened: boolean }): void {
   if (!result.opened) throw { code: "TERMINAL_NOT_OPENED", message: t("api.terminalNotOpened"), retryable: true } satisfies ApiError;
+}
+export function assertWebOpened(result: { opened: boolean }): void {
+  if (!result.opened) throw { code: "RESET_WEB_NOT_OPENED", message: t("error.code.RESET_WEB_NOT_OPENED"), retryable: true } satisfies ApiError;
 }

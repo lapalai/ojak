@@ -11,7 +11,7 @@ const verification = process.argv.slice(2);
 const verifyBuild = verification.length === 1 && verification[0] === '--verify-build';
 if (verification.length && !verifyBuild) throw new Error('Unsupported build option.');
 if (verifyBuild && process.env.GITHUB_ACTIONS === 'true'
-    && (!['push', 'pull_request'].includes(process.env.GITHUB_EVENT_NAME)
+    && (!['push', 'pull_request', 'workflow_dispatch'].includes(process.env.GITHUB_EVENT_NAME)
       || !/^(refs\/heads\/|refs\/pull\/)/.test(process.env.GITHUB_REF ?? ''))) {
   throw new Error('Unsigned verification is allowed only on branch/PR CI, never release tags.');
 }

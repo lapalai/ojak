@@ -125,6 +125,10 @@ impl Service {
             ));
         }
         api_credit::validate_key_format(provider, &request.key)?;
+        // 키 추가는 한 번에 하나씩만 한다. 지웠던 키를 다시 등록하면 같은 계정 id를 이어 쓰므로(아래), 같은 키를 동시에 추가하는 두 요청이
+        // 같은 id로 Keychain 항목을 쓰고 진 쪽이 이긴 쪽의 키를 지우는 일이 없어야 한다. 이 잠금은 검증 요청·Keychain 쓰기 동안 쥐지만
+        // 다른 서비스 작업(DB 잠금)은 막지 않는다. 키 추가는 사용자가 드물게 하는 조작이다.
+        let _one_add_at_a_time = self.api_key_add_gate.lock();
         let identity = api_credit::identity_key(provider, &request.key);
         let duplicate = || {
             ApiError::new(
@@ -132,7 +136,8 @@ impl Service {
                 "이미 등록한 API 키예요.",
             )
         };
-        {
+        // 지웠던 키를 다시 등록하면 같은 계정 id를 이어 쓴다: 이번 달 사용액(원장)과 풀 소속이 그대로 따라온다(키별 월 상한 우회 방지).
+        let reused_id = {
             let store = self.lock()?;
             if accounts(&store.connection)?
                 .iter()
@@ -140,12 +145,13 @@ impl Service {
             {
                 return Err(duplicate());
             }
-        }
+            store::reusable_api_key_id(&store.connection, &identity)?
+        };
         // 네트워크 확인에는 DB 잠금을 쥐지 않는다.
         verify_key(provider, &self.api_base(provider), &request.key)?;
         let now = now_ms();
         let account = Account {
-            id: new_id(),
+            id: reused_id.unwrap_or_else(new_id),
             provider: provider.id().into(),
             tool: API_TOOL.into(),
             label: request.label,
@@ -159,8 +165,9 @@ impl Service {
             api_credit: Some(ApiCreditState { period_start: api_credit::period_start(now), updated_at: now, ..Default::default() }),
             ..Default::default()
         };
-        // Keychain 쓰기(사용자 승인 창이 뜰 수 있음)는 서비스 잠금·DB 트랜잭션 밖에서 한다. 새 ID라 계정이 커밋되기 전에는
-        // 아무도 이 키를 찾지 않는다. 키 저장이 실패하면 계정을 만들지 않고, 계정 저장이 실패하면 방금 넣은 키를 지운다.
+        // Keychain 쓰기(사용자 승인 창이 뜰 수 있음)는 서비스 잠금·DB 트랜잭션 밖에서 한다. 새 id는 계정이 커밋되기 전에는 아무도 찾지 않고,
+        // 이어 쓰는 id는 지울 때 Keychain 항목도 지웠으며 같은 키 추가는 위 잠금으로 직렬화되어 있어 이 id를 가진 계정이 아직 없다.
+        // 키 저장이 실패하면 계정을 만들지 않고, 계정 저장이 실패하면 방금 넣은 키를 지운다(그 id의 계정이 이미 커밋돼 있으면 그 키는 지우지 않는다).
         api_credit::store_key(&account.id, &request.key)?;
         let saved = (|| {
             let mut store = self.lock()?;
@@ -176,13 +183,24 @@ impl Service {
                 return Err(duplicate());
             }
             save_account(&tx, &account)?;
-            tx.commit().map_err(db_error)
+            // 이어 받은 사용액(원장)이 있으면 그 값을 돌려준다. 새 키는 원장 행이 아직 없어 만들어 둔 0 상태를 그대로 쓴다.
+            let mut stored = store::account(&tx, &account.id)?;
+            stored.api_credit = stored.api_credit.or_else(|| account.api_credit.clone());
+            tx.commit().map_err(db_error)?;
+            Ok(stored)
         })();
-        if let Err(error) = saved {
-            let _ = api_credit::delete_key(&account.id);
-            return Err(error);
+        match saved {
+            Ok(stored) => Ok(stored),
+            Err(error) => {
+                let absent = self
+                    .lock()
+                    .is_ok_and(|store| store::account(&store.connection, &account.id).is_err_and(|error| error.code == "ACCOUNT_NOT_FOUND"));
+                if absent {
+                    let _ = api_credit::delete_key(&account.id);
+                }
+                Err(error)
+            }
         }
-        Ok(account)
     }
 
     pub(crate) fn api_credit_record(&self, request: ApiCreditRecord) -> Result<Value, ApiError> {
@@ -201,13 +219,17 @@ impl Service {
             },
             Err(error) => return Err(error),
         };
-        if let Some(session_id) = &request.session_id {
+        // 세션이 있으면 입장 때 캡처한 풀에 쌓는다(실행 중 풀 이동과 무관). 세션 없는 기록은 지금 그 키가 속한 풀이다.
+        let pool = if let Some(session_id) = &request.session_id {
             let record = lease(&store.connection, session_id)?;
             authorize(&record, request.capability.as_deref().unwrap_or(""))?;
             if record.session.account_id != target_id {
                 return Err(ApiError::new("INVALID_PARAMS", "이 대화가 쓴 API 키 계정이 아니에요."));
             }
-        }
+            record.session.api_credit_pool
+        } else {
+            crate::scheduler::pool_of(&policy(&store.connection)?, &target_id).map(|grant| grant.id.clone())
+        };
         // 공급자를 모르는 계정이면 단가를 구하지 않는다(미확인 요청으로 센다).
         let cost = ApiProvider::of(&provider).and_then(|provider| {
             request.usage.as_ref().and_then(|usage| {
@@ -218,7 +240,7 @@ impl Service {
                 )
             })
         });
-        record_api_credit(&mut store.connection, &target_id, cost, now_ms())?;
+        record_api_credit(&mut store.connection, &target_id, pool.as_deref(), cost, now_ms())?;
         Ok(serde_json::json!({"accountId": target_id, "costUsd": cost}))
     }
 }

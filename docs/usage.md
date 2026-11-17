@@ -76,6 +76,12 @@ Two optional settings let Ojak assign new work to **Codex credits** or **Claude 
 
 The provider may charge you. Ojak cannot see the amount charged or stop an already-running official CLI from switching to a paid usage path. A confirmation before an unmanaged launch is not a guarantee against all provider charges. Credit-balance support depends on what Codex reports, and the credit/extra-usage path has not yet been confirmed with a real paid account.
 
+### Credit amount and dates for each API key
+
+Go to **Connections → API keys → Anthropic → Amount & period** on the key you want to manage. The key list shows each saved expiry and estimated remaining credit. New entries apply only to the selected key; editing an existing entry preserves its recorded spending. Keys already sharing one credit balance are marked as shared, and editing them requires reviewing which keys are affected.
+
+Dates use the device time zone shown on screen. Enter an exact expiry or optionally save a subscription billing date to estimate it. OpenAI keys do not have this credit-period setting. **Usage → Assignment settings** retains only usage rules such as using API credit before expiry. Amounts and dates are manually confirmed inputs, not a Console balance fetched by Ojak.
+
 ## Updates
 
 Use the update check in **Settings → About**. Builds configured with the updater public key also check at startup and every 24 hours, and show an update badge in the menu bar/tray popover. Builds without a configured key do not show the updater UI. Updater signatures are separate from Apple notarization and Windows code signing.

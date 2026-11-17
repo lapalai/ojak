@@ -803,6 +803,8 @@ fn run_once(
             "반환된 예약은 이 실행 요청을 시작할 수 있는 상태가 아닙니다.",
         ));
     }
+    // 기본 설정에 등록된 MCP 서버를 이 실행에만 덧붙이는 임시 파일. 실행이 끝날 때까지(자기 재실행 포함) 붙들고 있다.
+    let mut _shared_mcp = None;
     let prepared = (|| {
         if api_grant {
             return prepare_api_credit(paths, &intent, &grant);
@@ -850,6 +852,17 @@ fn run_once(
                 )
             })?;
             plan.args.extend(["--session-id".into(), native_id.clone()]);
+        }
+        if arguments::wants_shared_mcp(&intent.tool, &native_args) {
+            // 실패해도 실행은 막지 않는다. 서버 정의는 오류에 담지 않는다.
+            match aam_adapters::prepare_shared_mcp(&paths.home.join("mcp"), &grant.account, &grant.session.cwd) {
+                Ok(Some(file)) => {
+                    plan.args.push(file.arg());
+                    _shared_mcp = Some(file);
+                }
+                Ok(None) => {}
+                Err(error) => eprintln!("aam: {} ({})", error.message, error.code),
+            }
         }
         // 공식 self-exec 계약(같은 PID로 교체)은 Unix exec에서만 지킬 수 있다. Windows는 wrapper를 두지 않고,
         // Claude의 재실행은 같은 Job과 같은 프로필 환경을 물려받는다.

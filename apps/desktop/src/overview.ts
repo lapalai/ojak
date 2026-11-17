@@ -19,6 +19,8 @@ export interface UsageRow {
   alias: string | null;
   /// 정렬용 키. 사용량이 아니라 이름이라 값이 바뀌어도 줄이 뛰지 않는다.
   sortKey: string;
+  /// API 키 행이면 그 키 계정 ID. 구독 한도 대신 크레딧 상태를 보여 준다.
+  apiKeyId?: string;
 }
 
 export type RowState = Verdict["kind"] | "availableLow";

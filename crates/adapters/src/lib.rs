@@ -12,6 +12,8 @@ mod quota;
 mod safety;
 mod settings;
 mod shared;
+mod shared_mcp;
+pub use shared_mcp::{prepare as prepare_shared_mcp, SharedMcp};
 mod takeover;
 pub use takeover::{configured_model, session_owner, SessionOwner};
 pub use settings::{
@@ -620,10 +622,10 @@ fn utility_command(tool: &str, args: &[std::ffi::OsString]) -> Option<bool> {
 fn profile_notice_line(tool: &str) -> Option<&'static str> {
     match (tool, cfg!(unix)) {
         ("claude", true) => Some(
-            "aam: 이 명령은 Ojak 계정을 고르지 않고 공식 CLI 기본 설정 폴더(~/.claude)에서 실행해요. 플러그인 폴더는 계정 대화와 연결돼요. 사용자 MCP는 복사되지 않아요.",
+            "aam: 이 명령은 Ojak 계정을 고르지 않고 공식 CLI 기본 설정 폴더(~/.claude)에서 실행해요. 여기서 등록한 MCP(user·local)는 다음 관리 실행부터 모든 Ojak 계정이 함께 써요. 플러그인 폴더도 계정 대화와 연결돼요.",
         ),
         ("claude", false) => Some(
-            "aam: 이 명령은 Ojak 계정을 고르지 않고 공식 CLI 기본 설정 폴더에서 실행해요. 사용자 MCP와 플러그인 폴더는 계정 대화로 복사되지 않아요.",
+            "aam: 이 명령은 Ojak 계정을 고르지 않고 공식 CLI 기본 설정 폴더에서 실행해요. 여기서 등록한 MCP(user·local)는 다음 관리 실행부터 모든 Ojak 계정이 함께 써요. 플러그인 폴더는 계정 대화로 복사되지 않아요.",
         ),
         ("codex", true) => Some(
             "aam: 이 명령은 Ojak 계정을 고르지 않고 공식 CLI 기본 설정 폴더(~/.codex)에서 실행해요. MCP, 플러그인, 기능 설정은 계정 대화를 시작할 때 그 폴더에서 가져와요.",

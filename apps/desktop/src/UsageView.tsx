@@ -9,6 +9,10 @@ import type { AccountDetailsProps } from "./AccountRow";
 import { MODE_TEXT, allocationModeOf } from "./allocation-mode";
 import { AllocationSettings, CreditSettings } from "./AllocationSettings";
 import { ApiCreditStatus } from "./ApiKeys";
+import { ApiKeyCreditDialog } from "./ApiCreditGrantPanel";
+import { keyCreditView, paidRoutes, providerCredit, providerCreditText } from "./credit-view";
+import { apiAccounts } from "./api-credit";
+import type { ApiKeyProvider } from "./types";
 import { FirstSuccessNotice, OnboardingCard } from "./OnboardingCard";
 import { getRecoveryWatches, rpc, setRecoveryWatch, toApiError } from "./api";
 import { canonicalProvider, fullTime, groupAccounts, isCurrentGroup, projectName, providerNames, relativeTime, timeZoneLabel, useAction, useBridge, useCharacters, useWindowVisible } from "./state";
@@ -65,6 +69,10 @@ export function UsageView({ snapshot, masked, online, refreshing, onReload, onRe
   const [picker, setPicker] = useState<Picker | null>(null);
   const [draftPin, setDraftPin] = useState("");
   const [settings, setSettings] = useState<"paid" | "allocation" | null>(null);
+  const [creditKey, setCreditKey] = useState<string | null>(null);
+  const creditAccount = creditKey === null ? null : snapshot.accounts.find(account => account.id === creditKey && account.tool === "api") ?? null;
+  useEffect(() => { if (creditKey !== null && creditAccount === null) setCreditKey(null); }, [creditKey, creditAccount]);
+  const routes = paidRoutes(snapshot.policy);
   function chooseAccount(provider: string) {
     pinAction.clear();
     const initial = pins[provider] ?? "";
@@ -115,11 +123,21 @@ export function UsageView({ snapshot, masked, online, refreshing, onReload, onRe
       alias: groupAlias(group.members), sortKey: "",
     }));
     const find = (provider: string, account: string) => rows.find(row => row.provider === provider && (row.group ? row.group.keys.includes(account.toLowerCase()) : row.account?.toLowerCase() === account.toLowerCase()));
+    // API 키는 구독 그룹에서 제외되지만 그 회사의 별도 계정이다. 행 이름은 gateway identity(`identityKey`)와 같아 omp 기록이 같은 행에 붙는다.
+    const keyRow = (provider: string, account: string, apiKey: Account): UsageRow => {
+      const verdict = snapshot.quotaSummaries?.find(summary => summary.accountIds.includes(apiKey.id)) ?? null;
+      const row: UsageRow = { key: `${provider}:${account}`, provider, account, group: null, cells: [], quotas: [], verdict, detail: [], notes: [t("apiKey.title")], off: !apiKey.enabled, unknown: false, alias: apiKey.label, sortKey: "", apiKeyId: apiKey.id };
+      rows.push(row);
+      return row;
+    };
+    // 등록한 키는 omp gateway가 없어도 행을 만든다. 그래야 크레딧·과금 상태가 브릿지 연결과 무관하게 보인다.
+    for (const apiKey of apiAccounts(snapshot.accounts)) {
+      const provider = canonicalProvider(apiKey.provider);
+      const account = apiKey.identityKey ?? apiKey.id;
+      if (!find(provider, account)) keyRow(provider, account, apiKey);
+    }
     const synthesize = (provider: string, account: string): UsageRow => {
-      // API 키는 구독 그룹에서 제외되지만, 등록된 gateway identity와 연결된 별도 계정이다.
-      const apiKey = snapshot.accounts.find(item => item.tool === "api" && canonicalProvider(item.provider) === provider && item.identityKey === account);
-      const verdict = apiKey ? snapshot.quotaSummaries?.find(summary => summary.accountIds.includes(apiKey.id)) ?? null : null;
-      const row: UsageRow = { key: `${provider}:${account}`, provider, account, group: null, cells: [], quotas: [], verdict, detail: [], notes: [t(apiKey ? "apiKey.title" : "usage.note.unregisteredBridgeAccount")], off: apiKey ? !apiKey.enabled : false, unknown: false, alias: apiKey?.label ?? null, sortKey: "" };
+      const row: UsageRow = { key: `${provider}:${account}`, provider, account, group: null, cells: [], quotas: [], verdict: null, detail: [], notes: [t("usage.note.unregisteredBridgeAccount")], off: false, unknown: false, alias: null, sortKey: "" };
       rows.push(row);
       return row;
     };
@@ -222,6 +240,8 @@ export function UsageView({ snapshot, masked, online, refreshing, onReload, onRe
     canPin: Boolean(row.group && pinMember(row.group, row.provider)) && !row.unknown, pinPending: pinAction.pending,
     onChoose: () => chooseAccount(row.provider), expiringBoosted: Boolean(snapshot.policy.expiringBoost) && allocationModeOf(snapshot.policy.allocationMode) === "smart",
     refreshing, onRefresh, onConnect, accounts: snapshot.accounts, onReload, watch,
+    credit: row.apiKeyId ? keyCreditView(snapshot, row.apiKeyId, now) : null,
+    onManageCredit: row.apiKeyId && online ? () => setCreditKey(row.apiKeyId!) : null,
   });
   const pickerRows = picker ? rows.filter(row => row.provider === picker.provider && row.group && !row.unknown && pinMember(row.group, picker.provider)) : [];
   const draftRow = pickerRows.find(row => row.group?.members.some(member => member.id === draftPin));
@@ -240,7 +260,7 @@ export function UsageView({ snapshot, masked, online, refreshing, onReload, onRe
       <button type="button" className="text-button" title={t("usage.dashboard.workHelp")} onClick={() => setFilter("running")}><span className={runningCount ? "live inline" : "dot idle"} />{t("usage.dashboard.running", { count: runningCount })}</button>
       {attentionCount > 0 && <button type="button" className="text-button" onClick={() => setFilter("attention")}>{t("usage.dashboard.attention", { count: attentionCount })}</button>}
       </> : <span><span className="dot idle" />{t("usage.dashboard.offline")}</span>}
-      <button type="button" className={`paid-summary${snapshot.policy.useCreditsAfterLimit || snapshot.policy.useExtraUsageAfterLimit || snapshot.policy.useApiCreditAfterLimit ? " enabled" : ""}`} aria-label={t("paid.settings")} onClick={() => setSettings("paid")}><ShieldCheck size={14} />{t(snapshot.policy.useCreditsAfterLimit || snapshot.policy.useExtraUsageAfterLimit || snapshot.policy.useApiCreditAfterLimit ? "usage.dashboard.paidOn" : "usage.dashboard.paidOff")}<ChevronRight size={13} /></button>
+      <button type="button" className={`paid-summary${routes.length ? " enabled" : ""}`} aria-label={t("paid.settings")} onClick={() => setSettings("paid")}><ShieldCheck size={14} />{routes.length ? t("usage.dashboard.paidRoutes", { routes: routes.map(route => t(`paid.route.${route}`)).join(", ") }) : t("usage.dashboard.paidOff")}<ChevronRight size={13} /></button>
     </div>
     <ApiCreditStatus snapshot={snapshot} />
     {online && <FirstSuccessNotice snapshot={snapshot} masked={masked} />}
@@ -269,6 +289,7 @@ export function UsageView({ snapshot, masked, online, refreshing, onReload, onRe
           <span className="provider-choice">{manual ? `${t("usage.pin.pinned")} · ${pinnedRow ? accountName(pinnedRow, masked) : t("account.unknown")}` : t("usage.dashboard.auto")}</span>
           {(pickable.length > 0 || manual) && <button type="button" className="text-button" disabled={!online || pinAction.pending} onClick={() => chooseAccount(provider)}>{t("usage.dashboard.choose")}<ChevronRight size={13} /></button>}
         </header>
+        <ProviderCreditLine snapshot={snapshot} provider={provider} />
         {pinFallback && <div className="notice pin-fallback" style={{ "--tone": "var(--warning)" } as CSSProperties}><p>{t("usage.pin.fallback")} <button type="button" className="text-button" disabled={!online || pinAction.pending} onClick={() => { void setPin(provider, null); }}>{t("usage.pin.backToAuto")}</button></p></div>}
         {resting && <div className="tiger-out" role="status">
           <img src={tigerStrip} alt="" width={56} height={56} />
@@ -350,7 +371,23 @@ export function UsageView({ snapshot, masked, online, refreshing, onReload, onRe
         <div className="modal-footer"><button type="button" disabled={pinAction.pending} onClick={() => setPicker(null)}>{t("common.cancel")}</button><button type="submit" className="primary" disabled={!online || pinAction.pending || pickerStale || !pinValid || draftPin === picker.initial}>{pinAction.pending ? <Busy /> : t("usage.dashboard.apply")}</button></div>
       </form>
     </Modal>}
+    {creditAccount && <ApiKeyCreditDialog key={creditAccount.id} accountId={creditAccount.id} snapshot={snapshot} online={online} masked={masked} onReload={onReload} onClose={() => setCreditKey(null)} />}
     {settings === "paid" && <CreditSettings snapshot={snapshot} masked={masked} online={online} onReload={onReload} onClose={() => setSettings(null)} />}
     {settings === "allocation" && <Modal title={t("usage.dashboard.allocation")} subtitle={t("usage.dashboard.autoSave")} wide onClose={() => setSettings(null)}><div className="modal-body"><AllocationSettings snapshot={snapshot} masked={masked} online={online} onReload={onReload} /></div></Modal>}
   </>;
+}
+
+const CREDIT_PROVIDERS: Record<string, ApiKeyProvider> = { anthropic: "anthropic", openai: "openai" };
+
+/// 회사 묶음 머리 아래 API 크레딧 한 줄: 진행 중인 크레딧 남은 금액·가장 빠른 만료, 만료로 못 쓴 금액, 금액·기간 없는 키. 금액을 모르는 입력은 ‘확인 안 됨’으로 따로 말한다. 키가 없는 공급자에는 없다.
+function ProviderCreditLine({ snapshot, provider }: { snapshot: Snapshot; provider: string }) {
+  const apiProvider = CREDIT_PROVIDERS[provider];
+  if (!apiProvider) return null;
+  const credit = providerCredit(snapshot, apiProvider, snapshot.generatedAt);
+  if (credit.keys === 0) return null;
+  const text = providerCreditText(credit);
+  return <div className="provider-credit" role="note" aria-label={t("usage.detail.credit")}>
+    <span>{text.main}{text.showExpiry && credit.nextExpiry !== null && <span className="muted"> · <time dateTime={new Date(credit.nextExpiry).toISOString()} title={fullTime(credit.nextExpiry)}>{t("usage.credit.nextExpiry", { time: relativeTime(credit.nextExpiry, true) })}</time></span>}</span>
+    {text.warnings.map(warning => <span key={warning} className="provider-credit-warn">{warning}</span>)}
+  </div>;
 }

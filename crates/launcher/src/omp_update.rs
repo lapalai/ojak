@@ -30,6 +30,7 @@ use std::{
 };
 
 const RELEASE_API: &str = "https://api.github.com/repos/lapalai/ojak/releases?per_page=30";
+const UPSTREAM_RELEASE_API: &str = "https://api.github.com/repos/can1357/oh-my-pi/releases/latest";
 const DOWNLOAD_PREFIX: &str = "https://github.com/lapalai/ojak/releases/download/";
 const REDIRECT_HOST: &str = "release-assets.githubusercontent.com";
 const MANIFEST: &str = "omp-compatible-v2.json";
@@ -87,12 +88,24 @@ pub enum Outcome {
     Updated,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "kebab-case")]
+pub enum UpstreamStatus {
+    Current,
+    CompatibilityPending,
+    Unknown,
+}
+
 #[derive(Debug, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct Report {
     pub outcome: Outcome,
     pub installed: Option<String>,
     pub available: String,
+    /// `available`은 Ojak 호환 채널 버전이다. 원본 최신 여부는 이 필드들로 따로 보고한다.
+    pub upstream_version: Option<String>,
+    pub upstream_status: UpstreamStatus,
+    pub upstream_notice: String,
     pub service_version: Option<String>,
     pub minimum_ojak_service: String,
     pub path: String,
@@ -489,6 +502,9 @@ pub(crate) fn run(request: Request<'_>) -> Result<Report, ApiError> {
         outcome,
         installed: installed.clone(),
         available: plan.version.clone(),
+        upstream_version: None,
+        upstream_status: UpstreamStatus::Unknown,
+        upstream_notice: "원본 최신 버전은 확인하지 못했어요. 호환 채널 기준 결과입니다.".into(),
         service_version: request.service_version.clone(),
         minimum_ojak_service: plan.minimum_ojak_service.clone(),
         path: target.display().to_string(),
@@ -522,7 +538,35 @@ pub fn update(paths: &aam_protocol::Paths, check: bool, force: bool) -> Result<R
         .ok()
         .and_then(|snapshot| snapshot.get("serviceVersion").and_then(Value::as_str).map(str::to_owned));
     let target = resolve_target(&crate::omp_bridge::omp()?)?;
-    run(Request { source: &Source::github(), platform, target: &target, check, force, service_version })
+    let mut report = run(Request { source: &Source::github(), platform, target: &target, check, force, service_version })?;
+    report_upstream(&mut report, UPSTREAM_RELEASE_API);
+    Ok(report)
+}
+
+/// 원본 조회는 안내용이다. 실패해도 검증된 호환판 설치를 되돌리거나 원본 실행 파일로 우회하지 않는다.
+fn report_upstream(report: &mut Report, url: &str) {
+    let latest = metadata_client()
+        .and_then(|client| bounded(&client, url, RELEASE_LIMIT, None, Duration::from_secs(10)))
+        .ok()
+        .and_then(|bytes| serde_json::from_slice::<Value>(&bytes).ok())
+        .and_then(|release| {
+            if release["draft"] != false || release["prerelease"] != false { return None; }
+            let tag = release["tag_name"].as_str()?.strip_prefix('v')?;
+            if tag.contains(['-', '+']) || tag != tag.trim() { return None; }
+            triple(tag)?;
+            Some(tag.to_owned())
+        });
+    report.upstream_status = match latest.as_deref().and_then(triple) {
+        Some(upstream) if triple(&report.available).is_some_and(|compatible| upstream > compatible) => UpstreamStatus::CompatibilityPending,
+        Some(_) => UpstreamStatus::Current,
+        None => UpstreamStatus::Unknown,
+    };
+    report.upstream_notice = match report.upstream_status {
+        UpstreamStatus::CompatibilityPending => format!("원본 최신은 {}이고, 공개된 Ojak 호환판은 {}입니다. 호환 채널이 원본 최신판보다 뒤처져 있어 새 원본의 호환 빌드·검증·공개가 필요합니다.", latest.as_deref().unwrap(), report.available),
+        UpstreamStatus::Current => "Ojak 호환판이 원본 최신 버전을 반영하고 있습니다.".into(),
+        UpstreamStatus::Unknown => "원본 최신 버전 조회에 실패했어요. 호환 채널 기준 결과이며 원본 최신 여부는 알 수 없습니다.".into(),
+    };
+    report.upstream_version = latest;
 }
 
 #[cfg(test)]
@@ -829,6 +873,53 @@ mod tests {
         assert_eq!(fixture.leftovers(), 1);
     }
 
+    /// Native release gate: use copies, never either supplied executable in place.
+    #[test]
+    #[ignore = "requires AAM_OMP_NATIVE_OLD and AAM_OMP_NATIVE_NEW for the current host"]
+    fn native_binary_update_and_rollback() {
+        let old = PathBuf::from(std::env::var_os("AAM_OMP_NATIVE_OLD").expect("AAM_OMP_NATIVE_OLD"));
+        let new = PathBuf::from(std::env::var_os("AAM_OMP_NATIVE_NEW").expect("AAM_OMP_NATIVE_NEW"));
+        resolve_target(&old).unwrap();
+        resolve_target(&new).unwrap();
+        let old_version = run_version(&old).unwrap();
+        let new_version = run_version(&new).unwrap();
+        assert_ne!(old_version, new_version, "release gate requires different native builds");
+        let platform = if cfg!(windows) { "win32-x64" } else { "darwin-arm64" };
+        let fixture = Fixture::new();
+        let target = fixture.dir.join(if cfg!(windows) { "omp.exe" } else { "omp" });
+        fs::copy(&old, &target).unwrap();
+        let before = Sha256::digest(fs::read(&target).unwrap());
+        let mut release = Release::versioned(&new_version);
+        release.binary = fs::read(&new).unwrap();
+        let expected = Sha256::digest(&release.binary);
+        let server = release.serve();
+        let source = server.source();
+        let report = run(Request {
+            source: &source, platform, target: &target, check: false, force: true,
+            service_version: Some(env!("CARGO_PKG_VERSION").into()),
+        }).unwrap();
+        assert_eq!(report.outcome, Outcome::Updated);
+        assert_eq!(run_version(&target).as_deref(), Some(new_version.as_str()));
+        assert_eq!(Sha256::digest(fs::read(&target).unwrap()), expected);
+        assert_eq!(fixture.leftovers(), 1);
+
+        fs::copy(&old, &target).unwrap();
+        // Valid metadata and digest, but the real binary reports a different version.
+        release.version = "999.0.0-ojak.1".into();
+        release.tag = "omp-v999.0.0-ojak.1".into();
+        let server = release.serve();
+        let source = server.source();
+        let problem = run(Request {
+            source: &source, platform, target: &target, check: false, force: true,
+            service_version: Some(env!("CARGO_PKG_VERSION").into()),
+        }).unwrap_err();
+        assert_eq!(problem.code, "OMP_UPDATE_VERIFY_FAILED");
+        assert_eq!(run_version(&target).as_deref(), Some(old_version.as_str()));
+        assert_eq!(Sha256::digest(fs::read(&target).unwrap()), before);
+        assert_eq!(fixture.leftovers(), 1);
+        println!("native update {old_version} -> {new_version} and exact rollback passed on {platform}");
+    }
+
     #[test]
     fn invalid_release_shapes_never_touch_the_executable() {
         for tamper in ["schema1", "minimum", "size", "missing-manifest", "old-assets", "draft", "prerelease", "digest"] {
@@ -982,5 +1073,33 @@ mod tests {
             assert_eq!(fs::read(&target).unwrap(), before);
             assert!(!downloaded_binary(&server));
         }
+    }
+
+    #[test]
+    fn upstream_lag_and_unknown_are_not_reported_as_current() {
+        let fixture = Fixture::new();
+        let target = fixture.omp(NEW_VERSION);
+        let before = fs::read(&target).unwrap();
+        let server = Release::new().serve();
+        let mut report = run(request(&server.source(), &target, true, false, None)).unwrap();
+        for (tag, draft, prerelease, expected, version) in [
+            ("v18.18.9", false, false, UpstreamStatus::CompatibilityPending, Some("18.18.9")),
+            ("v18.15.0", false, false, UpstreamStatus::Current, Some("18.15.0")),
+            ("v18.18.9-rc.1", false, false, UpstreamStatus::Unknown, None),
+            ("v18.18.9", true, false, UpstreamStatus::Unknown, None),
+            ("v18.18.9", false, true, UpstreamStatus::Unknown, None),
+            ("v18.018.9", false, false, UpstreamStatus::Unknown, None),
+        ] {
+            let upstream = Server::start(|_| HashMap::from([("/latest".into(), (200, vec![], serde_json::json!({"tag_name":tag,"draft":draft,"prerelease":prerelease}).to_string().into_bytes()))]));
+            report_upstream(&mut report, &format!("http://127.0.0.1:{}/latest", upstream.port));
+            assert_eq!(report.upstream_status, expected, "{tag}");
+            assert_eq!(report.upstream_version.as_deref(), version);
+            assert_eq!(report.outcome, Outcome::UpToDate); // 호환 채널 판정과 원본 판정은 별개다.
+            assert_eq!(fs::read(&target).unwrap(), before);
+        }
+        report_upstream(&mut report, &format!("http://127.0.0.1:{}/missing", server.port));
+        assert_eq!(report.upstream_status, UpstreamStatus::Unknown);
+        assert_eq!(report.upstream_version, None);
+        assert_eq!(fs::read(&target).unwrap(), before);
     }
 }

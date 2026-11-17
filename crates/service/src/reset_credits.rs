@@ -1,4 +1,4 @@
-use crate::{reset_provider::{self, Auth, Inventory, Provider}, store::*, Service};
+use crate::{reset_provider::{self, Auth, Inventory, Provider}, reset_web, store::*, Service};
 use aam_protocol::{now_ms, new_id, Account, ApiError, ResetCredit, ResetInventory, ResetOperation};
 use rusqlite::{Connection, TransactionBehavior};
 use serde::{Deserialize, Serialize};
@@ -24,7 +24,7 @@ fn request_key(id: &str) -> String { format!("resetRequest:{id}") }
 fn gate_key(owner: &str) -> String { format!("resetGate:{owner}") }
 fn blocked(state: &str) -> bool { matches!(state, "preparing" | "submitted" | "unknown") }
 fn changed() -> ApiError { ApiError::new("RESET_OFFER_CHANGED", "계정 또는 초기화권 조건이 바뀌었어요. 새로 조회하고 다시 확인해 주세요.") }
-fn provider(account: &Account) -> Option<&'static str> {
+pub(crate) fn provider(account: &Account) -> Option<&'static str> {
     match account.tool.as_str() {
         "claude" => Some("anthropic"), "codex" => Some("openai-codex"),
         "omp" => match account.identity_key.as_deref()?.split('|').next()? {
@@ -44,9 +44,29 @@ fn owner(auth: &Auth) -> Result<String, ApiError> {
     };
     fingerprint(&(auth.provider, scope))
 }
-fn blank(account_id: &str, state: &str) -> ResetInventory {
+fn blank(account_id: &str, state: &str, reason: Option<&str>) -> ResetInventory {
     ResetInventory { account_id: account_id.into(), state: state.into(), available_count: None, redeemable_count: None,
-        credits: vec![], observed_at: 0, quote_id: None, operation: None }
+        credits: vec![], observed_at: 0, quote_id: None, operation: None, lookup_reason: reason.map(Into::into),
+        source: "oauth".into(), web: None }
+}
+/// A balance that is no longer a proven, current fact: totals and the confirmation are withdrawn and
+/// no remaining offer stays selectable. Offers remain visible as observations only.
+pub(crate) fn downgrade(inventory: &mut ResetInventory, state: &str, reason: &str) {
+    inventory.quote_id = None;
+    inventory.state = state.into();
+    inventory.available_count = None;
+    inventory.redeemable_count = None;
+    inventory.lookup_reason.get_or_insert_with(|| reason.into());
+    for credit in &mut inventory.credits {
+        credit.usable = false;
+        if credit.unavailable_reason.is_none() { credit.unavailable_reason = Some(reason.into()); }
+        if credit.status == "available" { credit.status = "unavailable".into(); }
+    }
+}
+/// The OAuth inventory of a Claude account, annotated with its (disconnected) web route status.
+fn with_web(mut inventory: ResetInventory, web: Option<aam_protocol::ResetWebStatus>) -> ResetInventory {
+    inventory.web = web;
+    inventory
 }
 fn gate(connection: &Connection, key: &str) -> Result<Option<Record>, ApiError> {
     let id: Option<String> = metadata(connection, &gate_key(key))?;
@@ -72,7 +92,8 @@ fn after_restart(record: &mut Record, instance_id: &str) -> bool {
     true
 }
 fn reconcile(record: &mut Record, inventory: &Inventory) -> bool {
-    if record.operation.state != "unknown" { return false; }
+    // A limited view proves nothing about a previously ambiguous request.
+    if record.operation.state != "unknown" || inventory.state != "known" { return false; }
     let Some(current) = inventory.credits.iter().find(|c| c.id == record.credit.id && c.program == record.credit.program) else { return false; };
     let settled = if record.credit.program == "juniper_tide" {
         // Juniper has no request id and reuses its credit id. A temporary eligibility
@@ -109,18 +130,24 @@ impl Service {
     }
     pub(crate) fn reset_read(self: &Arc<Self>, request: ReadRequest) -> Result<ResetInventory, ApiError> {
         let account = self.reset_account(&request.account_id)?;
-        if provider(&account).is_none() { return Ok(blank(&account.id, "unsupported")); }
+        if provider(&account).is_none() { return Ok(blank(&account.id, "unsupported", None)); }
+        // A Claude account the user connected to the web route reads ONLY through it. A failed web read is reported,
+        // never hidden by an OAuth fallback; OAuth reads resume only after an explicit disconnect. Allocation settings
+        // (enabled/auth status) do not gate this read: it uses the user's own web login, not a native credential.
+        if let Some(inventory) = self.web_inventory(&account.id, request.refresh, reset_web::READ_WAIT, reset_web::Clock::now())? {
+            return Ok(inventory);
+        }
+        let web_off = (provider(&account) == Some("anthropic")).then(|| reset_web::disconnected(&account.id));
         let binding = binding_fingerprint(&account)?;
         if !request.refresh {
             let store = self.lock()?;
-            let Some(quote): Option<Quote> = metadata(&store.connection, &quote_key(&account.id))? else { return Ok(blank(&account.id, "unknown")); };
-            if quote.binding != binding { return Ok(blank(&account.id, "unknown")); }
+            let Some(quote): Option<Quote> = metadata(&store.connection, &quote_key(&account.id))? else { return Ok(with_web(blank(&account.id, "unknown", Some("no_cache")), web_off)); };
+            if quote.binding != binding { return Ok(with_web(blank(&account.id, "unknown", Some("binding_changed")), web_off)); }
             let mut result = quote.inventory;
             if let Some(mut record) = gate(&store.connection, &quote.owner)? {
                 if after_restart(&mut record, &self.reset_instance_id) { save(&store.connection, &record)?; }
                 if quote.after_request.as_deref() != Some(&record.operation.request_id) {
-                    result.quote_id = None;
-                    result.state = "unknown".into(); result.available_count = None; result.redeemable_count = None;
+                    downgrade(&mut result, "unknown", "gate_pending");
                 }
                 result.operation = Some(record.operation);
             }
@@ -128,9 +155,11 @@ impl Service {
                 result.quote_id = None;
             }
             if now_ms().saturating_sub(result.observed_at) > 300_000 {
-                result.state = "unknown".into(); result.available_count = None; result.redeemable_count = None;
+                downgrade(&mut result, "unknown", "stale");
             }
-            return Ok(result);
+            // Only a known inventory may carry a confirmation.
+            if result.state != "known" { result.quote_id = None; }
+            return Ok(with_web(result, web_off));
         }
         let (auth, client) = self.reset_auth(&account)?;
         let inventory = client.list(&auth)?;
@@ -144,13 +173,15 @@ impl Service {
             if reconcile(&mut record, &inventory) || restarted { save(&tx, &record)?; }
             operation = Some(record.operation);
         }
-        let result = ResetInventory { account_id: account.id.clone(), state: "known".into(), available_count: Some(inventory.available),
-            redeemable_count: Some(inventory.redeemable), credits: inventory.credits, observed_at: now_ms(),
-            quote_id: if operation.as_ref().is_some_and(|o| blocked(&o.state)) { None } else { Some(new_id()) }, operation };
+        let known = inventory.state == "known";
+        let result = ResetInventory { account_id: account.id.clone(), state: inventory.state.into(), available_count: inventory.available,
+            redeemable_count: inventory.redeemable, credits: inventory.credits, observed_at: now_ms(),
+            quote_id: if known && !operation.as_ref().is_some_and(|o| blocked(&o.state)) { Some(new_id()) } else { None }, operation,
+            lookup_reason: inventory.reason.map(Into::into), source: "oauth".into(), web: None };
         set_metadata(&tx, &quote_key(&account.id), &Quote { owner, binding,
             after_request: result.operation.as_ref().map(|op| op.request_id.clone()), inventory: result.clone() })?;
         tx.commit().map_err(db_error)?;
-        Ok(result)
+        Ok(with_web(result, web_off))
     }
 
     /// Claim durably before auth/network I/O. All desktop/CLI clients and duplicate account bindings share this gate.
@@ -167,15 +198,19 @@ impl Service {
             tx.commit().map_err(db_error)?;
             return Ok((prior, false));
         }
+        if reset_web::is_connected(&tx, &request.account_id)? {
+            return Err(ApiError::new("RESET_WEB_READ_ONLY", "웹으로 연결된 계정의 초기화권은 Ojak에서 사용할 수 없어요. 공식 웹 페이지에서 사용해 주세요."));
+        }
         let mut quote: Quote = metadata(&tx, &quote_key(&account.id))?.ok_or_else(changed)?;
-        if quote.binding != binding || quote.inventory.quote_id.as_deref() != Some(&request.quote_id)
+        if quote.binding != binding || quote.inventory.state != "known" || quote.inventory.quote_id.as_deref() != Some(&request.quote_id)
             || quote.inventory.observed_at > now_ms() || now_ms().saturating_sub(quote.inventory.observed_at) > 120_000 { return Err(changed()); }
         if let Some(mut active) = gate(&tx, &quote.owner)? {
             if after_restart(&mut active, &self.reset_instance_id) { save(&tx, &active)?; }
             if blocked(&active.operation.state) { return Err(ApiError::new("RESET_IN_PROGRESS", "이 계정의 초기화권 사용 결과를 아직 확인하지 못했어요. 재사용하지 않고 결과를 먼저 조회해 주세요.")); }
             if quote.after_request.as_deref() != Some(&active.operation.request_id) { return Err(changed()); }
         }
-        let credit = quote.inventory.credits.iter().find(|c| c.id == request.credit_id && c.usable && c.remaining_count > 0)
+        // Stored records from before the type metadata deserialize as `unknown`; they never authorize a spend.
+        let credit = quote.inventory.credits.iter().find(|c| c.id == request.credit_id && c.usable && c.remaining_count > 0 && c.reset_type != "unknown" && c.unavailable_reason.is_none())
             .filter(|c| c.expires_at.is_none_or(|t| t > now_ms())).ok_or_else(changed)?.clone();
         let now = now_ms();
         let record = Record { owner: quote.owner.clone(), binding, service_instance_id: self.reset_instance_id.clone(), credit,
@@ -196,7 +231,7 @@ impl Service {
     }
     fn reset_send(&self, record: &mut Record, auth: &Auth, client: &Provider) -> Result<ResetOperation, ApiError> {
         let fresh = client.list(auth)?;
-        if owner(auth)? != record.owner || !fresh.credits.iter().any(|credit| credit == &record.credit && credit.usable) { return Err(changed()); }
+        if owner(auth)? != record.owner || fresh.state != "known" || !fresh.credits.iter().any(|credit| credit == &record.credit && credit.usable) { return Err(changed()); }
         {
             let store = self.lock()?;
             if binding_fingerprint(&account(&store.connection, &record.operation.account_id)?)? != record.binding { return Err(changed()); }
