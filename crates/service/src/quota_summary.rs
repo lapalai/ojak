@@ -279,7 +279,7 @@ pub(crate) fn summaries_with(accounts: &[Account], policy: &Policy, blocks: &[Bl
         }
     }
     // 공급자마다 따로 켠다: 그 공급자의 구독 묶음(사용자가 제외하지 않은 것)이 하나 이상 있고 모두 한도 소진으로 쉬는 중이며, 그 공급자의 옵트인이 켜졌을 때만이다.
-    // Claude 키는 풀에 속하면 그 풀이 진행 중일 때만 열린다(풀은 Claude 전용, 풀 밖의 키는 그대로). OpenAI는 풀·선제 사용이 없다.
+    // 키가 풀에 속하면 그 풀이 진행 중일 때만 열린다(풀 밖의 키는 그대로). 두 공급자 모두 같다.
     for provider in [ApiProvider::Anthropic, ApiProvider::OpenAi] {
         let (opted_in, left) = match provider {
             ApiProvider::Anthropic => (policy.use_api_credit_after_limit, claude_left),
@@ -293,8 +293,7 @@ pub(crate) fn summaries_with(accounts: &[Account], policy: &Policy, blocks: &[Bl
         let spent = !subscription.is_empty() && subscription.iter().all(|summary| summary.kind == "resting" && !summary.rate);
         if opted_in && !left && spent {
             for (members, summary) in groups.iter().zip(&mut results) {
-                let open = provider == ApiProvider::OpenAi
-                    || members.iter().any(|a| crate::scheduler::grant_allows_fallback(policy, ledger, &a.id, now).is_ok());
+                let open = members.iter().any(|a| crate::scheduler::grant_allows_fallback(policy, ledger, &a.id, now).is_ok());
                 if summary.kind == "available" && open && members.iter().all(|a| provider.owns(a)) {
                     if let Some(api) = summary.api_credit.as_mut() {
                         api.active = true;

@@ -165,7 +165,7 @@ export interface Policy {
   useCreditsAfterLimit?: boolean;
   /// 구독 한도를 다 쓴 Claude 계정에서 추가 사용량(API 요금)을 쓰도록 배정한다. 기본 꺼짐.
   useExtraUsageAfterLimit?: boolean;
-  /// 모든 Claude 구독 계정이 한도를 다 쓴 뒤 등록한 API 키(Max 플랜 월 API 크레딧)로 omp·`claude -p` 요청을 보낸다. 기본 꺼짐.
+  /// Claude API 전환 허용. omp는 요청 모델 한도 소진 또는 활성 구독 없음, `claude -p`는 기존 공용 한도 소진 조건이다. 기본 꺼짐.
   useApiCreditAfterLimit?: boolean;
   /// Claude API 키 **하나당** 월(UTC 달력월) 추정 사용액 상한(USD). 키마다 따로 적용하며 합계에 걸리지 않는다. Ojak의 보조 장치이며 실제 청구 상한이 아니다. 기본 200.
   apiCreditMonthlyLimitUsd?: number;

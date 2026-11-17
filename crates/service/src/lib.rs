@@ -7,6 +7,7 @@ mod quota_summary;
 mod readiness;
 mod reset_credits;
 mod reset_provider;
+mod reset_web;
 mod routes;
 pub mod runtime_health;
 pub mod scheduler;
@@ -147,6 +148,8 @@ pub struct Service {
     last_probe_at: AtomicI64,
     started_at: i64,
     reset_instance_id: String,
+    /// 웹 초기화권 작업 대기열(메모리 전용). 재시작 뒤에는 어떤 작업도 다시 쓸 수 없다.
+    reset_web: reset_web::Runtime,
     prepared_ms: i64,
     suspect_ms: i64,
     /// 백그라운드 시작 뒤에만 생긴다. 테스트용 서비스는 브릿지를 띄우지 않는다.
@@ -241,7 +244,7 @@ struct BillingInput {
 #[derive(Deserialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 struct GrantInput {
-    /// 이 풀의 잔액을 쓰는 Anthropic API 키 계정 ID(같은 Console 조직의 키). 다른 풀에 있는 키는 넣을 수 없다.
+    /// 이 풀의 잔액을 쓰는 API 키 계정 ID(같은 Claude Console 조직 또는 같은 OpenAI API 조직의 키). 한 풀에는 한 공급자의 키만, 다른 풀에 있는 키는 넣을 수 없다.
     account_ids: Vec<String>,
     budget_usd: f64,
     starts_at: i64,
@@ -475,6 +478,7 @@ impl Service {
             last_probe_at: AtomicI64::new(0),
             started_at: now_ms(),
             reset_instance_id: new_id(),
+            reset_web: Default::default(),
             prepared_ms: config_ms("AAM_PREPARED_TIMEOUT_MS", 30_000, 1_000, 300_000),
             suspect_ms: config_ms("AAM_SUSPECT_THRESHOLD_MS", 45_000, 10_000, 600_000),
             bridge: OnceLock::new(),
@@ -604,6 +608,7 @@ impl Service {
             "status.read" => value(self.snapshot()?),
             "resetCredits.read" => value(self.reset_read(parse(params)?)?),
             "resetCredits.redeem" => value(self.reset_redeem(parse(params)?)?),
+            "resetWeb.connect" | "resetWeb.disconnect" | "resetWeb.status" | "resetWeb.request" | "resetWeb.poll" | "resetWeb.complete" => self.reset_web_rpc(method, params),
             "quota.refresh" => {
                 // 사용자가 직접 누른 새로고침만 omp의 5분 보고 캐시를 건너뛴다. 정기 조회는 캐시를 존중한다.
                 self.start_refresh_with(params.get("force").and_then(Value::as_bool).unwrap_or(false));
@@ -763,6 +768,7 @@ impl Service {
             .transaction_with_behavior(TransactionBehavior::Immediate)
             .map_err(db_error)?;
         let mut current = policy(&tx)?;
+        let mut confirmed_keys: Option<Vec<String>> = None;
         if current.revision != request.expected_revision {
             return Err(ApiError::new(
                 "POLICY_CONFLICT",
@@ -901,9 +907,18 @@ impl Service {
                 return Err(ApiError::new("INVALID_PARAMS", "풀에 넣을 API 키를 하나 이상 골라 주세요."));
             }
             let all = accounts(&tx)?;
+            // 풀 하나는 한 조직의 잔액이라 한 공급자의 키만 담는다(Claude Console 조직 또는 OpenAI API 조직).
+            let mut pool_provider: Option<aam_adapters::api_credit::ApiProvider> = None;
             for key in &account_ids {
-                if !all.iter().any(|account| &account.id == key && aam_adapters::api_credit::ApiProvider::Anthropic.owns(account)) {
-                    return Err(ApiError::new("INVALID_PARAMS", "풀에는 등록된 Anthropic API 키만 넣을 수 있어요."));
+                let Some(provider) = all
+                    .iter()
+                    .find(|account| &account.id == key && account.tool == aam_adapters::api_credit::API_TOOL)
+                    .and_then(|account| aam_adapters::api_credit::ApiProvider::of(&account.provider))
+                else {
+                    return Err(ApiError::new("INVALID_PARAMS", "풀에는 등록된 API 키만 넣을 수 있어요."));
+                };
+                if pool_provider.replace(provider).is_some_and(|first| first != provider) {
+                    return Err(ApiError::new("INVALID_PARAMS", "한 풀에는 같은 공급자의 API 키만 넣을 수 있어요."));
                 }
                 // 같은 잔액을 두 풀에서 세지 않도록 키 하나는 풀 하나에만 둔다.
                 if current.api_credit_grants.iter().any(|grant| grant.id != id && grant.account_ids.contains(key)) {
@@ -925,6 +940,13 @@ impl Service {
                     None
                 }
                 aam_protocol::ExpirySource::BillingEstimate => {
+                    // 결제 정보는 Anthropic 구독 계정에만 있다. OpenAI 크레딧은 Platform의 Credit grants 화면에 만료일이 나오므로 추정하지 않는다.
+                    if pool_provider != Some(aam_adapters::api_credit::ApiProvider::Anthropic) {
+                        return Err(ApiError::new(
+                            "API_CREDIT_ESTIMATE_UNAVAILABLE",
+                            "OpenAI 크레딧의 만료일은 결제일로 추정하지 않아요. OpenAI Platform의 Credit grants에 나온 만료일을 직접 입력해 주세요.",
+                        ));
+                    }
                     let unavailable = || ApiError::new(
                         "API_CREDIT_ESTIMATE_UNAVAILABLE",
                         "월 결제 구독 계정의 미래 결제일이 저장돼 있어야 추정할 수 있어요. 연 결제 갱신일은 월 크레딧 만료일로 쓰지 않아요.",
@@ -949,6 +971,7 @@ impl Service {
                     Some(aam_protocol::ApiCreditBillingBasis { account_id: billing.account_id.clone(), next_billing_at: billing.next_billing_at })
                 }
             };
+            confirmed_keys = Some(account_ids.clone());
             let saved = ApiCreditGrant {
                 id: id.clone(),
                 account_ids,
@@ -1058,6 +1081,12 @@ impl Service {
         })?;
         set_metadata(&tx, "policy", &current)?;
         tx.commit().map_err(db_error)?;
+        // 브릿지도 서비스 DB를 쓴다. 두 잠금을 동시에 잡지 않는다.
+        drop(store);
+        // 사용자가 방금 확인한 크레딧의 키는 이전 잔액 소진 응답으로 건 차단을 푼다(새 결제 주기의 크레딧이 다음 달 1일 전에 들어올 수 있다).
+        if let (Some(keys), Some(bridge)) = (confirmed_keys, self.bridge.get()) {
+            bridge.credit_confirmed(&keys);
+        }
         Ok(current)
     }
     /// 외부 대화를 확인된 소유 계정으로 인계 등록합니다. 계정을 추정하거나 대화를 옮기지 않습니다.
@@ -1245,6 +1274,7 @@ impl Service {
             set_takeovers(&tx, &remaining)?;
         }
         reset_credits::forget_quote(&tx, &removed.id)?;
+        reset_web::forget(&tx, &removed.id)?;
         if let Some(path) = removed.profile_path.clone() {
             let mut dismissed = dismissed_profiles(&tx)?;
             let entry = DismissedProfile { tool: removed.tool.clone(), path };
@@ -1260,6 +1290,7 @@ impl Service {
         if removed.tool == aam_adapters::api_credit::API_TOOL {
             aam_adapters::api_credit::delete_key(&removed.id)?;
         }
+        self.reset_web.drop_account(&removed.id);
         Ok(serde_json::json!({"id": removed.id, "removedRoutes": removed_routes}))
     }
     fn register(&self, request: Register) -> Result<Account, ApiError> {
@@ -2347,6 +2378,7 @@ impl Service {
             loop {
                 std::thread::sleep(Duration::from_secs(2));
                 let _ = service.reconcile(false);
+                let _ = service.reset_web_tick();
                 let now = aam_protocol::now_ms();
                 if now >= refresh_at {
                     service.start_refresh();

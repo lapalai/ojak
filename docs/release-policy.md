@@ -108,6 +108,25 @@ npx tauri signer generate -w "$HOME/.tauri/ojak.key"
 
 `Client verification`은 고정된 omp·Orca 수정본을 별도 Mac runner에서 빌드한다. omp 실행 파일의 실제 버전 출력, Orca 전체 Mac 설치 파일(9개 원격 대상 포함), 격리 HOME의 실제 원격 터미널 왕복을 검사한다. 결과는 `verification-only-mac-clients`에만 보관하며 upstream이나 Ojak Release로 게시하지 않는다. 공식 네이티브 입력은 고정 SHA-256과 원본 템플릿 봉인 검증을 모두 통과해야 가져온다. 작업 실행·성공 여부는 각 Actions run의 실제 결과로 확인한다.
 
+## 2026-11-16 초기화권 조회·종류 Mac 0.26.0 반영
+
+- 앱·CLI·서비스 및 lockfile을 0.26.0으로 올렸다. Rust 초기화권 테스트 28개, desktop 초기화권 테스트 9개, 타입 검사와 Mac 앱·DMG 빌드를 통과했다. `codesign --verify --deep --strict`를 통과한 ad-hoc 서명이며 Apple 공증·공개 업데이트 서명 검증은 하지 않았다.
+- 실제 `ResetCreditsPanel`을 격리 IPC fixture로 열어 주간/Fable 구분·정확한 날짜·확인 전 사용 차단·조회 제한≠0개를 확인했다. 실제 초기화권은 사용하지 않았다. [종류 표시](../../artifacts/reset-types-preview-0.26.0.png), [조회 제한](../../artifacts/reset-restricted-preview-0.26.0.png). 임시 페이지와 미리보기 서버는 제거했다.
+- `~/Applications/Ojak.app` 교체와 `integration install`을 완료했다. 이전 앱은 `~/Library/Application Support/AI Account Manager/app-backups/Ojak-0.25.0-20261116-reset.app.bak`에 보존했다.
+- `aam service restart`는 Claude 관리 대화 6개(실행 중 3, 확인 중 3) 때문에 `SESSION_BUSY`로 거절했고 `--force`나 직접 kickstart는 실행하지 않았다. **다만 설치·앱 실행 뒤 실제 서비스는 PID 97854, 0.26.0으로 바뀌어 있었다. 기존 서비스가 계속 유지되었다고 주장하지 않는다.** 그 사이 새 서비스 기동 시도 PID 97628에 macOS `CODESIGNING / Launch Constraint Violation` 종료 기록이 있으며, 이것으로 기존 PID 69488의 종료 원인까지 단정할 수는 없다.
+- 최종 `aam service status`는 앱·서비스 모두 0.26.0, 연결 정상이다. 실제 다섯 Claude 계정 조회는 네 계정 `restricted/surface`·수량 null, 한 계정 `AUTH_REQUIRED`였고 0개로 대체하지 않았다. 정책 revision 67과 관리 세션 상태(ACTIVE 3·ORPHANED 2·SUSPECT 1)를 확인했다. 새 앱 기동과 접근성 창은 확인했지만 이후 창이 숨겨져 설치본 상세 화면의 시각 검증은 완료하지 못했다(격리 컴포넌트 검증과 구분).
+- 웹 로그인 연결·쿠키 가져오기는 추가하지 않았다. CLI OAuth로 숨겨진 웹 전용 초기화권의 수량을 자동 수집하는 기능이 아니며, 다섯 계정의 실제 크레딧 시작·만료 설정도 아직 변경하지 않았다. 확인한 웹 원본 시각은 별도로 보존했고 다른 계정에 복사하지 않았다.
+- Mac 로컬 반영이며 Windows 설치·검증, 공개 태그·GitHub Release 게시 및 앱 안 업데이트 검증은 하지 않았다. advisor 검토는 실행 한도에 막혀 결과를 얻지 못했으며 검토 통과로 집계하지 않는다.
+
+## 2026-11-16 키별 금액·기간 Mac 0.25.0 반영
+
+- 업체별 API 키 목록과 키별 금액·시작·만료 편집을 포함해 앱·CLI·서비스 및 lockfile을 0.25.0으로 올렸다. Rust 547개 통과(2개 ignored), desktop 151개·omp 확장 25개와 타입 검사, Mac 앱·DMG 빌드를 통과했다.
+- `codesign --verify --deep --strict`를 통과했다. ad-hoc 서명이며 Apple 공증·업데이터 서명 검증은 하지 않았다. DMG SHA-256: `fce1ce46cc9997ccf8bb92ed5428363ee4e17b2d8b408166accc58be2940cc77`.
+- 기존 Ojak UI 종료를 확인한 후 `~/Applications/Ojak.app`을 교체했다. 이전 앱은 `~/Library/Application Support/AI Account Manager/app-backups/Ojak-0.24.0-20261116.app.bak`에 보존했다. 새 설치본의 CLI·서비스 파일은 0.25.0이며 `integration install`을 완료했다.
+- **실행 서비스는 0.24.0 유지.** 공식 `aam service restart`가 Claude 관리 세션 6개(실행 중 3, 불확실 3)·omp 진행 응답 1개 때문에 `SESSION_BUSY`로 거절했다. 강제 재시작하지 않았다. 서비스 PID·시작 시각 보존을 확인했다. `aam setup --check`는 `ready: true`, `serviceVersionMismatch: true`다. 작업이 끝난 뒤 안전한 `aam service restart`로 실행 서비스도 맞춰야 한다.
+- 새 네이티브 앱에서 0.25.0 버전·업체별 목록·키별 서로 다른 만료·금액/시작/만료 편집창을 확인했다. 운영 입력은 저장하지 않고 취소했으며 배포 전후 정책 revision 67과 정책 해시가 동일했다. 개인정보 가림을 켜고 화면을 확인했다. [설치본 편집 화면](../../artifacts/api-key-period-editor-installed-0.25.0.png).
+- Mac 앱 반영 완료와 서비스 재시작 보류를 구분한다. Windows 설치·검증, 공개 태그·GitHub Release 게시 및 앱 안 업데이트 검증은 하지 않았다.
+
 ## 2026-11-12 Claude MCP 공유·Mac 0.24.0 반영
 
 - Rust 워크스페이스 547개 통과(2개 ignored), desktop 146개·타입 검사·omp 확장 및 후보/패키징 42개 통과 뒤 0.24.0 앱·DMG를 빌드했다. Mac 앱은 ad-hoc 서명이며 공증하지 않았다. 설치 전 `codesign --verify --deep --strict`를 통과했다.

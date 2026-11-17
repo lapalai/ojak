@@ -1,7 +1,7 @@
 mod ipc;
 mod process;
 mod reset;
-pub use reset::{ResetCredit, ResetInventory, ResetOperation};
+pub use reset::{ResetCredit, ResetInventory, ResetOperation, ResetWebConnection, ResetWebJob, ResetWebStatus};
 pub mod secure;
 #[cfg(windows)]
 pub mod winutil;
@@ -303,14 +303,14 @@ pub enum AllocationMode {
     #[serde(rename = "expiry-balanced")]
     ExpiryBalanced,
 }
-/// 사용자가 직접 확인해 입력한 API 크레딧 풀 하나(같은 Console 조직 잔액을 나눠 쓰는 키 묶음과 그 금액·기간).
-/// Anthropic Console 잔액을 조회한 값이 아니다. `budget_usd`는 저장 시점에 사용자가 확인한 남은 금액이고, Ojak은 저장 뒤
-/// 이 풀의 키(`account_ids`)로 기록한 추정 사용액만 뺀다. 키 하나는 풀 하나에만 속한다. 정본은 항상 Console이며 auto-reload가 꺼져 있어야 한다.
+/// 사용자가 직접 확인해 입력한 API 크레딧 풀 하나(같은 조직 잔액을 나눠 쓰는 키 묶음과 그 금액·기간). Claude Console 조직 또는 OpenAI API 조직이며 한 풀에는 한 공급자의 키만 있다.
+/// 공급자 잔액을 조회한 값이 아니다. `budget_usd`는 저장 시점에 사용자가 확인한 남은 금액이고, Ojak은 저장 뒤
+/// 이 풀의 키(`account_ids`)로 기록한 추정 사용액만 뺀다. 키 하나는 풀 하나에만 속한다. 정본은 항상 공급자 화면이며 자동 충전이 꺼져 있어야 한다.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 #[serde(rename_all = "camelCase")]
 pub struct ApiCreditGrant {
     pub id: String,
-    /// 이 풀의 잔액을 쓰는 Anthropic API 키 계정 ID. 비어 있지 않다.
+    /// 이 풀의 잔액을 쓰는 API 키 계정 ID(모두 같은 공급자). 비어 있지 않다.
     pub account_ids: Vec<String>,
     pub budget_usd: f64,
     pub starts_at: i64,
@@ -447,8 +447,8 @@ pub struct Policy {
     /// 구독 한도가 남은 계정이 하나라도 있으면 켜져 있어도 추가 사용량 계정은 고르지 않는다.
     #[serde(default)]
     pub use_extra_usage_after_limit: bool,
-    /// 구독 한도를 모두 쓴 뒤 Ojak에 등록한 Claude Console API 키(월 API 크레딧)로 이어 쓸지. 기본 꺼짐.
-    /// omp 브릿지 요청과 비대화형 `claude -p`에만 쓴다. 대화형 Claude Code에는 크레딧이 적용되지 않아 쓰지 않는다.
+    /// Claude Console API 전환 허용. 기본 꺼짐. omp는 요청 모델 한도 소진 또는 활성 구독 없음에도 API를 쓴다.
+    /// 비대화형 `claude -p`는 기존 공용 한도 소진 조건을 유지한다. 대화형 Claude Code에는 API 키를 쓰지 않는다.
     #[serde(default)]
     pub use_api_credit_after_limit: bool,
     /// API 크레딧 fallback의 월(UTC 달력월) 추정 사용액 상한(USD). **Anthropic API 키마다 따로** 적용한다(키들의 합계가 아니다). Ojak의 보조 장치이며 실제 청구 상한이 아니다.

@@ -6,17 +6,26 @@ import { canonicalProvider, groupAccounts, isCurrentGroup, privacyText, projectN
 import type { AccountGroup } from "./state";
 import { PROVIDER_ORDER } from "./types";
 import type { Account, Policy, ProjectRoute, Snapshot } from "./types";
-import { DEFAULT_API_CREDIT_LIMIT_USD, DEFAULT_OPENAI_API_LIMIT_USD, MAX_API_CREDIT_LIMIT_USD, MAX_OPENAI_API_LIMIT_USD, MIN_OPENAI_API_LIMIT_USD, apiAccounts, apiCreditAmount, apiCreditSpend, apiCreditUsage, apiKeyCap, paidPolicyPatch } from "./api-credit";
+import { DEFAULT_API_CREDIT_LIMIT_USD, DEFAULT_OPENAI_API_LIMIT_USD, MAX_API_CREDIT_LIMIT_USD, MAX_OPENAI_API_LIMIT_USD, MIN_OPENAI_API_LIMIT_USD, API_KEY_PROVIDERS, apiAccounts, apiCreditAmount, apiCreditSpend, apiCreditUsage, apiKeyCap, paidPolicyPatch } from "./api-credit";
+import { balanceStatus } from "./credit-view";
+import type { BalanceBlock } from "./credit-view";
+import { proactiveBlockKey } from "./api-credit-grant";
+import type { ApiKeyProvider } from "./types";
 import { MAX_CONCURRENCY, concurrencyRows, concurrencyUpdateIds, concurrencyValue } from "./allocation";
 import { t } from "./i18n";
 import { usdLimit } from "./limits";
 import { ALLOCATION_MODES, MODE_TEXT, allocationModeOf } from "./allocation-mode";
-import { ApiCreditGrantPanel } from "./ApiCreditGrantPanel";
 
 function groupTitle(group: AccountGroup, masked: boolean): string {
   const provider = providerNames[canonicalProvider(group.primary.provider)];
   const identity = group.email ? masked ? t("privacy.emailHidden") : group.email : privacyText(group.primary.label, masked);
   return `${provider}, ${identity}`;
+}
+
+function balanceReason(reason: BalanceBlock, provider: ApiKeyProvider): string {
+  if (reason === "PROVIDER_OFF") return t(`balance.block.PROVIDER_OFF.${provider}`);
+  const key = reason === "UNKNOWN" ? null : proactiveBlockKey(reason);
+  return key ? t(key) : t("balance.block.unknown");
 }
 
 export function CreditSettings({ snapshot, online, masked, onReload, onClose }: { snapshot: Snapshot; online: boolean; masked: boolean; onReload: () => Promise<void>; onClose: () => void }) {
@@ -116,6 +125,7 @@ export function AllocationSettings({ snapshot, online, masked, onReload }: { sna
   const rank = (group: AccountGroup) => Math.min(...group.members.map(member => { const index = priority.indexOf(member.id); return index === -1 ? Infinity : index; }));
   const ordered = [...groups].sort((a, b) => rank(a) - rank(b) || PROVIDER_ORDER.indexOf(canonicalProvider(a.primary.provider)) - PROVIDER_ORDER.indexOf(canonicalProvider(b.primary.provider)) || (a.email ?? "").localeCompare(b.email ?? ""));
   const mode = allocationModeOf(policy.allocationMode);
+  const apiKeys = apiAccounts(snapshot.accounts);
   const reserveValid = reserve.trim() !== "" && Number.isFinite(Number(reserve)) && Number(reserve) >= 0 && Number(reserve) <= 100;
 
   async function update(patch: Record<string, unknown>) {
@@ -182,7 +192,20 @@ export function AllocationSettings({ snapshot, online, masked, onReload }: { sna
         <div className="rule"><div className="t">{t("policy.stale")} <Tip tip={t("policy.staleTip")} label={t("policy.tipLabel", { name: t("policy.stale") })} /></div><div className="d">{t("policy.staleDesc", { minutes: Math.round(policy.staleAfterSeconds / 60) })}</div><div className="ctl"><span className="tag">{t("policy.fixed")}</span></div></div>
       </div>
     </div>
-    <ApiCreditGrantPanel snapshot={snapshot} online={online} masked={masked} update={update} />
+    <div className="panel">
+      <header>
+        <h2>{t("balance.title")}</h2><Tip tip={t("balance.tip")} label={t("balance.tipLabel")} />
+        <span className="aside"><Switch checked={Boolean(policy.balanceApiCredit)} disabled={!online || action.pending || (!policy.balanceApiCredit && apiKeys.length === 0)} label={t("balance.title")} onChange={balanceApiCredit => { void action.run(() => update({ balanceApiCredit }), () => balanceApiCredit ? t("balance.on") : t("balance.off")); }} /></span>
+      </header>
+      <p className="field-help">{t("balance.desc")}</p>
+      <p className="field-help">{t("apiKey.credit.rulesLocation")}</p>
+      {apiKeys.length === 0 ? <p className="field-help">{t("policy.apiCreditNoKey")}</p> : <ul className="balance-status" aria-label={t("balance.title")}>{API_KEY_PROVIDERS.map(provider => {
+        const state = balanceStatus(snapshot, provider);
+        if (!state) return null;
+        const tone = state.allowed ? "good" : state.waiting ? "neutral" : "warn";
+        return <li key={provider} className={tone}><b>{t(`apiKey.provider.${provider}`)}</b><span>{state.allowed ? t("balance.state.allowed") : t(state.waiting ? "balance.state.waiting" : "balance.state.blocked", { reason: balanceReason(state.reason, provider) })}</span></li>;
+      })}</ul>}
+    </div>
     <div className="panel">
       <header><h2>{t("policy.orderTitle")}</h2><span className="aside">{t("policy.orderAside")}</span></header>
       {ordered.length ? <ul className="order">{ordered.map((group, index) => {

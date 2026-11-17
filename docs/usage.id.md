@@ -76,6 +76,12 @@ Dua pengaturan opsional memungkinkan Ojak memilih akun dengan **kredit Codex** a
 
 Penyedia bisa mengenakan biaya. Ojak tidak bisa melihat jumlah yang ditagihkan atau mencegah CLI resmi yang sudah berjalan beralih ke pemakaian berbayar. Konfirmasi sebelum menjalankan CLI tanpa pengelolaan bukan jaminan untuk mencegah semua biaya. Dukungan saldo kredit bergantung pada data yang dilaporkan Codex. Alur kredit/pemakaian tambahan ini belum dikonfirmasi dengan akun berbayar sungguhan.
 
+### Jumlah dan masa berlaku kredit per kunci API
+
+Buka **Koneksi → Kunci API → Anthropic → Jumlah & periode** pada kunci yang ingin dikelola. Daftar kunci menampilkan tanggal kedaluwarsa yang tersimpan dan perkiraan sisa kredit. Entri baru hanya berlaku untuk kunci yang dipilih; mengubah entri lama tetap mempertahankan pemakaian yang sudah dicatat. Kunci yang sudah berbagi satu saldo ditandai sebagai kredit bersama, dan kamu perlu memeriksa kunci yang terdampak sebelum mengubahnya.
+
+Tanggal memakai zona waktu perangkat yang ditampilkan. Isi kedaluwarsa yang pasti atau simpan tanggal penagihan langganan untuk memperkirakannya. Kunci OpenAI tidak memiliki pengaturan masa berlaku ini. **Pemakaian → Pengaturan alokasi** hanya menyimpan aturan pemakaian, seperti memakai kredit API sebelum kedaluwarsa. Jumlah dan tanggal diisi setelah kamu memeriksanya sendiri, bukan saldo Console yang dibaca Ojak.
+
 ## Pembaruan
 
 Gunakan pengecekan pembaruan di pengaturan aplikasi, bagian tentang Ojak. Build dengan kunci publik updater juga mengecek saat aplikasi dimulai dan setiap 24 jam, lalu menampilkan penanda pembaruan di popover menu bar/tray. Build tanpa kunci tersebut tidak menampilkan fitur pembaruan. Tanda tangan updater berbeda dari notarization Apple dan penandatanganan kode Windows.

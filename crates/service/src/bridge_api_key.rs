@@ -55,14 +55,14 @@ pub(crate) fn succeeded(head: &[u8]) -> bool {
     head.split(' ').nth(1).and_then(|code| code.parse::<u16>().ok()).is_some_and(|status| (200..300).contains(&status))
 }
 
-/// 조직의 크레딧 잔액·한도가 바닥난 응답인지. Anthropic은 400 "credit balance is too low", OpenAI는 429 `insufficient_quota`·`billing_hard_limit_reached`다.
+/// 조직의 크레딧 잔액·한도가 바닥난 응답인지. Anthropic은 400 "credit balance is too low", OpenAI는 429 `credit_balance_exhausted`(구독에 딸려온 크레딧 소진)·`insufficient_quota`·`billing_hard_limit_reached`다.
 pub(crate) fn credit_exhausted(provider: ApiProvider, head: &[u8], peek: &[u8]) -> bool {
     let (head, text) = (String::from_utf8_lossy(head), String::from_utf8_lossy(peek));
     let lower = text.to_ascii_lowercase();
     error_response(&head, &text)
         && match provider {
             ApiProvider::Anthropic => lower.contains("credit balance"),
-            ApiProvider::OpenAi => lower.contains("insufficient_quota") || lower.contains("billing_hard_limit_reached") || lower.contains("exceeded your current quota"),
+            ApiProvider::OpenAi => lower.contains("credit_balance_exhausted") || lower.contains("insufficient_quota") || lower.contains("billing_hard_limit_reached") || lower.contains("exceeded your current quota"),
         }
 }
 

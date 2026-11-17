@@ -117,6 +117,8 @@ pub(crate) const API_CREDIT_FALLBACK: &str = "API_CREDIT_FALLBACK";
 pub(crate) const API_CREDIT_LIMIT: &str = "API_CREDIT_LIMIT";
 /// 금액을 읽지 못한 사용이 있어 OpenAI API 키를 이번 달 더는 쓰지 않을 때 후보에 붙는 이유 코드.
 pub(crate) const API_UNMETERED: &str = "API_UNMETERED";
+/// 크레딧 풀에 넣은 OpenAI 키를 `codex exec`·`codex review`에 쓰지 않을 때 후보에 붙는 이유 코드.
+pub(crate) const API_GRANT_OMP_ONLY: &str = "API_GRANT_OMP_ONLY";
 
 fn chose_with(decision: &Decision, code: &str) -> bool {
     decision.selected_account_id.as_ref().is_some_and(|id| {
@@ -152,7 +154,7 @@ pub(crate) fn api_credit_used(account: &Account, now: i64) -> f64 {
 }
 
 /// API 크레딧 사용액 원장 중 판정에 필요한 값. `removed_usd`·`openai_removed_usd`는 지운 키의 이번 달(UTC) 추정 사용액(공급자별),
-/// `grants`는 풀 id별(`Policy.api_credit_grants`, Claude 전용) 추정 사용액과 금액을 읽지 못한 요청 수다(그 풀의 키로 보낸 요청만 쌓는다).
+/// `grants`는 풀 id별(`Policy.api_credit_grants`) 추정 사용액과 금액을 읽지 못한 요청 수다(그 풀의 키로 보낸 요청만 쌓는다).
 #[derive(Debug, Clone, Default, PartialEq)]
 pub struct ApiLedger {
     pub removed_usd: f64,
@@ -281,13 +283,26 @@ pub(crate) fn grant_allows_fallback(policy: &Policy, ledger: &ApiLedger, account
     }
 }
 
+/// 풀의 공급자: 풀에 든 등록된 API 키의 공급자(한 풀의 키는 모두 같은 공급자다). 등록된 키가 하나도 없으면 `None`.
+pub(crate) fn pool_provider(grant: &ApiCreditGrant, accounts: &[Account]) -> Option<ApiProvider> {
+    accounts
+        .iter()
+        .filter(|account| account.tool == aam_adapters::api_credit::API_TOOL && grant.account_ids.contains(&account.id))
+        .find_map(|account| ApiProvider::of(&account.provider))
+}
+
 /// 소비 균형 모드에서 풀 하나를 구독 대신 선제적으로 쓰는 정책 조건(모드·옵트인·기간·사용량 확인)을 만족하는지.
+/// 옵트인은 `balanceApiCredit`과 그 풀 공급자의 한도 뒤 API 스위치다(Claude·OpenAI가 따로).
 /// 막힌 이유를 `blockedBy` 코드로 돌려준다. 키 유무·월 상한은 호출자가 이어서 본다.
-pub(crate) fn proactive_block(policy: &Policy, view: &GrantView) -> Option<&'static str> {
+pub(crate) fn proactive_block(policy: &Policy, provider: ApiProvider, view: &GrantView) -> Option<&'static str> {
     if policy.allocation_mode != AllocationMode::ExpiryBalanced {
         return Some("MODE");
     }
-    if !(policy.balance_api_credit && policy.use_api_credit_after_limit) {
+    let opted_in = match provider {
+        ApiProvider::Anthropic => policy.use_api_credit_after_limit,
+        ApiProvider::OpenAi => policy.use_openai_api_after_limit,
+    };
+    if !(policy.balance_api_credit && opted_in) {
         return Some("OPT_IN_OFF");
     }
     match view.state {
@@ -336,25 +351,32 @@ pub(crate) fn billing_statuses(policy: &Policy, accounts: &[Account], now: i64) 
 }
 
 /// 스냅샷의 풀별 상태. 키 유무·월 상한까지 합쳐 선제 사용 가능 여부를 설명한다.
-/// 월 상한은 키마다 따로 적용한다. `monthly_limit_reached`는 풀에 쓸 수 있는 키가 있지만 모두 각자의 상한에 닿았다는 뜻이다.
+/// Claude 월 상한은 키마다 따로 적용한다: `monthly_limit_reached`는 풀에 쓸 수 있는 키가 있지만 모두 각자의 상한에 닿았다는 뜻이다.
+/// OpenAI 월 상한은 모든 OpenAI 키의 합계이고, 금액을 읽지 못한 OpenAI 사용이 이번 달에 있으면 그 풀도 `GRANT_UNMETERED`로 닫힌다.
 pub(crate) fn grant_statuses(policy: &Policy, ledger: &ApiLedger, accounts: &[Account], now: i64) -> Vec<aam_protocol::ApiCreditGrantStatus> {
-    let claude = aam_adapters::api_credit::ApiProvider::Anthropic;
+    let openai_open = api_total_used(accounts, ApiProvider::OpenAi, ledger.removed(ApiProvider::OpenAi), now) < policy.openai_api_monthly_limit_usd;
+    let openai_unmetered = api_unmetered(accounts, ApiProvider::OpenAi, ledger.openai_removed_unmetered, now);
     policy
         .api_credit_grants
         .iter()
         .map(|grant| {
             let view = GrantView::of(grant, ledger, now);
+            let provider = pool_provider(grant, accounts).unwrap_or(ApiProvider::Anthropic);
             let (has_key, has_available_key) = accounts
                 .iter()
                 .filter(|account| {
-                    claude.owns(account) && account.enabled && account.auth_status == "authenticated" && grant.account_ids.contains(&account.id)
+                    provider.owns(account) && account.enabled && account.auth_status == "authenticated" && grant.account_ids.contains(&account.id)
                 })
                 .fold((false, false), |(_, available), account| {
-                    (true, available || api_key_under_cap(account, policy.api_credit_monthly_limit_usd, now))
+                    (true, available || match provider {
+                        ApiProvider::Anthropic => api_key_under_cap(account, policy.api_credit_monthly_limit_usd, now),
+                        ApiProvider::OpenAi => openai_open,
+                    })
                 });
             let monthly_limit_reached = has_key && !has_available_key;
-            let blocked = proactive_block(policy, &view)
+            let blocked = proactive_block(policy, provider, &view)
                 .or(if !has_key { Some("NO_KEY") } else { None })
+                .or(if provider == ApiProvider::OpenAi && openai_unmetered { Some("GRANT_UNMETERED") } else { None })
                 .or(if monthly_limit_reached { Some("MONTHLY_LIMIT") } else { None })
                 .or(if view.pace(now) < 1.0 { Some("AHEAD_OF_PACE") } else { None });
             let estimate_drift = grant.expiry_source == aam_protocol::ExpirySource::BillingEstimate
@@ -1004,8 +1026,14 @@ pub fn decide_with(
             if unmetered {
                 exclusions.push(reason(API_UNMETERED, "금액을 읽지 못한 사용이 있어 이번 달에는 이 API 키를 더 쓰지 않아요."));
             }
-            // 크레딧 풀은 Claude 크레딧의 개념이다. 키가 풀에 속하면 그 풀이 진행 중일 때만 쓴다. OpenAI 키에는 풀·선제 사용이 없다.
-            if let Err(state) = if openai { Ok(()) } else { grant_allows_fallback(policy, ledger, &account.id, now) } {
+            // 풀에 넣은 OpenAI 키는 구독에 딸려온 API 크레딧을 쓰는 키다. OpenAI는 그 크레딧을 API 키로 쓰는 Codex에 적용하지 않으므로
+            // `codex exec`·`codex review`에는 쓰지 않는다(omp 브릿지 전용). 그 밖에는 키가 풀에 속하면 그 풀이 진행 중일 때만 쓴다.
+            if openai && pool_of(policy, &account.id).is_some() {
+                exclusions.push(reason(
+                    API_GRANT_OMP_ONLY,
+                    "크레딧 금액·기간을 넣은 OpenAI 키는 omp에서만 써요. OpenAI는 구독에 포함된 API 크레딧을 API 키로 쓰는 Codex에 적용하지 않아요.",
+                ));
+            } else if let Err(state) = grant_allows_fallback(policy, ledger, &account.id, now) {
                 exclusions.push(reason(
                     match state {
                         GrantState::Upcoming => "API_GRANT_PENDING",

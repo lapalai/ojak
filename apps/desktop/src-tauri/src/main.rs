@@ -813,6 +813,7 @@ async fn launch_session(intent: LaunchIntent) -> Result<Value, ApiError> {
     open_terminal(args)
 }
 mod provider_login;
+mod reset_web;
 mod local_usage;
 mod popover_layout;
 #[cfg(target_os = "macos")]
@@ -1234,6 +1235,14 @@ const HOMEPAGE_URL: &str = "https://github.com/lapalai/ojak";
 #[tauri::command]
 fn open_homepage() -> Result<Value, ApiError> {
     open_url(HOMEPAGE_URL)
+}
+
+/// Claude 공식 사용량 페이지. 고정 주소라 웹뷰가 임의 URL을 열 수 없다.
+const CLAUDE_USAGE_URL: &str = "https://claude.ai/settings/usage";
+
+#[tauri::command]
+fn open_claude_usage() -> Result<Value, ApiError> {
+    open_url(CLAUDE_USAGE_URL)
 }
 
 #[tauri::command]
@@ -2357,7 +2366,14 @@ fn main() {
             tauri_plugin_autostart::MacosLauncher::LaunchAgent,
             Some(vec![AUTOSTART_ARG]),
         ))
-        .invoke_handler(tauri::generate_handler![
+        .invoke_handler(|invoke| {
+            // Provider login pages are remote, untrusted content. They receive no native commands,
+            // even if a future capability accidentally broadens default custom-command access.
+            if !matches!(invoke.message.webview_ref().label(), "main" | "popover") {
+                invoke.resolver.reject(ApiError::new("METHOD_DENIED", "공급자 웹 페이지에는 앱 관리 권한이 없어요."));
+                return true;
+            }
+            let dispatch: fn(tauri::ipc::Invoke<tauri::Wry>) -> bool = tauri::generate_handler![
             rpc,
             launch_session,
             open_prefilled_terminal,
@@ -2379,6 +2395,10 @@ fn main() {
             bridge_usage,
             contact_author,
             open_homepage,
+            open_claude_usage,
+            reset_web::connect_reset_web,
+            reset_web::open_reset_web,
+            reset_web::disconnect_reset_web,
             setup_status,
             setup_install,
             get_language,
@@ -2405,7 +2425,9 @@ fn main() {
             service_version_status,
             service_busy_preview,
             service_restart
-        ])
+            ];
+            dispatch(invoke)
+        })
         .setup(|app| {
             // 대시보드 창은 설정(`create: false`)을 따라 여기서 만든다. 로그인 자동 실행이면 숨긴 채 만들어
             // 메뉴바에만 두고, 직접 연 경우에만 보인다. 만든 뒤 show()로 바꾸면 Windows에서 반영되지 않는다.
@@ -2419,6 +2441,7 @@ fn main() {
                     set_shown(&main, false);
                 }
             }
+            reset_web::start(app.handle());
             // 언어를 바꿀 때 다시 쓸 고정 메뉴 문구.
             let mut labels: Vec<(MenuItem<tauri::Wry>, &'static str, &'static str, &'static str)> = Vec::new();
             // 기본 앱 메뉴의 ⌘Q는 NSApp terminate로 바로 끝나 확인 창을 거치지 않는다.

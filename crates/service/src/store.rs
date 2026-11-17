@@ -422,7 +422,7 @@ pub(crate) fn retain_api_credit_ledger(connection: &Connection, account: &Accoun
 /// API 키 계정의 이번 달 추정 사용액에 한 요청을 더한다. `cost`가 `None`이면 usage를 못 읽은 요청으로 센다.
 /// 사용액은 계정 행이 아니라 원장에 쌓는다. 기간(UTC 달력월)이 바뀌면 새 행에서 0부터 다시 센다. 같은 트랜잭션 안에서 더해 동시 요청의 덧셈이 사라지지 않게 한다.
 /// 이미 지운 키 계정(원장에 행이 있는 ID)의 늦은 기록도 받는다. 모르는 ID는 `ACCOUNT_NOT_FOUND`, API 키가 아닌 계정은 기록하지 않는다.
-/// 풀 원장은 Claude 크레딧의 개념이라 Anthropic 키만 더한다. `pool`은 요청이 **입장할 때** 그 키가 속했던 풀 id다(호출자가 캡처).
+/// `pool`은 요청이 **입장할 때** 그 키가 속했던 풀 id다(호출자가 캡처). 공급자와 무관하게 그 풀의 원장에 더한다.
 /// 요청 도중 키를 다른 풀로 옮기거나 풀에서 빼도 시작한 풀에 쌓는다. 그 풀이 지금 없으면(삭제) 기간 원장에는 더하지 않는다.
 pub(crate) fn record_api_credit(connection: &mut Connection, account_id: &str, pool: Option<&str>, cost: Option<f64>, now: i64) -> Result<(), ApiError> {
     let tx = connection.transaction_with_behavior(rusqlite::TransactionBehavior::Immediate).map_err(db_error)?;
@@ -450,7 +450,7 @@ pub(crate) fn record_api_credit(connection: &mut Connection, account_id: &str, p
     .map_err(db_error)?;
     // 입장 때의 풀이 아직 있고 요청이 그 풀의 기간 안에 끝났으면 같은 금액을 그 풀의 원장에도 더한다(같은 트랜잭션).
     // 기간 밖(시작 전·만료 뒤) 사용은 풀 예산에 넣지 않는다. 월 상한 합계에는 위에서 이미 들어갔다.
-    if let Some(pool) = pool.filter(|_| provider == aam_adapters::api_credit::ApiProvider::Anthropic.id()) {
+    if let Some(pool) = pool {
         let policy = policy(&tx)?;
         if let Some(grant) = policy.api_credit_grants.iter().find(|grant| grant.id == pool).filter(|grant| (grant.starts_at..grant.expires_at).contains(&now)) {
             tx.execute(
@@ -466,7 +466,7 @@ pub(crate) fn record_api_credit(connection: &mut Connection, account_id: &str, p
     }
     tx.commit().map_err(db_error)
 }
-/// 판정에 쓰는 API 크레딧 원장 값: 지운 키의 이번 달 사용액(공급자별)과 풀별(Claude) 사용액·미확인 요청 수.
+/// 판정에 쓰는 API 크레딧 원장 값: 지운 키의 이번 달 사용액(공급자별)과 풀별 사용액·미확인 요청 수.
 pub(crate) fn api_ledger(connection: &Connection, policy: &Policy, now: i64) -> Result<crate::scheduler::ApiLedger, ApiError> {
     use aam_adapters::api_credit::ApiProvider;
     let removed_usd = api_credit_removed(connection, ApiProvider::Anthropic, now)?.used_usd;

@@ -33,6 +33,18 @@ fn spent_claude(id: &str, now: i64) -> Account {
     account
 }
 
+fn openai_key(id: &str, now: i64) -> Account {
+    Account { provider: "openai".into(), identity_key: Some(format!("openai-apikey:{id}")), ..api_account(id, now) }
+}
+
+fn spent_codex(id: &str, now: i64) -> Account {
+    Account { provider: "openai".into(), tool: "codex".into(), ..spent_claude(id, now) }
+}
+
+fn codex_exec() -> LaunchIntent {
+    LaunchIntent { tool: "codex".into(), model: "gpt-6.1-sol".into(), non_interactive: true, ..intent() }
+}
+
 fn headless() -> LaunchIntent {
     LaunchIntent { non_interactive: true, ..intent() }
 }
@@ -216,6 +228,50 @@ fn a_keys_pool_gates_its_after_limit_api_fallback_and_keys_outside_pools_keep_it
     let over = scheduler::decide_with(&[spent_claude("sub", now), used], &[], &capped, &headless(), now, &Default::default(), &ledger_of("g", 0.0)).unwrap();
     assert_eq!(over.selected_account_id, None);
     assert!(reasons(&over, "api").iter().any(|reason| reason.starts_with("API_CREDIT_LIMIT")));
+}
+
+/// OpenAI 키도 풀(구독에 딸려온 API 크레딧의 금액·만료)을 가진다. 한 풀에는 한 공급자의 키만 들어가고, 만료는 결제일로 추정하지 않으며,
+/// 선제 사용은 Claude 스위치가 아니라 OpenAI 스위치로 열린다. 사용액은 그 풀에 쌓이고 미확인 요청은 그 풀을 닫는다.
+#[test]
+fn openai_keys_get_their_own_pool_with_an_exact_expiry_and_the_openai_opt_in() {
+    let fixture = Fixture::new();
+    let now = now_ms();
+    fixture.save(&account_fixture("sub", now));
+    fixture.save(&api_account("c", now));
+    fixture.save(&openai_key("o", now));
+    assert_eq!(update(&fixture, pool_input(&["c", "o"], 63.0, now - HOUR, now + 4 * DAY)).unwrap_err().code, "INVALID_PARAMS");
+    update(&fixture, json!({"apiCreditBilling": {"accountId": "sub", "cycle": "monthly", "nextBillingAt": now + 9 * DAY}})).unwrap();
+    let mut estimated = pool_input(&["o"], 63.0, now - HOUR, now + 9 * DAY);
+    estimated["apiCreditGrant"]["expirySource"] = json!("billing-estimate");
+    estimated["apiCreditGrant"]["estimateConfirmed"] = json!(true);
+    estimated["apiCreditGrant"]["billingAccountId"] = json!("sub");
+    assert_eq!(update(&fixture, estimated).unwrap_err().code, "API_CREDIT_ESTIMATE_UNAVAILABLE");
+    assert!(stored_policy(&fixture).api_credit_grants.is_empty());
+
+    let id = update(&fixture, pool_input(&["o"], 63.0, now - HOUR, now + 4 * DAY)).unwrap().api_credit_grants[0].id.clone();
+    update(&fixture, json!({"allocationMode": "expiry-balanced", "balanceApiCredit": true, "useApiCreditAfterLimit": true})).unwrap();
+    assert_eq!(pool(&fixture, &id).proactive.blocked_by.as_deref(), Some("OPT_IN_OFF"));
+    update(&fixture, json!({"useOpenaiApiAfterLimit": true})).unwrap();
+    assert!(pool(&fixture, &id).proactive.allowed, "{:?}", pool(&fixture, &id));
+    spend(&fixture, "o", Some(3.0));
+    assert_eq!((pool(&fixture, &id).used_usd, pool(&fixture, &id).remaining_usd), (3.0, 60.0));
+    spend(&fixture, "o", None);
+    assert_eq!(pool(&fixture, &id).proactive.blocked_by.as_deref(), Some("GRANT_UNMETERED"));
+}
+
+/// 풀에 넣은 OpenAI 키는 구독에 딸려온 크레딧을 쓰는 키라 `codex exec`에는 쓰지 않는다(그 크레딧은 API 키로 쓰는 Codex에 적용되지 않는다).
+/// 풀에 없는 OpenAI 키의 한도 뒤 fallback은 그대로다.
+#[test]
+fn a_pooled_openai_key_is_never_used_for_codex_exec_while_an_unpooled_one_still_is() {
+    let now = now_ms();
+    let accounts = [spent_codex("sub", now), openai_key("o", now)];
+    let policy = Policy { use_openai_api_after_limit: true, ..Policy::default() };
+    let pick = |policy: &Policy| scheduler::decide_with(&accounts, &[], policy, &codex_exec(), now, &Default::default(), &scheduler::ApiLedger::default()).unwrap();
+    assert_eq!(pick(&policy).selected_account_id.as_deref(), Some("o"));
+    let pooled = Policy { api_credit_grants: vec![grant("g", &["o"], 63.0, now - DAY, now + 4 * DAY)], ..policy.clone() };
+    let decision = pick(&pooled);
+    assert_eq!(decision.selected_account_id, None);
+    assert!(reasons(&decision, "o").iter().any(|reason| reason.starts_with("API_GRANT_OMP_ONLY")), "{:?}", reasons(&decision, "o"));
 }
 
 /// 소비 균형은 새 대화의 구독 순서만 바꾼다: 플랜이 달라도 일정보다 덜 쓴 계정이 먼저이고, 소비 순서(priority)는 쓰지 않으며,

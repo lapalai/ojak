@@ -1,6 +1,6 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { billingAccounts, billingFormFrom, billingPatch, estimateView, grantFormFrom, grantPatch, localInputToMs, msToLocalInput, poolOfKey, proactiveBlockKey, ungroupedKeys } from "./api-credit-grant.ts";
+import { billingAccounts, billingFormFrom, billingPatch, creditSignature, draftRevision, estimateView, grantFormFrom, grantPatch, keyGrantForm, keyGrantOf, keyGrantPatch, localInputToMs, msToLocalInput, proactiveBlockKey, sharedConsentNeeded } from "./api-credit-grant.ts";
 import { allocationModeOf } from "./allocation-mode.ts";
 import type { ApiCreditBillingStatus, ApiCreditGrantPolicy } from "./types.ts";
 
@@ -75,13 +75,65 @@ test("editing a pool never sends a removed key's id, which the service would rej
   assert.deepEqual(result, { ok: false, error: "keys" });
 });
 
-test("a key in another pool is blocked, but the pool being edited keeps its own keys", () => {
+test("a new key credit holds only the selected key and is sent without an id, never picking other keys", () => {
+  const blank = keyGrantForm(null, "api-2", [], NOW, ["api-1", "api-2", "api-3"]);
+  assert.deepEqual(blank.accountIds, ["api-2"]);
+  assert.equal(blank.id, null);
+  assert.equal(blank.expiryMode, "exact");
+  const result = keyGrantPatch({ form: { ...blank, budget: "50", expiresAt: msToLocalInput(NOW + 10 * DAY), confirmed: true }, accountId: "api-2", original: null, sharedConsent: false }, NOW);
+  assert.ok(result.ok);
+  if (!result.ok) return;
+  assert.deepEqual(result.patch.accountIds, ["api-2"]);
+  assert.equal("id" in result.patch, false);
+});
+
+test("a key is found in its own credit only, and a neighbour's single-key credit is not matched", () => {
   const grants = [pool({ id: "g1", accountIds: ["api-1"] }), pool({ id: "g2", accountIds: ["api-2"] })];
-  assert.equal(poolOfKey(grants, "api-2", "g1"), "g2");
-  assert.equal(poolOfKey(grants, "api-1", "g1"), null);
-  assert.equal(poolOfKey(grants, "api-2", null), "g2");
-  assert.equal(poolOfKey(grants, "api-3", null), null);
-  assert.deepEqual(ungroupedKeys([{ id: "api-1" }, { id: "api-3" }], grants), [{ id: "api-3" }]);
+  assert.equal(keyGrantOf(grants, "api-2")?.id, "g2");
+  assert.equal(keyGrantOf(grants, "api-3"), null);
+  assert.equal(keyGrantOf(undefined, "api-1"), null);
+});
+
+test("editing a single-key credit keeps its id, saved budget and exact future start", () => {
+  const grant = pool({ id: "solo", accountIds: ["api-2"], startsAt: NOW + 3 * DAY, expiresAt: NOW + 20 * DAY });
+  const filled = keyGrantForm(grant, "api-2", [], NOW, ["api-1", "api-2"]);
+  assert.equal(filled.id, "solo");
+  assert.equal(filled.budget, "100");
+  const result = keyGrantPatch({ form: { ...filled, confirmed: true }, accountId: "api-2", original: grant, sharedConsent: false }, NOW);
+  assert.ok(result.ok);
+  if (!result.ok) return;
+  assert.deepEqual(result.patch, { id: "solo", accountIds: ["api-2"], budgetUsd: 100, startsAt: grant.startsAt, expiresAt: localInputToMs(msToLocalInput(grant.expiresAt)), confirmed: true });
+});
+
+test("a shared legacy credit keeps its members and id, and cannot change without explicit consent", () => {
+  const grant = pool({ id: "legacy", accountIds: ["api-1", "api-2"] });
+  const filled = keyGrantForm(grant, "api-2", [], NOW, ["api-1", "api-2"]);
+  assert.deepEqual(filled.accountIds, ["api-1", "api-2"]);
+  assert.equal(sharedConsentNeeded(grant.accountIds, filled.accountIds), true);
+  const ask = (sharedConsent: boolean) => keyGrantPatch({ form: { ...filled, confirmed: true }, accountId: "api-2", original: grant, sharedConsent }, NOW);
+  assert.deepEqual(ask(false), { ok: false, error: "shared" });
+  const ok = ask(true);
+  assert.ok(ok.ok);
+  if (ok.ok) { assert.equal(ok.patch.id, "legacy"); assert.deepEqual(ok.patch.accountIds, ["api-1", "api-2"]); assert.equal(ok.patch.budgetUsd, 100); }
+});
+
+test("the selected key stays in the credit even if it is missing from the stored members, and a form without it is rejected", () => {
+  const grant = pool({ id: "g", accountIds: ["api-1"] });
+  assert.deepEqual(keyGrantForm(grant, "api-2", [], NOW, ["api-1", "api-2"]).accountIds, ["api-2", "api-1"]);
+  const dropped = { ...keyGrantForm(grant, "api-1", [], NOW, ["api-1"]), confirmed: true };
+  assert.deepEqual(keyGrantPatch({ form: dropped, accountId: "api-2", original: grant, sharedConsent: true }, NOW), { ok: false, error: "keys" });
+});
+
+test("a draft keeps the revision it was made from unless only unrelated policy changed, and never silently takes a newer revision after a real change", () => {
+  const grant = pool({ id: "g", accountIds: ["api-1"] });
+  const base = { revision: 4, signature: creditSignature(grant, []) };
+  // 다른 설정만 바뀜(자동 배정 스위치 등): 이어 받아도 이 키 입력은 그대로다.
+  assert.deepEqual(draftRevision(base, { revision: 5, signature: creditSignature(grant, []) }), { revision: 5, conflict: false });
+  // 이 키의 입력이 다른 곳에서 바뀜: 폼을 만든 revision을 그대로 보내 서비스가 거절하게 한다.
+  assert.deepEqual(draftRevision(base, { revision: 5, signature: creditSignature({ ...grant, budgetUsd: 1 }, []) }), { revision: 4, conflict: true });
+  // 입력이 지워지거나 새로 생김도 같다.
+  assert.equal(draftRevision(base, { revision: 6, signature: creditSignature(null, []) }).conflict, true);
+  assert.equal(draftRevision({ revision: 4, signature: creditSignature(null, []) }, { revision: 5, signature: creditSignature(grant, []) }).revision, 4);
 });
 
 test("editing a future pool preserves its start through form refill and patch", () => {

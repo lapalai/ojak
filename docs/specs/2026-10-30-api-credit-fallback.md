@@ -2,6 +2,10 @@
 
 상태: macOS 구현·로컬 반영 완료(0.18.x). 0.19.0에서 Windows Credential Manager를 구현하고 로그인된 Windows 사용자 컨텍스트에서 실제 저장·읽기·덮어쓰기·삭제를 검증했다. Mac 등록 키로 Anthropic 소액 직접 호출 2회도 성공했다. 실제 구독 소진→API 자동 전환·사용액 기록의 실계정 종단 검증과 Windows 실제 API 키 호출은 미검증이다. 설치·배포 상태는 CHANGELOG를 따른다. 사용자 승인: 방향 A(구독 소진 뒤 동의한 경우에만 API 크레딧 사용), Ojak만 수정하고 claude CLI·codex CLI·omp·client-forks는 바꾸지 않음(2026-10-30).
 
+0.27.2 변경 승인(2026-11-17): omp Claude 브릿지는 API 전환이 켜져 있으면 구독을 모두 사용 중지하거나 API만 등록한 경우에도 API 키를 쓴다. 활성 구독은 요청 모델 한도 소진 관측·유효한 한도 오류로 전환을 판단한다. `claude -p`·OpenAI의 기존 조건은 변경하지 않는다. 실행 중인 설치본 반영 여부는 CHANGELOG를 따른다.
+
+0.28.0 변경(2026-11-17): 아래 "범위에서 제외"의 Codex API 키 서술은 당시 기준이다. 그 뒤 OpenAI가 ChatGPT Pro·Business에 월 API 크레딧을 포함했고, 이 크레딧은 연결한 API 조직의 키로 omp `openai` 공급자를 쓸 때 차감된다(실호출 1건으로 확인). OpenAI 키도 크레딧 풀(금액·만료)을 가질 수 있고 만료 전 선제 사용 대상이다. 풀에 넣은 OpenAI 키는 omp 브릿지에서만 쓴다(OpenAI는 이 크레딧을 API 키로 쓰는 Codex에 적용하지 않는다). 상세는 [service-core](../domains/service-core.md)를 따른다.
+
 ## 목표
 
 Claude 구독 계정의 한도를 모두 쓴 뒤, 사용자가 동의했다면 Max 플랜에 포함된 월 API 크레딧(Max 20x는 $200)으로 이어서 쓴다. 이 크레딧은 Claude Console 조직의 API 키로만 쓸 수 있다.
@@ -18,7 +22,7 @@ Claude 구독 계정의 한도를 모두 쓴 뒤, 사용자가 동의했다면 M
 
 - 사용자 환경·설정에 있는 API 키·base URL·auth helper는 지금처럼 `AUTH_OVERRIDE_CONFLICT`로 막는다. 이번 변경은 Ojak이 Keychain에 직접 저장한 키를 Ojak이 직접 넣는 경로만 추가한다.
 - API 키 경로(omp gateway spawn, 내부 broker의 키 제공, `claude -p` 실행 준비)는 서비스·부모 환경에 Claude 인증·엔드포인트 재정의(`ANTHROPIC_*`의 키·토큰·base URL·헤더, `CLAUDE_CODE_USE_*`, `NODE_OPTIONS`·`DYLD_INSERT_LIBRARIES` 등)가 있으면 지우고 진행하지 않고 `AUTH_OVERRIDE_CONFLICT`로 멈춘다. 중앙 검사는 `aam_adapters::check_api_credit_env`(`safety::reject_auth_env`의 claude 규칙 재사용, cmux `NODE_OPTIONS` 예외 없음)다.
-- 기본값은 꺼짐이다. 구독 후보가 하나도 없고, 그 이유가 신선한 관측으로 확인된 한도 소진일 때만 쓴다. 일시 차단·gateway 장애·관측 부족은 fallback 사유가 아니다(기존 `paid_cover` 규칙과 같다).
+- 기본값은 꺼짐이다. omp Claude 브릿지는 활성 구독이 없거나 모두 요청 모델 한도를 소진한 경우에 API 전환을 허용한다. 신선한 사용량 조회 또는 유효한 모델 범위 한도 응답 차단을 근거로 삼으며, 인증·통신 장애·단기 속도 제한은 소진으로 보지 않는다. `claude -p`는 기존 신선한 공용 한도 소진 조건을 유지한다.
 - 키 값은 로그·오류·진단 내보내기·snapshot·UI에 노출하지 않는다. 키를 가리킬 때는 sha256 앞 12 hex(`account_key`)만 쓴다.
 - 과금 차단의 정본은 Console 설정이다(auto-reload 끄기, 크레딧 추가 구매 안 하기). Ojak 상한은 보조 장치이며, 이 상한이 실제 청구액을 보증한다고 표시하지 않는다.
 - lease와 불확실 실행 규칙은 바꾸지 않는다. 전송 뒤 실패를 다른 계정이나 키로 재시도하지 않는다.
@@ -39,9 +43,9 @@ Claude 구독 계정의 한도를 모두 쓴 뒤, 사용자가 동의했다면 M
 - `bridge.rs::choose()`: API 키 후보는 `Candidate.api_credit: bool`로 구독 후보와 **명시적으로 분리**한다. `buckets`가 비어 있는 후보는 지금 코드에서 정상 eligible이 되므로(`bridge.rs:339-353`), 기존 `paid_fallback` 분기에 그대로 끼우면 유료 키가 일반 후보가 된다. 다음 순서를 지킨다.
   1. 일반 eligible과 "모두 소진" 판정(`:359-361`)은 `api_credit=false` 후보만 대상으로 평가한다.
   2. 기존 Codex 크레딧·Claude extra usage fallback(구독 계정 쪽)도 같은 구독 풀에서만 고른다.
-  3. 위 둘이 모두 비었고 구독 풀이 신선한 관측으로 전부 소진됐을 때만, 별도 API 풀(`api_credit=true`, healthy, enabled, 미차단, 미시도, 월 상한 미도달, 단가를 아는 모델)에서 고른다.
+  3. 위 둘이 모두 비었고 활성 구독이 없거나 활성 구독 전부의 요청 모델 소진이 확인되면, 별도 API 풀(`api_credit=true`, healthy, enabled, 미차단, 미시도, 유효한 사용 허용 기간, 월 상한 미도달, 단가를 아는 모델)에서 고른다. 연결되지 않은 활성 공식 Claude 프로필이 있으면 API 과금 전환으로 장애를 숨기지 않는다.
   4. sticky 세션이 API 키에 고정돼 있어도 1·2에서 구독 후보가 생기면 그쪽을 쓴다(고정은 eligible 안에서만 유지되는 기존 규칙을 따른다).
-  모델 전용 한도 소진만으로는 API 풀로 넘어가지 않는다(`paid_cover`와 같은 기준).
+  모델 전용 소진은 해당 모델의 API 전환 근거다. 다른 모델까지 소진됐다고 간주하지 않으며 구독 extra usage의 `paid_cover`는 변경하지 않는다.
 - 구독 한도가 회복되면 새 요청부터 구독 계정으로 돌아간다. 이미 진행 중인 요청은 옮기지 않는다.
 - 로그: 기존 usage 줄 끝에 ` api-credit` 표식을 붙인다. `apps/desktop/src-tauri/src/main.rs` 파서도 함께 고친다.
 
@@ -66,8 +70,10 @@ Claude 구독 계정의 한도를 모두 쓴 뒤, 사용자가 동의했다면 M
 |---|---|---|
 | T1 | 구독 남음(여유량 안쪽 계정 포함) + 스위치 켬 + buckets가 빈 API 키 후보 존재 | 구독 계정 선택, API 키는 일반 후보로 절대 선택되지 않음 |
 | T2 | 모든 구독이 신선한 관측으로 소진 + 스위치 켬 | omp 요청이 `x-api-key`로 나감(fixture upstream에서 헤더 캡처), 로그에 `api-credit` |
-| T3 | 소진이지만 관측 stale / gateway 장애 / 일시 차단 / 모델 전용 한도만 소진 / 구독 계정 일부만 소진 | API 풀로 넘어가지 않음 |
+| T3 | 유효한 한도 응답도 없이 관측 stale / gateway 장애 / 단기 속도 제한 / 일부 구독만 소진 | API 풀로 넘어가지 않음 |
 | T3b | 구독 소진 + extra usage도 켜져 있고 사용 가능 | extra usage 먼저, API 키는 그다음 |
+| T3c | omp 구독 전부 사용 중지 또는 API만 등록 + API 전환 켬 | 구독 로그인 없이 API 선택, 키 기간·예산·인증 제한 유지 |
+| T3d | omp 요청 모델 한도 응답 뒤 모든 구독 차단 | 같은 모델의 API 키로 전환; 이미 출력했거나 실행 여부 불확실이면 재전송 금지 |
 | T4 | 스위치 꺼짐 | 기존 동작과 동일 |
 | T5 | 사용자 env에 `ANTHROPIC_API_KEY` | 여전히 `AUTH_OVERRIDE_CONFLICT` |
 | T6 | 누적액이 상한에 도달 | 새 요청 `API_CREDIT_LIMIT`, 진행 중 요청 유지 |

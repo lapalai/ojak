@@ -17,6 +17,7 @@ aam-protocol = { path = "../../../crates/protocol" }
 aam-launcher = { path = "../../../crates/launcher" }
 serde.workspace = true
 serde_json.workspace = true
+uuid.workspace = true
 tauri = { version = "2", features = ["tray-icon", "image-png", "macos-private-api"] }
 tauri-plugin-updater = "2"
 tauri-plugin-autostart = "2"

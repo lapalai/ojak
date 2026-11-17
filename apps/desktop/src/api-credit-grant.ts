@@ -5,14 +5,9 @@ export const MAX_GRANT_BUDGET_USD = 1_000_000;
 export const MAX_GRANT_DAYS = 366;
 const DAY_MS = 86_400_000;
 
-/// 키가 이미 속한 다른 풀. 수정 중인 풀(`editingId`) 자신의 키는 없는 것으로 본다. 키 하나는 풀 하나에만 속하므로 다른 풀의 키는 선택지에서 막는다(서비스는 `API_CREDIT_KEY_IN_OTHER_POOL`로 거절한다).
-export function poolOfKey(grants: readonly Pick<ApiCreditGrantPolicy, "id" | "accountIds">[], accountId: string, editingId: string | null): string | null {
-  return grants.find(grant => grant.id !== editingId && grant.accountIds.includes(accountId))?.id ?? null;
-}
-
-/// 어느 풀에도 없는 키. 기간을 모르므로 한도 뒤 fallback만 되고 미리 쓰지 않는다.
-export function ungroupedKeys<T extends Pick<Account, "id">>(keys: readonly T[], grants: readonly Pick<ApiCreditGrantPolicy, "accountIds">[]): T[] {
-  return keys.filter(key => !grants.some(grant => grant.accountIds.includes(key.id)));
+/// 이 키가 들어 있는 크레딧 입력. 없으면 null(금액·기간 미설정: 한도 뒤 fallback만 되고 미리 쓰지 않는다). 키 하나는 입력 하나에만 속한다.
+export function keyGrantOf<T extends Pick<ApiCreditGrantPolicy, "accountIds">>(grants: readonly T[] | null | undefined, accountId: string): T | null {
+  return grants?.find(grant => grant.accountIds.includes(accountId)) ?? null;
 }
 
 /// `expiryMode`가 `billing-estimate`면 만료 칸은 쓰지 않고 서비스가 결제일에서 계산한 추정 만료를 보낸다. `estimateConfirmedFor`는 사용자가 동의한 그 추정 만료(ms)다. 화면에 보인 추정과 지금 추정이 다르면(결제일을 고쳤거나 폴링으로 바뀜) 동의는 무효이고 다시 받는다.
@@ -90,6 +85,49 @@ export function grantFormFrom(grant: ApiCreditGrantPolicy | null | undefined, bi
   const base = { id: grant.id, accountIds: grant.accountIds.filter(id => registeredKeyIds.includes(id)), billingAccountId, budget: String(grant.budgetUsd), startsAt: msToLocalInput(grant.startsAt), confirmed: false, estimateConfirmedFor: null };
   if (grant.expirySource !== "billing-estimate") return { ...base, expiresAt: msToLocalInput(grant.expiresAt), expiryMode: "exact" };
   return { ...base, expiresAt: "", expiryMode: estimateView(billings?.find(billing => billing.accountId === billingAccountId), now).blockedBy === null ? "billing-estimate" : "exact" };
+}
+
+/// 키 대화상자 폼 초기값. 입력이 없으면 **선택한 키 하나만** 담은 새 입력(id 없음, 정확한 날짜 입력 방식, 금액·만료 비어 있음)이고, 다른 키는 절대 자동으로 고르지 않는다.
+/// 입력이 있으면 그 입력의 id·저장된 예산·시작·만료·구성원을 그대로 채운다(여러 키가 함께 쓰는 이전 입력은 구성원을 그대로 둔다). 선택한 키는 항상 구성원에 남는다.
+export function keyGrantForm(grant: ApiCreditGrantPolicy | null | undefined, accountId: string, billings: readonly ApiCreditBillingStatus[] | null | undefined, now: number, registeredKeyIds: readonly string[]): GrantFormInput {
+  const form = grantFormFrom(grant, billings, now, registeredKeyIds);
+  if (!grant) return { ...form, accountIds: [accountId] };
+  return form.accountIds.includes(accountId) ? form : { ...form, accountIds: [accountId, ...form.accountIds] };
+}
+
+/// 여러 키가 한 입력을 쓰거나(이전 입력) 저장 결과가 여러 키를 담으면, 금액·기간 변경이 다른 키에도 적용된다. 이때는 명시적 동의를 받아야 저장한다.
+export function sharedConsentNeeded(originalAccountIds: readonly string[] | null | undefined, selectedAccountIds: readonly string[]): boolean {
+  return (originalAccountIds?.length ?? 0) > 1 || selectedAccountIds.length > 1;
+}
+
+export type KeyGrantError = GrantFormError | "shared";
+
+/// 키 대화상자의 저장 요청. `grantPatch`의 검사에 더해 선택한 키가 구성원에 있는지, 공유 입력이면 동의했는지 확인한다.
+/// 새 입력은 id 없이(0부터 셈), 기존 입력은 같은 id·저장된 예산으로 보내 사용액이 이어진다. 다른 키의 단독 입력은 건드리지 않는다.
+export function keyGrantPatch(
+  input: { form: GrantFormInput; accountId: string; original: Pick<ApiCreditGrantPolicy, "accountIds"> | null | undefined; sharedConsent: boolean },
+  now: number,
+  billings?: readonly ApiCreditBillingStatus[] | null,
+): { ok: true; patch: GrantPatch } | { ok: false; error: KeyGrantError } {
+  if (!input.form.accountIds.includes(input.accountId)) return { ok: false, error: "keys" };
+  const result = grantPatch(input.form, now, billings);
+  if (!result.ok) return result;
+  if (sharedConsentNeeded(input.original?.accountIds, input.form.accountIds) && !input.sharedConsent) return { ok: false, error: "shared" };
+  return result;
+}
+
+/// 폼을 만든 시점의 기준: 정책 revision과, 이 키의 크레딧 입력·구독 결제 정보의 서명.
+export type CreditDraftBase = { revision: number; signature: string };
+export function creditSignature(grant: ApiCreditGrantPolicy | null | undefined, billings: readonly ApiCreditBillingPolicy[] | null | undefined): string {
+  return JSON.stringify([grant ?? null, billings ?? []]);
+}
+
+/// 저장 때 보낼 `expectedRevision`. 기본은 폼을 만든 시점의 revision이다.
+/// 정책이 다른 항목(예: 자동 배정 스위치)만 바뀌어 revision이 올랐더라도 이 키의 입력·결제 정보가 폼을 만든 때와 같으면 그 revision을 이어 받아 3초 조회로 저장이 막히지 않게 한다.
+/// 이 키의 입력·결제 정보가 바뀌었으면(다른 창에서 수정·삭제·교체) 폼 기준 revision을 그대로 보내 서비스가 거절하게 하고(`conflict`), 화면은 최신 값 불러오기를 요구한다. 최신 revision으로 조용히 덮어쓰지 않는다.
+export function draftRevision(base: CreditDraftBase, current: CreditDraftBase): { revision: number; conflict: boolean } {
+  if (current.signature === base.signature) return { revision: current.revision, conflict: false };
+  return { revision: base.revision, conflict: current.revision !== base.revision };
 }
 
 /// 서비스가 결제 정보를 받는 구독 계정: Anthropic 구독 계정만(API 키·다른 공급자 제외).
