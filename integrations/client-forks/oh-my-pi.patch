@@ -1,13 +1,13 @@
 diff --git a/bun.lock b/bun.lock
-index 2b73d1bbe6..dc9778396a 100644
+index 0d49a7cf8afcceebe619d9cc4d629cd5c8da6213..d1d49757040718c7a06004f7b400ebf175af934c 100644
 --- a/bun.lock
 +++ b/bun.lock
 @@ -15,7 +15,7 @@
      },
      "packages/agent": {
        "name": "@oh-my-pi/pi-agent-core",
--      "version": "18.18.9",
-+      "version": "18.18.9-ojak.1",
+-      "version": "18.22.2",
++      "version": "18.22.2-ojak.1",
        "dependencies": {
          "@oh-my-pi/pi-ai": "catalog:",
          "@oh-my-pi/pi-catalog": "catalog:",
@@ -15,8 +15,8 @@ index 2b73d1bbe6..dc9778396a 100644
      },
      "packages/ai": {
        "name": "@oh-my-pi/pi-ai",
--      "version": "18.18.9",
-+      "version": "18.18.9-ojak.1",
+-      "version": "18.22.2",
++      "version": "18.22.2-ojak.1",
        "dependencies": {
          "@oh-my-pi/omptype": "catalog:",
          "@oh-my-pi/pi-catalog": "catalog:",
@@ -24,8 +24,8 @@ index 2b73d1bbe6..dc9778396a 100644
      },
      "packages/coding-agent": {
        "name": "@oh-my-pi/pi-coding-agent",
--      "version": "18.18.9",
-+      "version": "18.18.9-ojak.1",
+-      "version": "18.22.2",
++      "version": "18.22.2-ojak.1",
        "bin": {
          "omp": "src/cli.ts",
        },
@@ -33,35 +33,35 @@ index 2b73d1bbe6..dc9778396a 100644
      },
      "packages/utils": {
        "name": "@oh-my-pi/pi-utils",
--      "version": "18.18.9",
-+      "version": "18.18.9-ojak.1",
+-      "version": "18.22.2",
++      "version": "18.22.2-ojak.1",
        "dependencies": {
          "@oh-my-pi/omptype": "catalog:",
          "@oh-my-pi/pi-natives": "catalog:",
 @@ -319,14 +319,14 @@
      "@napi-rs/cli": "3.7.2",
-     "@oh-my-pi/omp-stats": "18.18.9",
-     "@oh-my-pi/omptype": "18.18.9",
--    "@oh-my-pi/pi-agent-core": "18.18.9",
--    "@oh-my-pi/pi-ai": "18.18.9",
-+    "@oh-my-pi/pi-agent-core": "18.18.9-ojak.1",
-+    "@oh-my-pi/pi-ai": "18.18.9-ojak.1",
-     "@oh-my-pi/pi-catalog": "18.18.9",
--    "@oh-my-pi/pi-coding-agent": "18.18.9",
-+    "@oh-my-pi/pi-coding-agent": "18.18.9-ojak.1",
-     "@oh-my-pi/pi-mnemopi": "18.18.9",
-     "@oh-my-pi/pi-natives": "18.18.9",
-     "@oh-my-pi/pi-tui": "18.18.9",
--    "@oh-my-pi/pi-utils": "18.18.9",
-+    "@oh-my-pi/pi-utils": "18.18.9-ojak.1",
-     "@oh-my-pi/pi-wire": "18.18.9",
-     "@oh-my-pi/snapcompact": "18.18.9",
+     "@oh-my-pi/omp-stats": "18.22.2",
+     "@oh-my-pi/omptype": "18.22.2",
+-    "@oh-my-pi/pi-agent-core": "18.22.2",
+-    "@oh-my-pi/pi-ai": "18.22.2",
++    "@oh-my-pi/pi-agent-core": "18.22.2-ojak.1",
++    "@oh-my-pi/pi-ai": "18.22.2-ojak.1",
+     "@oh-my-pi/pi-catalog": "18.22.2",
+-    "@oh-my-pi/pi-coding-agent": "18.22.2",
++    "@oh-my-pi/pi-coding-agent": "18.22.2-ojak.1",
+     "@oh-my-pi/pi-mnemopi": "18.22.2",
+     "@oh-my-pi/pi-natives": "18.22.2",
+     "@oh-my-pi/pi-tui": "18.22.2",
+-    "@oh-my-pi/pi-utils": "18.22.2",
++    "@oh-my-pi/pi-utils": "18.22.2-ojak.1",
+     "@oh-my-pi/pi-wire": "18.22.2",
+     "@oh-my-pi/snapcompact": "18.22.2",
      "@opentelemetry/api": "^1.9.1",
 diff --git a/docs/environment-variables.md b/docs/environment-variables.md
-index 434ac69d2c..945c5370ba 100644
+index ed221f0fabf86766092a224f471b2b3e4fe93142..1f78a3606072651450c1aa19ee73f3d4a9afc03e 100644
 --- a/docs/environment-variables.md
 +++ b/docs/environment-variables.md
-@@ -601,7 +601,7 @@ These affect where coding-agent stores data and which process-local settings ove
+@@ -620,7 +620,7 @@ These affect where coding-agent stores data and which process-local settings ove
  | `PWD`                                               | Used when matching canonical current working directory in path helpers                                                                                                                                                                                                                                                                                                                                                                                                                                                                          |
  | `OMP_WORKTREE_DIR`                                  | Agent-managed worktrees directory override (default `~/.omp/wt`); must be absolute or `~`-relative, relative paths are ignored; wins over the `worktree.base` setting                                                                                                                                                                                                                                                                                                                                                                           |
  | `OMP_GITHUB_CACHE_DB`                               | Overrides the GitHub view cache database path (default `~/.omp/cache/github-cache.db`)                                                                                                                                                                                                                                                                                                                                                                                                                                                          |
@@ -71,7 +71,7 @@ index 434ac69d2c..945c5370ba 100644
  
  ---
 diff --git a/docs/extensions.md b/docs/extensions.md
-index 4ae2538077..70ce449e27 100644
+index 11a622d2bc79f1b07f3f98e8cb108b09a3065c7f..d4570181b64e06602c7e161da8a8396692b8feaf 100644
 --- a/docs/extensions.md
 +++ b/docs/extensions.md
 @@ -373,6 +373,7 @@ Handlers and tool `execute` receive `ctx` with:
@@ -111,7 +111,7 @@ index 4ae2538077..70ce449e27 100644
  ### Ephemeral side turns (`ctx.runEphemeralTurn`)
  
  Run the same side-turn pipeline as `/btw` using the current model and conversational context. The question and response are not appended to session history, and the request can run while the main turn is active. The snapshot may include in-flight assistant text.
-@@ -659,6 +675,7 @@ and `/new`. Commands retain their explicit prefill and session-transition action
+@@ -667,6 +683,7 @@ and `/new`. Commands retain their explicit prefill and session-transition action
  ### Subagent lifecycle
  
  - `before_subagent_spawn` → `{ model?: string | string[]; block?: boolean; reason?: string; note?: string }`. Fires in the parent session exactly once per spawned child (`task`, eval `agent()`, workpool workers), at dispatch before the child resolves its model — never during a frontend's validation preflight, so stateful routers (round-robin, quota) advance once per child. The event carries `agent`, `invocationKind`, `modelRole` (the pre-expansion role alias, when any), the expanded `patterns` core would use, and an optional stable `spawnKey`. A returned `model` replaces the spawn's attempt-ordered patterns while keeping the role identity, so the remaining entries become the child's retry fallback chain; handlers run in extension order and the last returned `model` wins, along with its `note`, which the task UI shows as the spawn's routing reason on live, async, and settled rows. `block: true` refuses the spawn with `reason`. Cancelling the spawn releases an awaiting handler (its result is discarded and pending `ctx.ui` dialogs close) instead of holding the spawn until the handler timeout.
@@ -120,7 +120,7 @@ index 4ae2538077..70ce449e27 100644
  ### Reliability/runtime signals
  
 diff --git a/docs/non-compaction-retry-policy.md b/docs/non-compaction-retry-policy.md
-index 1ead7f6d71..3e8f2594ca 100644
+index dbd76f76c0d1d263819e918fb82470a0be3ced27..0c2458016bad3be42193d2d72f1f4b81980eb6b9 100644
 --- a/docs/non-compaction-retry-policy.md
 +++ b/docs/non-compaction-retry-policy.md
 @@ -27,6 +27,16 @@ Retry and compaction are checked from the same `agent_end` path, but they are in
@@ -141,46 +141,46 @@ index 1ead7f6d71..3e8f2594ca 100644
  
  An exact OpenAI Responses HTTP 408 whose error text says `Timed out reading request body` is special only when the provider recorded that the **actual submitted request** was a full replay, not a `previous_response_id` delta. The transport surfaces that full-replay case after the first response. Delta and unknown/legacy request shapes retain ordinary transport retry behavior: mutating history after a delta can force a larger full replay, so automatic local elision must not infer safety from the diagnostic alone. Before any full-replay recovery, the session preserves the normal replay-safety veto and retry budget, requires enabled compaction with `shake` in `compaction.methodOrder`, then performs one conservative, artifact-backed local `shake elide`. The one-shot marker is scoped to the logical prompt sequence and is cleared by any turn that produced output, so a long prompt that keeps making progress can recover a later timeout over its newly grown history while back-to-back timeouts still get exactly one changed request; prompt generation remains the cancellation/session-transition fence. A retry occurs only when that operation rewrote eligible history; disabled, no-progress, artifact-save failure, cancellation, an exhausted retry budget, or a second matching error terminates the turn without an unchanged replay.
 diff --git a/package.json b/package.json
-index 4af2b64522..d48c323fab 100644
+index f922506e6087e76c23aeeca03e15eb574d6b5fbc..bb59e2fccaae6216555b65603536f6f4c4654fc6 100644
 --- a/package.json
 +++ b/package.json
 @@ -17,14 +17,14 @@
  			"@napi-rs/cli": "3.7.2",
- 			"@oh-my-pi/omp-stats": "18.18.9",
- 			"@oh-my-pi/omptype": "18.18.9",
--			"@oh-my-pi/pi-agent-core": "18.18.9",
--			"@oh-my-pi/pi-ai": "18.18.9",
-+			"@oh-my-pi/pi-agent-core": "18.18.9-ojak.1",
-+			"@oh-my-pi/pi-ai": "18.18.9-ojak.1",
- 			"@oh-my-pi/pi-catalog": "18.18.9",
--			"@oh-my-pi/pi-coding-agent": "18.18.9",
-+			"@oh-my-pi/pi-coding-agent": "18.18.9-ojak.1",
- 			"@oh-my-pi/pi-mnemopi": "18.18.9",
- 			"@oh-my-pi/pi-natives": "18.18.9",
- 			"@oh-my-pi/pi-tui": "18.18.9",
--			"@oh-my-pi/pi-utils": "18.18.9",
-+			"@oh-my-pi/pi-utils": "18.18.9-ojak.1",
- 			"@oh-my-pi/pi-wire": "18.18.9",
- 			"@oh-my-pi/snapcompact": "18.18.9",
+ 			"@oh-my-pi/omp-stats": "18.22.2",
+ 			"@oh-my-pi/omptype": "18.22.2",
+-			"@oh-my-pi/pi-agent-core": "18.22.2",
+-			"@oh-my-pi/pi-ai": "18.22.2",
++			"@oh-my-pi/pi-agent-core": "18.22.2-ojak.1",
++			"@oh-my-pi/pi-ai": "18.22.2-ojak.1",
+ 			"@oh-my-pi/pi-catalog": "18.22.2",
+-			"@oh-my-pi/pi-coding-agent": "18.22.2",
++			"@oh-my-pi/pi-coding-agent": "18.22.2-ojak.1",
+ 			"@oh-my-pi/pi-mnemopi": "18.22.2",
+ 			"@oh-my-pi/pi-natives": "18.22.2",
+ 			"@oh-my-pi/pi-tui": "18.22.2",
+-			"@oh-my-pi/pi-utils": "18.22.2",
++			"@oh-my-pi/pi-utils": "18.22.2-ojak.1",
+ 			"@oh-my-pi/pi-wire": "18.22.2",
+ 			"@oh-my-pi/snapcompact": "18.22.2",
  			"@opentelemetry/api": "^1.9.1",
 diff --git a/packages/agent/package.json b/packages/agent/package.json
-index 0b66d4c99e..6de8c7ff2d 100644
+index 33f696806bd35ef43632bb3a100671b94ea045d2..d8c4265385ce789d23169173404c6165eb8301d2 100644
 --- a/packages/agent/package.json
 +++ b/packages/agent/package.json
 @@ -1,7 +1,7 @@
  {
    "type": "module",
    "name": "@oh-my-pi/pi-agent-core",
--  "version": "18.18.9",
-+  "version": "18.18.9-ojak.1",
+-  "version": "18.22.2",
++  "version": "18.22.2-ojak.1",
    "description": "General-purpose agent with transport abstraction, state management, and attachment support",
    "homepage": "https://omp.sh",
    "author": { "name": "Stencil Labs, Inc.", "url": "https://stencil.so" },
 diff --git a/packages/agent/src/agent.ts b/packages/agent/src/agent.ts
-index b87a88dada..7a3fcfa504 100644
+index 9067b97ad8db92e1928378e118b1d79cc50c925e..4fa8216957797968db30160cb4e23df8556a24f7 100644
 --- a/packages/agent/src/agent.ts
 +++ b/packages/agent/src/agent.ts
-@@ -2271,7 +2271,7 @@ export class Agent {
+@@ -2273,7 +2273,7 @@ export class Agent {
  						}
  					: {
  							role: "assistant",
@@ -189,7 +189,7 @@ index b87a88dada..7a3fcfa504 100644
  							api: model.api,
  							provider: model.provider,
  							model: model.id,
-@@ -2287,6 +2287,16 @@ export class Agent {
+@@ -2289,6 +2289,16 @@ export class Agent {
  							errorMessage,
  							timestamp: Date.now(),
  						};
@@ -207,19 +207,33 @@ index b87a88dada..7a3fcfa504 100644
  			if (shouldEmitVisibleError) {
  				if (!turnOpen) {
 diff --git a/packages/ai/package.json b/packages/ai/package.json
-index c477db5326..8195a29de4 100644
+index 44dd49ef99f06cee15fc7a13e22391773b484c40..85113776ebe2ab166614fc922d49a56c2360ffe8 100644
 --- a/packages/ai/package.json
 +++ b/packages/ai/package.json
 @@ -1,6 +1,6 @@
  {
  	"name": "@oh-my-pi/pi-ai",
--	"version": "18.18.9",
-+	"version": "18.18.9-ojak.1",
+-	"version": "18.22.2",
++	"version": "18.22.2-ojak.1",
  	"description": "Unified LLM API with automatic model discovery and provider configuration",
  	"keywords": [
  		"ai",
+diff --git a/packages/ai/src/auth-gateway/caller-options.ts b/packages/ai/src/auth-gateway/caller-options.ts
+index bc6674f36bacae634a96791215b7f276ca59fd98..bfbc046f6356d6c7f4edb104235ec53710092fc1 100644
+--- a/packages/ai/src/auth-gateway/caller-options.ts
++++ b/packages/ai/src/auth-gateway/caller-options.ts
+@@ -43,6 +43,9 @@ const OPTION_TIERS = {
+ 	// A session that learned to leave other models' reasoning out of Claude
+ 	// requests must keep doing so through the gateway.
+ 	omitDemotedReasoning: "client",
++	// Host-owned provenance of a local request: a gateway hop must never trust a caller's claim to be the
++	// durable primary conversation (see `SimpleStreamOptions.requestKind`).
++	requestKind: "server",
+ 
+ 	// Attribution.
+ 	headers: "gateway",
 diff --git a/packages/ai/src/providers/pi-native-client.ts b/packages/ai/src/providers/pi-native-client.ts
-index cafb934c86..fc2bdd090f 100644
+index cafb934c86171b001044748c5615881e4a62681b..fc2bdd090f6293969dfba820bb093603458f0ad1 100644
 --- a/packages/ai/src/providers/pi-native-client.ts
 +++ b/packages/ai/src/providers/pi-native-client.ts
 @@ -55,6 +55,7 @@ const NON_WIRE_KEYS = new Set<keyof SimpleStreamOptions>([
@@ -231,10 +245,10 @@ index cafb934c86..fc2bdd090f 100644
  const PI_NATIVE_STREAM_IDLE_TIMEOUT_ERROR = "pi-native stream stalled while waiting for the next event";
  const PI_NATIVE_STREAM_FIRST_EVENT_TIMEOUT_ERROR = "pi-native stream timed out while waiting for the first event";
 diff --git a/packages/ai/src/stream.ts b/packages/ai/src/stream.ts
-index 6d1b5e190d..2193c504bd 100644
+index de3e6e5f2cc11d18a11002acf319708e20e13eff..e3abc56295ed3c9b479add279d0d84baf35d4644 100644
 --- a/packages/ai/src/stream.ts
 +++ b/packages/ai/src/stream.ts
-@@ -1545,8 +1545,8 @@ export async function completeSimple<TApi extends Api>(
+@@ -1576,8 +1576,8 @@ export async function completeSimple<TApi extends Api>(
  		onAttempt?: (message: AssistantMessage) => void;
  	},
  ): Promise<AssistantMessage> {
@@ -246,10 +260,10 @@ index 6d1b5e190d..2193c504bd 100644
  		options?.signal,
  		() => streamSimple(model, context, sessionOptions),
 diff --git a/packages/ai/src/types.ts b/packages/ai/src/types.ts
-index e69946b7d6..1cf052e010 100644
+index 4c94e352d9d990c34f54b50feb9ba22d0fc9d11b..ce6e7aa1b62c05e893b847bbfb7fc2f8159bd989 100644
 --- a/packages/ai/src/types.ts
 +++ b/packages/ai/src/types.ts
-@@ -580,6 +580,14 @@ export interface StreamOptions {
+@@ -589,6 +589,14 @@ export interface StreamOptions {
  	 * as the prompt-cache key when `promptCacheKey` is not set.
  	 */
  	sessionId?: string;
@@ -264,7 +278,7 @@ index e69946b7d6..1cf052e010 100644
  	/**
  	 * Optional prompt-cache identity. OpenAI-family providers use this for
  	 * `prompt_cache_key` payloads and cache-affinity headers such as
-@@ -1364,6 +1372,12 @@ export interface AssistantMessage {
+@@ -1412,6 +1420,12 @@ export interface AssistantMessage {
  	errorMessage?: string;
  	/** Stable recovery-classification text when errorMessage includes display-only diagnostics. */
  	errorClassificationMessage?: string;
@@ -278,7 +292,7 @@ index e69946b7d6..1cf052e010 100644
  	requestBodyReadTimeoutFullReplay?: boolean;
  	/** Per-tool abort messages used when an aborted assistant turn needs different placeholder results per tool call. */
 diff --git a/packages/ai/test/pi-native-client.test.ts b/packages/ai/test/pi-native-client.test.ts
-index 6573ec0e52..f34033bd74 100644
+index 6573ec0e520591fafe4e3be50919f15608132fa7..f34033bd743b7449139229c898f98a2a85918204 100644
 --- a/packages/ai/test/pi-native-client.test.ts
 +++ b/packages/ai/test/pi-native-client.test.ts
 @@ -306,6 +306,7 @@ describe("streamPiNative request shape", () => {
@@ -300,7 +314,7 @@ index 6573ec0e52..f34033bd74 100644
  		expect(responseMetadata).toMatchObject({
 diff --git a/packages/ai/test/provider-request-ownership.test.ts b/packages/ai/test/provider-request-ownership.test.ts
 new file mode 100644
-index 0000000000..3ac382966a
+index 0000000000000000000000000000000000000000..3ac382966a2b677c2b5fa8ed84d683c69a9391cd
 --- /dev/null
 +++ b/packages/ai/test/provider-request-ownership.test.ts
 @@ -0,0 +1,32 @@
@@ -337,20 +351,20 @@ index 0000000000..3ac382966a
 +	expect(mock.calls).toHaveLength(1);
 +});
 diff --git a/packages/coding-agent/package.json b/packages/coding-agent/package.json
-index 73bda3ed23..d4819c806e 100644
+index 6b85b8afb3d4434d290e83c58369fa40e4ca7be1..6dc5edadca30db1b6b671857d215425a14fe2509 100644
 --- a/packages/coding-agent/package.json
 +++ b/packages/coding-agent/package.json
 @@ -1,6 +1,6 @@
  {
  	"name": "@oh-my-pi/pi-coding-agent",
--	"version": "18.18.9",
-+	"version": "18.18.9-ojak.1",
+-	"version": "18.22.2",
++	"version": "18.22.2-ojak.1",
  	"description": "Coding agent CLI with read, bash, edit, write tools and session management",
  	"keywords": [
  		"agent",
 diff --git a/packages/coding-agent/src/cli/ojak-update.ts b/packages/coding-agent/src/cli/ojak-update.ts
 new file mode 100644
-index 0000000000..9a66b21ace
+index 0000000000000000000000000000000000000000..9a66b21ace82744237e720900cf39b9f1fea5469
 --- /dev/null
 +++ b/packages/coding-agent/src/cli/ojak-update.ts
 @@ -0,0 +1,389 @@
@@ -744,10 +758,10 @@ index 0000000000..9a66b21ace
 +	);
 +}
 diff --git a/packages/coding-agent/src/cli/update-cli.ts b/packages/coding-agent/src/cli/update-cli.ts
-index 49d398897c..679d21d27c 100644
+index ed12d3f7210f102a20e8d51c569728efae644977..96144052c2aa2713c05bf9f061705549d307d5c3 100644
 --- a/packages/coding-agent/src/cli/update-cli.ts
 +++ b/packages/coding-agent/src/cli/update-cli.ts
-@@ -15,7 +15,6 @@ import {
+@@ -13,7 +13,6 @@ import {
  	APP_NAME,
  	compareVersions,
  	formatBytes,
@@ -755,7 +769,7 @@ index 49d398897c..679d21d27c 100644
  	getUpdateStateDir,
  	isCompiledBinary,
  	isEnoent,
-@@ -25,7 +24,6 @@ import {
+@@ -23,7 +22,6 @@ import {
  import chalk from "@oh-my-pi/pi-utils/chalk";
  import { type FileLockHandle, tryAcquireFileLock, withFileLock } from "@oh-my-pi/pi-utils/file-lock";
  import { $ } from "bun";
@@ -763,16 +777,15 @@ index 49d398897c..679d21d27c 100644
  import { theme } from "@oh-my-pi/pi-tui/theme";
  import {
  	isTimeoutError,
-@@ -33,7 +31,7 @@ import {
- 	unsupportedProxyMessage,
- 	withTimeoutSignal,
- } from "../utils/fetch-timeout";
--import { type BuildAnswer, type BuildPatch, type Fetch, fetchBuild, type UpdateChannel } from "./build-service";
-+import { type BuildAnswer, type BuildPatch, type Fetch, type UpdateChannel } from "./build-service";
- import {
- 	DEFAULT_NPM_REGISTRY,
- 	loadNpmRegistryResolver,
-@@ -42,7 +40,14 @@ import {
+@@ -37,7 +35,6 @@ import {
+ 	type BuildPatch,
+ 	downloadBuildFile,
+ 	type Fetch,
+-	fetchBuild,
+ 	type UpdateChannel,
+ } from "./build-service";
+ import { managedInstallName } from "./managed-install";
+@@ -49,7 +46,14 @@ import {
  	npmRegistryPackageUrl,
  } from "./npm-registry";
  
@@ -788,7 +801,7 @@ index 49d398897c..679d21d27c 100644
  
  const PACKAGE = "@oh-my-pi/pi-coding-agent";
  const HOMEBREW_FORMULA = "can1357/tap/omp";
-@@ -1009,16 +1014,6 @@ export async function pruneBunInstallCache(
+@@ -918,16 +922,6 @@ export async function pruneBunInstallCache(
  	return { scannedPackages, removedEntries };
  }
  
@@ -805,7 +818,7 @@ index 49d398897c..679d21d27c 100644
  
  interface BunGlobalInstallLocations {
  	globalDir?: string;
-@@ -1042,48 +1037,6 @@ export function resolveBunGlobalNodeModulesDirFromLocations({
+@@ -951,48 +945,6 @@ export function resolveBunGlobalNodeModulesDirFromLocations({
  	return undefined;
  }
  
@@ -854,7 +867,7 @@ index 49d398897c..679d21d27c 100644
  
  /**
   * Resolve the path that `omp` maps to in the user's PATH.
-@@ -1115,37 +1068,6 @@ async function reportedVersionAtPath(binaryPath: string): Promise<string | undef
+@@ -1024,37 +976,6 @@ async function reportedVersionAtPath(binaryPath: string): Promise<string | undef
  	}
  }
  
@@ -892,7 +905,7 @@ index 49d398897c..679d21d27c 100644
  /**
   * Run a specific binary and check if it reports the expected version.
   */
-@@ -1207,10 +1129,6 @@ function printVerificationResult(result: InstalledVersionVerification, expectedV
+@@ -1116,10 +1037,6 @@ function printVerificationResult(result: InstalledVersionVerification, expectedV
  	console.log(chalk.yellow(`You may need to reinstall: ${installerHint()}`));
  }
  
@@ -903,7 +916,33 @@ index 49d398897c..679d21d27c 100644
  
  async function unlinkIfExists(filePath: string): Promise<void> {
  	try {
-@@ -1538,43 +1456,6 @@ export interface RenameMigrationSteps {
+@@ -1417,25 +1334,6 @@ export function buildMiseForceInstallArgs(expectedVersion: string): string[] {
+ 	return ["install", "--force", `${MISE_TOOL}@${expectedVersion}`];
+ }
+ 
+-/**
+- * Run a package-manager install on this process's stdio and return its exit
+- * code. Bun Shell pipes child output, so installers see no TTY and print every
+- * progress-bar frame as a new line instead of redrawing it in place.
+- *
+- * Matches Bun Shell otherwise: the binary resolves from PATH only (Bun.spawn
+- * searches the cwd first on Windows), and the child gets the live
+- * `process.env` (Bun.spawn without `env` gets the startup environment).
+- */
+-async function runInstaller(
+-	[name, ...args]: string[],
+-	env: Record<string, string | undefined> = process.env,
+-): Promise<number> {
+-	const bin = $which(name);
+-	if (!bin) throw new Error(`${name} not found in PATH`);
+-	const child = Bun.spawn({ cmd: [bin, ...args], env, stdin: "inherit", stdout: "inherit", stderr: "inherit" });
+-	return await child.exited;
+-}
+-
+ /**
+  * Old-name globals a rename migration removes after the new install exists:
+  * the set difference between the old install's top-level globals
+@@ -1466,44 +1364,6 @@ export interface RenameMigrationSteps {
  	verify(): Promise<InstalledVersionVerification>;
  }
  
@@ -917,15 +956,16 @@ index 49d398897c..679d21d27c 100644
 -					registry: release.registry,
 -					supportsReleaseAgeOverride: await bunSupportsReleaseAgeOverride(),
 -				});
--				return (await $`bun ${args}`.nothrow()).exitCode;
+-				return await runInstaller(["bun", ...args]);
 -			}
 -			const args = buildNpmInstallArgs(release.version, nativeTag, release.packages, {
 -				force: true,
 -				registry: release.registry,
 -			});
--			return (
--				await $`npm ${args}`.env(buildNpmUpdateEnv(process.env, await npmSupportsReleaseAgeOverride())).nothrow()
--			).exitCode;
+-			return await runInstaller(
+-				["npm", ...args],
+-				buildNpmUpdateEnv(process.env, await npmSupportsReleaseAgeOverride()),
+-			);
 -		},
 -		async removeOld() {
 -			// One invocation per package: a single batched remove fails wholesale
@@ -947,7 +987,7 @@ index 49d398897c..679d21d27c 100644
  
  /**
   * Migrate a package-manager install across an `omp.rename` hop without a
-@@ -1618,75 +1499,6 @@ export async function migrateRenamedInstall(release: ReleaseInfo, steps: RenameM
+@@ -1547,76 +1407,6 @@ export async function migrateRenamedInstall(release: ReleaseInfo, steps: RenameM
  	printVerifiedVersion(release.version);
  }
  
@@ -985,9 +1025,9 @@ index 49d398897c..679d21d27c 100644
 -			registry: release.registry,
 -			supportsReleaseAgeOverride: await bunSupportsReleaseAgeOverride(),
 -		});
--		const result = await $`bun ${args}`.nothrow();
--		if (result.exitCode !== 0) {
--			throw new Error(`bun install failed with exit code ${result.exitCode}`);
+-		const exitCode = await runInstaller(["bun", ...args]);
+-		if (exitCode !== 0) {
+-			throw new Error(`bun install failed with exit code ${exitCode}`);
 -		}
 -		verification = await verifyInstalledVersion(release.version);
 -	}
@@ -1011,11 +1051,12 @@ index 49d398897c..679d21d27c 100644
 -	const args = buildNpmInstallArgs(release.version, currentNativeTag(), release.packages, {
 -		registry: release.registry,
 -	});
--	const result = await $`npm ${args}`
--		.env(buildNpmUpdateEnv(process.env, await npmSupportsReleaseAgeOverride()))
--		.nothrow();
--	if (result.exitCode !== 0) {
--		throw new Error(`npm install failed with exit code ${result.exitCode}`);
+-	const exitCode = await runInstaller(
+-		["npm", ...args],
+-		buildNpmUpdateEnv(process.env, await npmSupportsReleaseAgeOverride()),
+-	);
+-	if (exitCode !== 0) {
+-		throw new Error(`npm install failed with exit code ${exitCode}`);
 -	}
 -
 -	return await verifyInstalledVersion(release.version);
@@ -1023,7 +1064,7 @@ index 49d398897c..679d21d27c 100644
  /** Injectable steps for {@link updateViaManager}; mirrors {@link RenameMigrationSteps}. */
  export interface ManagerUpdateSteps {
  	/** Manager name used in progress and recovery messages. */
-@@ -1703,33 +1515,6 @@ export interface ManagerUpdateSteps {
+@@ -1633,33 +1423,6 @@ export interface ManagerUpdateSteps {
  	repair(launcherPath: string): Promise<void>;
  }
  
@@ -1057,22 +1098,22 @@ index 49d398897c..679d21d27c 100644
  
  /**
   * Run a package-manager self-update, repairing the launcher when the manager
-@@ -1794,44 +1579,6 @@ export async function updateViaManager(
+@@ -1724,44 +1487,6 @@ export async function updateViaManager(
  	);
  }
  
 -async function updateViaHomebrew(expectedVersion: string, force: boolean): Promise<void> {
 -	console.log(chalk.dim("Updating Homebrew formulae..."));
--	const update = await $`brew update`.nothrow();
--	if (update.exitCode !== 0) {
--		throw new Error(`brew update failed with exit code ${update.exitCode}`);
+-	const updateExitCode = await runInstaller(["brew", "update"]);
+-	if (updateExitCode !== 0) {
+-		throw new Error(`brew update failed with exit code ${updateExitCode}`);
 -	}
 -
 -	console.log(chalk.dim("Updating via Homebrew..."));
 -	const args = buildHomebrewUpdateArgs(force);
--	const result = await $`brew ${args}`.nothrow();
--	if (result.exitCode !== 0) {
--		throw new Error(`brew ${args[0]} failed with exit code ${result.exitCode}`);
+-	const exitCode = await runInstaller(["brew", ...args]);
+-	if (exitCode !== 0) {
+-		throw new Error(`brew ${args[0]} failed with exit code ${exitCode}`);
 -	}
 -
 -	await printVerification(expectedVersion);
@@ -1084,16 +1125,16 @@ index 49d398897c..679d21d27c 100644
 -	const help = await $`mise upgrade --help`.env(env).quiet().nothrow();
 -	const supportsReleaseAgeOverride = help.exitCode === 0 && /(?:--minimum-release-age|--before)\b/.test(help.text());
 -	const args = buildMiseUpgradeArgs(supportsReleaseAgeOverride);
--	const result = await $`mise ${args}`.env(env).nothrow();
--	if (result.exitCode !== 0) {
--		throw new Error(`mise upgrade failed with exit code ${result.exitCode}`);
+-	const exitCode = await runInstaller(["mise", ...args], env);
+-	if (exitCode !== 0) {
+-		throw new Error(`mise upgrade failed with exit code ${exitCode}`);
 -	}
 -
 -	if (force) {
 -		const forceArgs = buildMiseForceInstallArgs(expectedVersion);
--		const forceResult = await $`mise ${forceArgs}`.env(env).nothrow();
--		if (forceResult.exitCode !== 0) {
--			throw new Error(`mise install --force failed with exit code ${forceResult.exitCode}`);
+-		const forceExitCode = await runInstaller(["mise", ...forceArgs], env);
+-		if (forceExitCode !== 0) {
+-			throw new Error(`mise install --force failed with exit code ${forceExitCode}`);
 -		}
 -	}
 -
@@ -1102,7 +1143,7 @@ index 49d398897c..679d21d27c 100644
  
  // Monotonic within this process so two updates started in the same millisecond
  // (same pid, same `Date.now()`) still get distinct temp/backup paths. Kept
-@@ -2128,58 +1875,23 @@ export async function updateViaShimTakeover(
+@@ -2059,58 +1784,23 @@ export async function updateViaShimTakeover(
   * a user recovering from a binary-only release straight back through bun.
   */
  function installerHint(): string {
@@ -1165,7 +1206,7 @@ index 49d398897c..679d21d27c 100644
  	| { kind: "available"; version: string }
  	/** This install cannot update itself (a managing app, Nix, a channel its installer lacks). */
  	| { kind: "unsupported"; reason: string }
-@@ -2193,8 +1905,7 @@ function updateError(what: string, err: unknown): Error {
+@@ -2124,8 +1814,7 @@ function updateError(what: string, err: unknown): Error {
  
  /**
   * Lock held while an update installs, so `omp update` and the background
@@ -1175,7 +1216,7 @@ index 49d398897c..679d21d27c 100644
   */
  function acquireInstallLock(): FileLockHandle {
  	const dir = getUpdateStateDir();
-@@ -2205,221 +1916,73 @@ function acquireInstallLock(): FileLockHandle {
+@@ -2136,221 +1825,73 @@ function acquireInstallLock(): FileLockHandle {
  }
  
  /**
@@ -1454,7 +1495,7 @@ index 49d398897c..679d21d27c 100644
  	} finally {
  		lock?.release();
  	}
-@@ -2438,14 +2001,14 @@ ${chalk.bold("Options:")}
+@@ -2369,14 +1910,14 @@ ${chalk.bold("Options:")}
    -c, --check     Check for updates without installing
    -f, --force     Force reinstall even if up to date
    -l, --plugins   Update installed plugins
@@ -1473,7 +1514,7 @@ index 49d398897c..679d21d27c 100644
  `);
  }
 diff --git a/packages/coding-agent/src/commands/update.ts b/packages/coding-agent/src/commands/update.ts
-index 40559e2526..4e13016bc9 100644
+index 40559e25265c8135d83853981c22848fe34bed40..4e13016bc955f7391fe15e93a9aad19774b44bb7 100644
 --- a/packages/coding-agent/src/commands/update.ts
 +++ b/packages/coding-agent/src/commands/update.ts
 @@ -16,11 +16,11 @@ export default class Update extends Command {
@@ -1492,7 +1533,7 @@ index 40559e2526..4e13016bc9 100644
  	async run(): Promise<void> {
  		const { flags } = await this.parse(Update);
 diff --git a/packages/coding-agent/src/config/model-resolver.ts b/packages/coding-agent/src/config/model-resolver.ts
-index 17e42e9d89..208a0d245c 100644
+index 4ce55898ee70414f39f0bb6255dcf0baf878b13c..e642beb3f4b80d0738f325b9617a6430c2933e48 100644
 --- a/packages/coding-agent/src/config/model-resolver.ts
 +++ b/packages/coding-agent/src/config/model-resolver.ts
 @@ -1809,6 +1809,14 @@ export function sessionModelDiscoveryProviders(
@@ -1513,7 +1554,7 @@ index 17e42e9d89..208a0d245c 100644
 @@ -1845,13 +1853,7 @@ export async function resolveModelOverrideWithAuthFallback(
  	settings?: Settings,
  	sessionId?: string,
- 	options?: { exactOnly?: boolean },
+ 	options?: { exactOnly?: boolean; allowedProvider?: string | null },
 -): Promise<{
 -	model?: Model<Api>;
 -	thinkingLevel?: ConfiguredThinkingLevel;
@@ -1524,9 +1565,9 @@ index 17e42e9d89..208a0d245c 100644
 +): Promise<AuthenticatedModelResolution> {
  	const disabledProviders = disabledProviderIds(settings);
  	let lookupRegistry: ModelLookupRegistry = modelRegistry;
- 	if (disabledProviders.size > 0) {
+ 	if (disabledProviders.size > 0 || options?.allowedProvider !== undefined) {
 diff --git a/packages/coding-agent/src/extensibility/extensions/runner.ts b/packages/coding-agent/src/extensibility/extensions/runner.ts
-index 67c21bb687..a3884229f3 100644
+index a4c59beb04365b1a770b9a90fa1f7ba8729070f0..36d1d9c556e9f96736558031d8c201decd1bd23d 100644
 --- a/packages/coding-agent/src/extensibility/extensions/runner.ts
 +++ b/packages/coding-agent/src/extensibility/extensions/runner.ts
 @@ -28,7 +28,7 @@ import {
@@ -1557,7 +1598,7 @@ index 67c21bb687..a3884229f3 100644
  	#waitForIdleFn: () => Promise<void> = async () => {};
  	#abortFn: () => void = () => {};
  	#hasPendingMessagesFn: () => boolean = () => false;
-@@ -940,7 +944,10 @@ export class ExtensionRunner {
+@@ -948,7 +952,10 @@ export class ExtensionRunner {
  
  		// Context actions (required)
  		this.#getModel = contextActions.getModel;
@@ -1568,7 +1609,7 @@ index 67c21bb687..a3884229f3 100644
  		this.#abortFn = contextActions.abort;
  		this.#hasPendingMessagesFn = contextActions.hasPendingMessages;
  		this.#shutdownHandler = contextActions.shutdown;
-@@ -1787,8 +1794,13 @@ export class ExtensionRunner {
+@@ -1795,8 +1802,13 @@ export class ExtensionRunner {
  		agent: ExtensionAgentIdentity = this.agent,
  	): ExtensionContext {
  		const getModel = model ? () => model : this.#getModel;
@@ -1582,7 +1623,7 @@ index 67c21bb687..a3884229f3 100644
  		const sendUserMessage = (text: string, options?: SendUserMessageOptions): void => {
  			void this.runtime.sendUserMessage(text, options);
  		};
-@@ -1802,6 +1814,10 @@ export class ExtensionRunner {
+@@ -1810,6 +1822,10 @@ export class ExtensionRunner {
  			hasUI: this.hasUI(),
  			cwd: this.cwd,
  			sessionManager: this.sessionManager,
@@ -1593,7 +1634,7 @@ index 67c21bb687..a3884229f3 100644
  			modelRegistry: this.modelRegistry,
  			isProjectTrusted: () => true,
  			agent,
-@@ -1810,6 +1826,17 @@ export class ExtensionRunner {
+@@ -1818,6 +1834,17 @@ export class ExtensionRunner {
  			},
  			models: createExtensionModelQuery(this.modelRegistry, this.settings, getModel),
  			isIdle: () => this.#isIdleFn(),
@@ -1611,7 +1652,7 @@ index 67c21bb687..a3884229f3 100644
  			abort: () => this.#abortFn(),
  			hasPendingMessages: () => this.#hasPendingMessagesFn(),
  			shutdown: () => this.#shutdownHandler(),
-@@ -1903,8 +1930,12 @@ export class ExtensionRunner {
+@@ -1911,8 +1938,12 @@ export class ExtensionRunner {
  	}
  
  	createCommandContext(): ExtensionCommandContext {
@@ -1625,7 +1666,7 @@ index 67c21bb687..a3884229f3 100644
  			getContextUsage: () => this.#getContextUsageFn(),
  			waitForIdle: () => this.#waitForIdleFn(),
  			newSession: options => this.#newSessionHandler(options),
-@@ -2665,6 +2696,27 @@ export class ExtensionRunner {
+@@ -2698,6 +2729,27 @@ export class ExtensionRunner {
  		return undefined;
  	}
  
@@ -1654,10 +1695,10 @@ index 67c21bb687..a3884229f3 100644
  	 * Runs `before_subagent_spawn` handlers; a `block` short-circuits, the last defined `model` wins.
  	 * `signal` (the spawn's abort signal) cancels an awaiting handler instead of parking until the timeout.
 diff --git a/packages/coding-agent/src/extensibility/extensions/types.ts b/packages/coding-agent/src/extensibility/extensions/types.ts
-index 2eb58d9813..25b5cc4c84 100644
+index e86aee6c2c398b53abed41f5a663b5d4852405eb..15e99c5aa2bd5873e113d790ed637767cb0f5f97 100644
 --- a/packages/coding-agent/src/extensibility/extensions/types.ts
 +++ b/packages/coding-agent/src/extensibility/extensions/types.ts
-@@ -805,6 +805,8 @@ export interface ExtensionContext {
+@@ -806,6 +806,8 @@ export interface ExtensionContext {
  	cwd: string;
  	/** Session manager (read-only) */
  	sessionManager: ReadonlySessionManager;
@@ -1666,7 +1707,7 @@ index 2eb58d9813..25b5cc4c84 100644
  	/** Model registry for API key resolution */
  	modelRegistry: ModelRegistry;
  	/** Calling session's `local://` root mapping for external tool bridges. */
-@@ -815,6 +817,15 @@ export interface ExtensionContext {
+@@ -816,6 +818,15 @@ export interface ExtensionContext {
  	models: ExtensionModelQuery;
  	/** Whether the agent is idle (not streaming) */
  	isIdle(): boolean;
@@ -1682,7 +1723,7 @@ index 2eb58d9813..25b5cc4c84 100644
  	/** Abort the current agent operation */
  	abort(): void;
  	/** Whether there are queued messages waiting */
-@@ -1231,6 +1242,17 @@ export interface BeforeSubagentSpawnEvent {
+@@ -1234,6 +1245,17 @@ export interface BeforeSubagentSpawnEvent {
  	spawnKey?: string;
  }
  
@@ -1700,7 +1741,7 @@ index 2eb58d9813..25b5cc4c84 100644
  export type {
  	AgentEndEvent,
  	AgentStartEvent,
-@@ -1690,6 +1712,7 @@ export type ExtensionEvent =
+@@ -1696,6 +1718,7 @@ export type ExtensionEvent =
  	| AfterProviderResponseEvent
  	| BeforeAgentStartEvent
  	| BeforeSubagentSpawnEvent
@@ -1708,7 +1749,7 @@ index 2eb58d9813..25b5cc4c84 100644
  	| AgentStartEvent
  	| AgentEndEvent
  	| SessionStopEvent
-@@ -1917,6 +1940,7 @@ export interface ExtensionAPI {
+@@ -1924,6 +1947,7 @@ export interface ExtensionAPI {
  		event: "before_subagent_spawn",
  		handler: ExtensionHandler<BeforeSubagentSpawnEvent, BeforeSubagentSpawnEventResult>,
  	): void;
@@ -1716,7 +1757,7 @@ index 2eb58d9813..25b5cc4c84 100644
  	on(event: "agent_start", handler: ExtensionHandler<AgentStartEvent>): void;
  	on(event: "agent_end", handler: ExtensionHandler<AgentEndEvent>): void;
  	on(event: "session_stop", handler: ExtensionHandler<SessionStopEvent, SessionStopEventResult>): void;
-@@ -2453,7 +2477,10 @@ export interface ExtensionActions {
+@@ -2460,7 +2484,10 @@ export interface ExtensionActions {
  /** Actions for ExtensionContext (ctx.* in event handlers). */
  export interface ExtensionContextActions {
  	getModel: () => Model | undefined;
@@ -1728,7 +1769,7 @@ index 2eb58d9813..25b5cc4c84 100644
  	hasPendingMessages: () => boolean;
  	shutdown: () => void;
 diff --git a/packages/coding-agent/src/main.ts b/packages/coding-agent/src/main.ts
-index a3adea1626..93b0c8b078 100644
+index eb3870fbb640975ff4cfee829a6b6501e3023780..5acd15b9b9a9f91150c0469116a460e66563b297 100644
 --- a/packages/coding-agent/src/main.ts
 +++ b/packages/coding-agent/src/main.ts
 @@ -20,7 +20,7 @@ import {
@@ -1740,7 +1781,7 @@ index a3adea1626..93b0c8b078 100644
  import * as logger from "@oh-my-pi/pi-utils/logger";
  import * as postmortem from "@oh-my-pi/pi-utils/postmortem";
  import { fuzzyFilter } from "@oh-my-pi/pi-tui/fuzzy";
-@@ -41,10 +41,10 @@ import { processFileArguments } from "./cli/file-processor";
+@@ -41,11 +41,11 @@ import { processFileArguments } from "./cli/file-processor";
  import { buildInitialMessage } from "./cli/initial-message";
  import { formatKeyHint, KeybindingsManager } from "@oh-my-pi/pi-tui/app-keybindings";
  import type { SessionPickerOptions } from "@oh-my-pi/pi-tui/apps/session-picker";
@@ -1748,12 +1789,13 @@ index a3adea1626..93b0c8b078 100644
 +import { fetchCompatibleRelease, readOjakServiceVersion, serviceMeets } from "./cli/ojak-update";
  import { applyStartupCwd } from "./cli/startup-cwd";
  import { runAutoUpdate } from "./cli/auto-update";
--import { getLatestRelease, isSourceCheckout, managedInstallName } from "./cli/update-cli";
-+import { isSourceCheckout, managedInstallName } from "./cli/update-cli";
+ import { managedInstallName } from "./cli/managed-install";
+-import { getLatestRelease, isSourceCheckout } from "./cli/update-cli";
++import { isSourceCheckout } from "./cli/update-cli";
  import { findConfigFile } from "./config";
+ import { cfgNoJudge, cfgNoSpotlight, cfgOffline } from "./config/auxiliary-model-policy";
  import { ModelRegistry } from "./config/model-registry";
- import { formatModelSelectorValue } from "@oh-my-pi/pi-tui/overlays/model-selector";
-@@ -185,7 +185,6 @@ import {
+@@ -187,7 +187,6 @@ import {
  	cfgTuiMaxFps,
  	cfgTuiMotion,
  	cfgUpdateAuto,
@@ -1761,7 +1803,7 @@ index a3adea1626..93b0c8b078 100644
  } from "./modes/settings";
  import {
  	cfgDefaultThinkingLevel,
-@@ -281,13 +280,10 @@ async function checkForNewVersion(currentVersion: string): Promise<string | unde
+@@ -283,13 +282,10 @@ async function checkForNewVersion(currentVersion: string): Promise<string | unde
  		// Checkouts update through git and a manager (Tern) updates its omp itself:
  		// "run omp update" would be wrong advice for both.
  		if (isSourceCheckout() || (await managedInstallName(process.execPath))) return;
@@ -1780,10 +1822,10 @@ index a3adea1626..93b0c8b078 100644
  		return undefined;
  	}
 diff --git a/packages/coding-agent/src/modes/acp/acp-agent.ts b/packages/coding-agent/src/modes/acp/acp-agent.ts
-index 25d9a28646..4f9a0e1a79 100644
+index b31c8d67e4f2b9f33926250ba812266663cdca69..d2efe9f5116366813c99b3059e6144ee0209dff8 100644
 --- a/packages/coding-agent/src/modes/acp/acp-agent.ts
 +++ b/packages/coding-agent/src/modes/acp/acp-agent.ts
-@@ -3305,7 +3305,10 @@ export class AcpAgent implements Agent {
+@@ -3353,7 +3353,10 @@ export class AcpAgent implements Agent {
  			},
  			{
  				getModel: () => record.session.model,
@@ -1795,7 +1837,7 @@ index 25d9a28646..4f9a0e1a79 100644
  					void record.session.abort({ reason: USER_INTERRUPT_LABEL });
  				},
 diff --git a/packages/coding-agent/src/modes/controllers/extension-ui-controller.ts b/packages/coding-agent/src/modes/controllers/extension-ui-controller.ts
-index 49060cc608..4986903348 100644
+index 203e5f1f9601bddec853110cd4c4a946126e1e5a..6f9bd288c877cab14d8bc126347f08313145ffd3 100644
 --- a/packages/coding-agent/src/modes/controllers/extension-ui-controller.ts
 +++ b/packages/coding-agent/src/modes/controllers/extension-ui-controller.ts
 @@ -289,7 +289,10 @@ export class ExtensionUiController {
@@ -1821,7 +1863,7 @@ index 49060cc608..4986903348 100644
  			hasPendingMessages: () => this.ctx.session.queuedMessageCount > 0,
  			shutdown: () => this.ctx.requestShutdown(),
 diff --git a/packages/coding-agent/src/modes/runtime-init.ts b/packages/coding-agent/src/modes/runtime-init.ts
-index a798abf594..48d22ea74f 100644
+index a798abf594bf429f24483a19a2a2845124b29fdf..48d22ea74f82e71d403e568b2d7ae7b2d7f79604 100644
 --- a/packages/coding-agent/src/modes/runtime-init.ts
 +++ b/packages/coding-agent/src/modes/runtime-init.ts
 @@ -142,7 +142,10 @@ export async function initializeExtensions(session: AgentSession, options: Initi
@@ -1836,18 +1878,18 @@ index a798abf594..48d22ea74f 100644
  			hasPendingMessages: () => session.queuedMessageCount > 0,
  			shutdown,
 diff --git a/packages/coding-agent/src/sdk.ts b/packages/coding-agent/src/sdk.ts
-index 999216c82b..66a3fc0b08 100644
+index 9b901374062d8c0f084304d4e99c4b3c1b116557..8fb0ce041919fce72e62224ef58ef3c2cf49a3b9 100644
 --- a/packages/coding-agent/src/sdk.ts
 +++ b/packages/coding-agent/src/sdk.ts
-@@ -111,6 +111,7 @@ import { createAnnotationsAPI } from "./extensibility/custom-commands/bundled/an
- import { discoverCustomToolPaths, loadCustomTools, type ToolPathWithSource } from "./extensibility/custom-tools";
- import type { CustomTool, CustomToolContext, CustomToolSessionEvent } from "./extensibility/custom-tools/types";
+@@ -119,6 +119,7 @@ import type {
+ 	LoadedCustomTool,
+ } from "./extensibility/custom-tools/types";
  import {
 +	type BeforeSubagentAdmissionEvent,
  	bindPreparedExtensions,
  	discoverAndLoadExtensions,
  	discoverExtensionPaths,
-@@ -2695,6 +2696,12 @@ async function createAgentSessionScoped(options: CreateAgentSessionOptions): Pro
+@@ -2762,6 +2763,12 @@ async function createAgentSessionScoped(options: CreateAgentSessionOptions): Pro
  			getClientBridge: () => session?.clientBridge,
  			emitBeforeSubagentSpawn: (event, signal) =>
  				session?.extensionRunner?.emitBeforeSubagentSpawn(event, signal) ?? Promise.resolve(undefined),
@@ -1860,7 +1902,7 @@ index 999216c82b..66a3fc0b08 100644
  			queueDeferredDiagnostics: entry => session?.yieldQueue.enqueue(LSP_LATE_DIAGNOSTIC_MESSAGE_TYPE, entry),
  			queueLaunchCompletion: notification =>
  				session?.queueLaunchCompletion(notification) ??
-@@ -4818,7 +4825,8 @@ async function createAgentSessionScoped(options: CreateAgentSessionOptions): Pro
+@@ -4982,7 +4989,8 @@ async function createAgentSessionScoped(options: CreateAgentSessionOptions): Pro
  			options.cacheWarming === false
  				? undefined
  				: new CacheWarmer({
@@ -1870,7 +1912,7 @@ index 999216c82b..66a3fc0b08 100644
  						getPromptTokens: () => session.lastPromptTokens(),
  						getMode: () => cfgProvidersCacheWarming.get(settings),
  						decide: event => extensionRunner.emitCacheWarmingDecision(event),
-@@ -5789,7 +5797,8 @@ async function createAgentSessionScoped(options: CreateAgentSessionOptions): Pro
+@@ -6206,7 +6214,8 @@ async function createAgentSessionScoped(options: CreateAgentSessionOptions): Pro
  					hideThinkingSummary: agent.hideThinkingSummary,
  					maxRetryDelayMs: agent.maxRetryDelayMs,
  					getToolContext: toolCall => toolContextStore.getContext(toolCall),
@@ -1882,7 +1924,7 @@ index 999216c82b..66a3fc0b08 100644
  					// copies), and the primary's resolver could reach main-session MCP tools.
 diff --git a/packages/coding-agent/src/session/admission-recovery.ts b/packages/coding-agent/src/session/admission-recovery.ts
 new file mode 100644
-index 0000000000..90f63f8117
+index 0000000000000000000000000000000000000000..90f63f811714b20faea3a5be9978922c1f32b48a
 --- /dev/null
 +++ b/packages/coding-agent/src/session/admission-recovery.ts
 @@ -0,0 +1,41 @@
@@ -1928,7 +1970,7 @@ index 0000000000..90f63f8117
 +	);
 +}
 diff --git a/packages/coding-agent/src/session/agent-session.ts b/packages/coding-agent/src/session/agent-session.ts
-index 16853e2324..d2d112555c 100644
+index 11f3d6a659a25f17befd8b174c91d87eb7aead28..d2c647d37187d0496f78af97c4e08792ec9d36a4 100644
 --- a/packages/coding-agent/src/session/agent-session.ts
 +++ b/packages/coding-agent/src/session/agent-session.ts
 @@ -38,6 +38,7 @@ import {
@@ -1939,7 +1981,7 @@ index 16853e2324..d2d112555c 100644
  	type QueuedMessagePreparation,
  	type QueuedMessageQueue,
  	resolveTelemetry,
-@@ -511,6 +512,7 @@ import type { ShakeMode, ShakeResult } from "./shake-types";
+@@ -514,6 +515,7 @@ import type { ShakeMode, ShakeResult } from "./shake-types";
  import { ToolChoiceQueue } from "./tool-choice-queue";
  import { planTurnPersistence, sameMessageContent, sessionMessagePersistenceKey } from "./turn-persistence";
  import { TurnRecovery, type TurnRecoveryHost } from "./turn-recovery";
@@ -1947,7 +1989,7 @@ index 16853e2324..d2d112555c 100644
  import { YieldQueue } from "./yield-queue";
  
  export * from "./agent-session-events";
-@@ -2468,10 +2470,17 @@ export class AgentSession implements SettingsScope, AgentViewSession {
+@@ -2485,18 +2487,25 @@ export class AgentSession implements SettingsScope, AgentViewSession {
  		// toggle scopes priority to Fireworks alone, without mutating the shared
  		// session `serviceTier` that drives `/fast` and OpenAI/Anthropic priority.
  		this.agent.serviceTierResolver = model => this.#models.effectiveServiceTier(model);
@@ -1959,14 +2001,23 @@ index 16853e2324..d2d112555c 100644
  		this.#titleSystemPrompt = config.titleSystemPrompt;
  		this.#autoTitle = config.autoTitle === true;
  		this.#transformContext = config.transformContext ?? (messages => messages);
--		this.#sideStreamFn = config.sideStreamFn ?? streamSimple;
-+		const sideStreamFn = config.sideStreamFn ?? streamSimple;
-+		this.#sideStreamFn = (model, context, options) =>
-+			sideStreamFn(model, context, { ...options, requestKind: "ephemeral" });
+ 		const sideStreamFn = config.sideStreamFn ?? streamSimple;
+ 		// Side requests over this history (native compaction, handoff) send it as
+ 		// the live turns do: once this session leaves other models' reasoning out,
+-		// so do they.
++		// so do they. Side callers never inherit primary admission authority.
+ 		this.#sideStreamFn = (model, context, options) =>
+ 			sideStreamFn(
+ 				model,
+ 				context,
+-				this.#recovery.omitsDemotedReasoning(model) ? { ...options, omitDemotedReasoning: true } : options,
++				this.#recovery.omitsDemotedReasoning(model)
++					? { ...options, omitDemotedReasoning: true, requestKind: "ephemeral" }
++					: { ...options, requestKind: "ephemeral" },
+ 			);
  		this.#onPayload = config.onPayload;
  		this.rawSseDebugBuffer = config.rawSseDebugBuffer ?? new RawSseDebugBuffer();
- 		// Avoid wrapping in an `async` closure when no user callback is configured: the
-@@ -5079,6 +5088,18 @@ export class AgentSession implements SettingsScope, AgentViewSession {
+@@ -5181,6 +5190,18 @@ export class AgentSession implements SettingsScope, AgentViewSession {
  			// outside the session transcript (issue #6177).
  			logProviderTurnError(msg);
  
@@ -1978,14 +2029,14 @@ index 16853e2324..d2d112555c 100644
 +				await this.#recovery.onErrorSettledWithoutRetry(msg, COMPACTION_CHECK_NONE);
 +				this.#recovery.resolveRetry();
 +				this.#resetSessionStopContinuationState();
-+				await emitAgentEndNotification();
++				endLoop();
 +				return;
 +			}
 +
  			// Invalidate GitHub Copilot credentials on a hard auth failure (401, or an
  			// expired/revoked token) so stale tokens aren't reused on the next request.
  			// Account usage caps and concurrency caps leave the credential valid: the
-@@ -9792,12 +9813,16 @@ export class AgentSession implements SettingsScope, AgentViewSession {
+@@ -10026,12 +10047,16 @@ export class AgentSession implements SettingsScope, AgentViewSession {
  			return this.#extensionRunner.createCommandContext();
  		}
  
@@ -2002,7 +2053,7 @@ index 16853e2324..d2d112555c 100644
  			modelRegistry: this.#modelRegistry,
  			isProjectTrusted: () => true,
  			// Used only when the session has no extension runner. `createAgentSession` always builds
-@@ -9807,6 +9832,8 @@ export class AgentSession implements SettingsScope, AgentViewSession {
+@@ -10041,6 +10066,8 @@ export class AgentSession implements SettingsScope, AgentViewSession {
  			model: this.model ?? undefined,
  			models: createExtensionModelQuery(this.#modelRegistry, this.settings, () => this.model ?? undefined),
  			isIdle: () => !this.isStreaming,
@@ -2011,7 +2062,7 @@ index 16853e2324..d2d112555c 100644
  			abort: () => {
  				void this.abort();
  			},
-@@ -12404,6 +12431,110 @@ export class AgentSession implements SettingsScope, AgentViewSession {
+@@ -12638,6 +12665,110 @@ export class AgentSession implements SettingsScope, AgentViewSession {
  		await this.sessionManager.flush();
  	}
  
@@ -2123,10 +2174,10 @@ index 16853e2324..d2d112555c 100644
  	 * Fork the current session, creating a new session file with the exact same state.
  	 * Copies all entries and artifacts to the new session.
 diff --git a/packages/coding-agent/src/session/session-advisors.ts b/packages/coding-agent/src/session/session-advisors.ts
-index 059ef1ebee..dee11034bf 100644
+index 80350feb085330b25f745aad397d8f29dbceb7dd..ccf8b9677a2e2821969c12e6573d4336bcfe0971 100644
 --- a/packages/coding-agent/src/session/session-advisors.ts
 +++ b/packages/coding-agent/src/session/session-advisors.ts
-@@ -1453,6 +1453,7 @@ export class SessionAdvisors {
+@@ -1481,6 +1481,7 @@ export class SessionAdvisors {
  				// Read per request so transport setting changes reach existing advisors.
  				const options = {
  					...streamOptions,
@@ -2135,10 +2186,10 @@ index 059ef1ebee..dee11034bf 100644
  				};
  				if (requestModel.api === "openai-codex-responses") {
 diff --git a/packages/coding-agent/src/session/session-manager.ts b/packages/coding-agent/src/session/session-manager.ts
-index 97c726b71c..0bccc74858 100644
+index 9a12344923080be1de4742ce858415453438de5d..5ad328906c2a49e531ce403584ec8f555259ffb0 100644
 --- a/packages/coding-agent/src/session/session-manager.ts
 +++ b/packages/coding-agent/src/session/session-manager.ts
-@@ -2785,7 +2785,13 @@ export class SessionManager {
+@@ -2790,7 +2790,13 @@ export class SessionManager {
  	 * Force the session onto disk even with no assistant message yet (ACP
  	 * session/new must create a discoverable file immediately).
  	 */
@@ -2153,7 +2204,7 @@ index 97c726b71c..0bccc74858 100644
  		if (!this.#persist || !this.#sessionFile) return;
  		this.#forceFileCreation = true;
  		if (this.#fileIsCurrent && !this.#rewriteRequired) return;
-@@ -2918,6 +2924,20 @@ export class SessionManager {
+@@ -2923,6 +2929,20 @@ export class SessionManager {
  		if (this.#diskFailure) throw this.#diskFailure;
  	}
  
@@ -2175,10 +2226,10 @@ index 97c726b71c..0bccc74858 100644
  	 * Synchronously makes the current append-only session durable. Avoid rewriting
  	 * an already-current file: large restored sessions can contain GiB of compacted
 diff --git a/packages/coding-agent/src/session/session-storage.ts b/packages/coding-agent/src/session/session-storage.ts
-index 27f1d04449..117182c07b 100644
+index 7932469059408b2266cc557b06a7e6753bad8ee9..311f9100bba4d104b27ecca12093adc56fcff500 100644
 --- a/packages/coding-agent/src/session/session-storage.ts
 +++ b/packages/coding-agent/src/session/session-storage.ts
-@@ -89,6 +89,8 @@ export interface SessionStorageWriter {
+@@ -86,6 +86,8 @@ export interface SessionStorageWriter {
  	appendSync?(line: string): void;
  	/** Resolve once all queued appends complete. No fsync. */
  	flush(): Promise<void>;
@@ -2187,7 +2238,7 @@ index 27f1d04449..117182c07b 100644
  	/** Drain synchronously flushable queued work when the backend supports it. No fsync. */
  	flushSync?(): void;
  	/** False once close() has begun/finished. */
-@@ -460,6 +462,31 @@ class FileSessionStorageWriter implements SessionStorageWriter {
+@@ -486,6 +488,31 @@ class FileSessionStorageWriter implements SessionStorageWriter {
  		if (this.#error) throw this.#error;
  	}
  
@@ -2220,10 +2271,10 @@ index 27f1d04449..117182c07b 100644
  		if (this.#error) throw this.#error;
  	}
 diff --git a/packages/coding-agent/src/session/turn-recovery.ts b/packages/coding-agent/src/session/turn-recovery.ts
-index 1748e9513d..2e0ae59217 100644
+index 197a4befdd794d32bcc795e739dcb930c2ac81b8..0828e289cde0bfa2c79673797ee09f636dcfb2c5 100644
 --- a/packages/coding-agent/src/session/turn-recovery.ts
 +++ b/packages/coding-agent/src/session/turn-recovery.ts
-@@ -45,6 +45,7 @@ import {
+@@ -47,6 +47,7 @@ import {
  	resolveThinkingLevelForModel,
  } from "@oh-my-pi/pi-tui/thinking";
  import type { EditModeSetting } from "../edit/settings";
@@ -2231,7 +2282,7 @@ index 1748e9513d..2e0ae59217 100644
  import type { AgentSessionEvent } from "./agent-session-events";
  import type { ResetRecoveryResult } from "./codex-auto-reset";
  import type {
-@@ -650,13 +651,20 @@ export class TurnRecovery {
+@@ -675,13 +676,20 @@ export class TurnRecovery {
  		return this.#persistTerminalEmptyErrorTurn(message);
  	}
  
@@ -2252,7 +2303,7 @@ index 1748e9513d..2e0ae59217 100644
  		return this.#handleUnexpectedAssistantStop(message);
  	}
  
-@@ -672,6 +680,7 @@ export class TurnRecovery {
+@@ -697,6 +705,7 @@ export class TurnRecovery {
  	 * prompt; past the cap the error surfaces as before.
  	 */
  	handleMalformedFunctionCallStop(message: AssistantMessage): boolean {
@@ -2260,7 +2311,7 @@ index 1748e9513d..2e0ae59217 100644
  		if (message.stopReason !== "error") return false;
  		const id = this.#classifyRetryMessage(message);
  		if (!AIError.is(id, AIError.Flag.MalformedFunctionCall)) {
-@@ -733,6 +742,7 @@ export class TurnRecovery {
+@@ -758,6 +767,7 @@ export class TurnRecovery {
  	 * own `response.steer`, and the rejected steer drains as ordinary input next.
  	 */
  	handleCommittedTextStreamStall(message: AssistantMessage): boolean {
@@ -2268,7 +2319,7 @@ index 1748e9513d..2e0ae59217 100644
  		const id = this.#classifyRetryMessage(message);
  		const socketClosed =
  			message.stopReason === "error" &&
-@@ -801,6 +811,7 @@ export class TurnRecovery {
+@@ -826,6 +836,7 @@ export class TurnRecovery {
  		message: AssistantMessage,
  		options: { autoContinue: boolean; triggerContextTokens?: number; excludeMediaMethods?: boolean },
  	): Promise<RecoveryCompactionResult> {
@@ -2276,7 +2327,7 @@ index 1748e9513d..2e0ae59217 100644
  		return this.#runRecoveryCompactionWithRollback(reason, message, options);
  	}
  
-@@ -830,6 +841,7 @@ export class TurnRecovery {
+@@ -855,6 +866,7 @@ export class TurnRecovery {
  	 * the active account.
  	 */
  	async recordUsageLimitOutcome(message: AssistantMessage): Promise<boolean> {
@@ -2284,7 +2335,7 @@ index 1748e9513d..2e0ae59217 100644
  		if (message.stopReason !== "error") return false;
  		const id = this.#classifyRetryMessage(message);
  		const activeModel = this.#host.model();
-@@ -1498,6 +1510,7 @@ export class TurnRecovery {
+@@ -1542,6 +1554,7 @@ export class TurnRecovery {
  	 * their own marker, not the generic sentinel, so they never match here.
  	 */
  	isRetryableReasonlessAbort(message: AssistantMessage): boolean {
@@ -2292,7 +2343,7 @@ index 1748e9513d..2e0ae59217 100644
  		if (
  			(message.stopReason !== "aborted" && message.stopReason !== "error") ||
  			// A `fallback` boundary is bookkeeping, not output: a stream aborted
-@@ -1527,6 +1540,7 @@ export class TurnRecovery {
+@@ -1571,6 +1584,7 @@ export class TurnRecovery {
  	 * cannot fall through to the generic 408 replay path.
  	 */
  	async handleResponsesRequestBodyReadTimeout(message: AssistantMessage): Promise<RequestBodyReadTimeoutRecovery> {
@@ -2300,7 +2351,7 @@ index 1748e9513d..2e0ae59217 100644
  		if (message.stopReason !== "error" || !AIError.isResponsesRequestBodyReadTimeout(message)) {
  			return "not-applicable";
  		}
-@@ -1569,6 +1583,7 @@ export class TurnRecovery {
+@@ -1613,6 +1627,7 @@ export class TurnRecovery {
  	 * Context overflow is NOT retryable (handled by compaction instead).
  	 */
  	isRetryableError(message: AssistantMessage): boolean {
@@ -2308,7 +2359,7 @@ index 1748e9513d..2e0ae59217 100644
  		if (message.stopReason !== "error") return false;
  		if (this.#isUsagePreflightBlocked(message)) return false;
  		if (AIError.isResponsesRequestBodyReadTimeout(message)) return false;
-@@ -1666,6 +1681,7 @@ export class TurnRecovery {
+@@ -1710,6 +1725,7 @@ export class TurnRecovery {
  	 * unexecuted call must be reissued.
  	 */
  	classifyResolvedInterruptedToolTurn(message: AssistantMessage): "reasonless-abort" | "stream-stall" | undefined {
@@ -2316,7 +2367,7 @@ index 1748e9513d..2e0ae59217 100644
  		const id = this.#classifyRetryMessage(message);
  		const genericAbort =
  			message.errorMessage !== undefined && Object.hasOwn(GENERIC_ABORT_MESSAGES, message.errorMessage);
-@@ -2476,6 +2492,7 @@ export class TurnRecovery {
+@@ -2526,6 +2542,7 @@ export class TurnRecovery {
  	 * Requires the base model to exist in the registry.
  	 */
  	isFireworksFastFallbackEligible(message: AssistantMessage): boolean {
@@ -2324,15 +2375,15 @@ index 1748e9513d..2e0ae59217 100644
  		const model = this.#activeFireworksFastModel();
  		if (!model) return false;
  		if (message.stopReason !== "error") return false;
-@@ -2507,6 +2524,7 @@ export class TurnRecovery {
- 	 * `pinFallback`), and turns that already emitted replay-unsafe output.
+@@ -2558,6 +2575,7 @@ export class TurnRecovery {
+ 	 * replay-unsafe output.
  	 */
  	isHardErrorFallbackEligible(message: AssistantMessage): boolean {
 +		if (this.blocksAutomaticRecovery(message)) return false;
  		if (message.stopReason !== "error") return false;
  		if (this.#isUsagePreflightBlocked(message)) return false;
  		const model = this.#host.model();
-@@ -2649,6 +2667,7 @@ export class TurnRecovery {
+@@ -2725,6 +2743,7 @@ export class TurnRecovery {
  	 * @returns true if retry was initiated, false if max retries exceeded or disabled
  	 */
  	async #handleRetryableError(message: AssistantMessage, options?: RetryPolicyOptions): Promise<boolean> {
@@ -2341,7 +2392,7 @@ index 1748e9513d..2e0ae59217 100644
  			return await this.#applyRetryPolicy(message, options);
  		} catch (error) {
 diff --git a/packages/coding-agent/src/task/executor.ts b/packages/coding-agent/src/task/executor.ts
-index 3f7dcfe90b..88ebf8df5b 100644
+index 6b32f28b14c766fe5300ec51d2de9c968e142491..b877415715fb0f3a9ec4e0999bccb33c8d310714 100644
 --- a/packages/coding-agent/src/task/executor.ts
 +++ b/packages/coding-agent/src/task/executor.ts
 @@ -40,6 +40,7 @@ import {
@@ -2352,7 +2403,7 @@ index 3f7dcfe90b..88ebf8df5b 100644
  	formatModelStringWithRouting,
  	resolveAgentAdvisorRolePattern,
  	resolveAgentAdvisorSelection,
-@@ -477,6 +478,8 @@ export interface ExecutorOptions {
+@@ -490,6 +491,8 @@ export interface ExecutorOptions {
  	modelRole?: string;
  	/** Extension routing note for the chosen model; surfaced as `resolvedModelRoute`. */
  	modelRoute?: string;
@@ -2361,7 +2412,7 @@ index 3f7dcfe90b..88ebf8df5b 100644
  	/**
  	 * Active model selector of the parent session, used as an auth-aware fallback
  	 * if the resolved subagent model has no working credentials. See #985.
-@@ -4746,7 +4749,7 @@ async function runSubprocessOnThisThread(options: ExecutorOptions): Promise<Sing
+@@ -4902,7 +4905,7 @@ async function runSubprocessOnThisThread(options: ExecutorOptions): Promise<Sing
  				explicitThinkingLevel,
  				authFallbackUsed,
  				warning: modelResolutionWarning,
@@ -2371,7 +2422,7 @@ index 3f7dcfe90b..88ebf8df5b 100644
  					modelPatterns,
  					options.parentActiveModelPattern,
 diff --git a/packages/coding-agent/src/task/structured-subagent.ts b/packages/coding-agent/src/task/structured-subagent.ts
-index 498db63ea6..43f1c1b10e 100644
+index ee49a81fe92a7e815636af9de7c6ff405b5dfb14..6a32774aadc6f194159260fcb41eba0ddcbf9101 100644
 --- a/packages/coding-agent/src/task/structured-subagent.ts
 +++ b/packages/coding-agent/src/task/structured-subagent.ts
 @@ -7,15 +7,17 @@
@@ -2393,7 +2444,15 @@ index 498db63ea6..43f1c1b10e 100644
  } from "../config/model-resolver";
  import { type OAuthAccountPools, validateAgentAccountPools } from "../config/account-pools";
  import {
-@@ -1032,6 +1034,38 @@ function describeSalvagedWork(result: SingleResult): string {
+@@ -23,6 +25,7 @@ import {
+ 	validateAgentCompactionThresholdOverrides,
+ } from "../config/compaction-threshold";
+ import { type ServiceTierInheritSettingValue, validateAgentServiceTierOverrides } from "../config/service-tier";
++import { cfgOffline } from "../config/auxiliary-model-policy";
+ import type { Settings } from "../config/settings";
+ import { isProviderEnabled, isUserSourceEnabled } from "../capability";
+ import type { EffectiveExtensionRoots } from "../capability/types";
+@@ -992,6 +995,46 @@ function describeSalvagedWork(result: SingleResult): string {
   */
  export async function runStructuredSubagent(request: StructuredSubagentRequest): Promise<StructuredSubagentResult> {
  	const policy = await applySpawnHook(request, await resolveEffectiveSubagentPolicy(request));
@@ -2410,13 +2469,21 @@ index 498db63ea6..43f1c1b10e 100644
 +		if (!registry) throw new StructuredSubagentError("preflight", "Subagent admission requires a model registry.");
 +		// A per-call model must resolve against a settled registry and exactly, as in the executor.
 +		if (policy.perCallModelGrants) await untilAborted(signal, () => registry.awaitBackgroundRefresh());
++		// Offline mode keeps the child on the parent's provider, as the executor does.
++		const allowedProvider = cfgOffline.get(request.session.settings)
++			? (request.session.getActiveModel?.()?.provider ??
++				(policy.parentActiveModelPattern
++					? resolveModelOverride([policy.parentActiveModelPattern], registry, request.session.settings).model?.provider
++					: undefined) ??
++				null)
++			: undefined;
 +		admittedModelResolution = await untilAborted(signal, () => resolveModelOverrideWithAuthFallback(
 +			policy.modelOverride ?? [],
 +			policy.parentActiveModelPattern,
 +			registry,
 +			request.session.settings,
 +			id,
-+			policy.perCallModelGrants ? { exactOnly: true } : undefined,
++			{ exactOnly: !!policy.perCallModelGrants, allowedProvider },
 +		));
 +		const model = admittedModelResolution.model;
 +		if (!model) throw new StructuredSubagentError("preflight", "Subagent admission requires a resolved model.");
@@ -2432,7 +2499,7 @@ index 498db63ea6..43f1c1b10e 100644
  	const lease = await leaseArtifacts(request.session, request.invocationKind);
  	let changesApplied: boolean | null = null;
  	let mergeSummary = "";
-@@ -1049,12 +1083,9 @@ export async function runStructuredSubagent(request: StructuredSubagentRequest):
+@@ -1009,12 +1052,9 @@ export async function runStructuredSubagent(request: StructuredSubagentRequest):
  			? (result: SingleResult) => request.session.recordEvalSubagentUsage?.(result.usage?.output ?? 0)
  			: undefined;
  	try {
@@ -2440,14 +2507,14 @@ index 498db63ea6..43f1c1b10e 100644
 -			...request.identity,
 -			label: request.identity?.label ?? (request.invocationKind === "eval" ? "EvalAgent" : undefined),
 -		});
- 		if (policy.preparedSession === undefined) await refreshSkillsForAutoload(request.session, policy.agent);
+ 		await refreshSkillsForAutoload(request.session, policy.agent);
  		const baseOptions = buildExecutorOptions(request, policy, lease, id);
 +		baseOptions.admittedModelResolution = admittedModelResolution;
  		baseOptions.onCleanupDeferred = completion => {
  			deferredCleanup = completion;
  		};
 diff --git a/packages/coding-agent/src/tools/index.ts b/packages/coding-agent/src/tools/index.ts
-index 1ec93606a0..860b39301a 100644
+index 5bb3126e2e0deb73a43a627b739ef995c2f86e82..0b2c693770f52472780c388ecfb629a424512f23 100644
 --- a/packages/coding-agent/src/tools/index.ts
 +++ b/packages/coding-agent/src/tools/index.ts
 @@ -12,6 +12,7 @@ import { EditTool } from "../edit";
@@ -2458,7 +2525,7 @@ index 1ec93606a0..860b39301a 100644
  	BeforeSubagentSpawnEvent,
  	BeforeSubagentSpawnEventResult,
  	PreparedExtension,
-@@ -454,6 +455,8 @@ export interface ToolSession {
+@@ -466,6 +467,8 @@ export interface ToolSession {
  		event: BeforeSubagentSpawnEvent,
  		signal?: AbortSignal,
  	): Promise<BeforeSubagentSpawnEventResult | undefined>;
@@ -2469,7 +2536,7 @@ index 1ec93606a0..860b39301a 100644
  	/** Model registry for passing to subagents (avoids re-discovery) */
 diff --git a/packages/coding-agent/test/cli/ojak-update.test.ts b/packages/coding-agent/test/cli/ojak-update.test.ts
 new file mode 100644
-index 0000000000..f2b24ded62
+index 0000000000000000000000000000000000000000..f2b24ded62339cfda4cabd970c538c96839fbaf7
 --- /dev/null
 +++ b/packages/coding-agent/test/cli/ojak-update.test.ts
 @@ -0,0 +1,678 @@
@@ -3152,16 +3219,16 @@ index 0000000000..f2b24ded62
 +	}
 +});
 diff --git a/packages/coding-agent/test/cli/update-cli.test.ts b/packages/coding-agent/test/cli/update-cli.test.ts
-index 9e9ccc2fd3..7da927f493 100644
+index 8985a0be5a0a91e62e422ce53fe37f889b47d0b1..7da927f493eb103a7b98ba57422353be31886b08 100644
 --- a/packages/coding-agent/test/cli/update-cli.test.ts
 +++ b/packages/coding-agent/test/cli/update-cli.test.ts
-@@ -1,128 +1,12 @@
+@@ -1,130 +1,12 @@
 -import { afterEach, beforeEach, describe, expect, it, vi } from "bun:test";
 -import * as fs from "node:fs/promises";
 -import * as os from "node:os";
 -import * as path from "node:path";
 -import { removeWithRetries, setAgentDir, setProjectDir, VERSION } from "@oh-my-pi/pi-utils";
--import { currentBuildHost } from "../../src/cli/build-service";
+-import { currentBuildHost, OMP_BUILD } from "../../src/cli/build-service";
 +import { afterEach, describe, expect, it, vi } from "bun:test";
  import { fixedNpmRegistry } from "../../src/cli/npm-registry";
 -import { getLatestRelease, runUpdateCommand } from "../../src/cli/update-cli";
@@ -3259,7 +3326,9 @@ index 9e9ccc2fd3..7da927f493 100644
 -			await Bun.write(ompPath, "#!/bin/sh\necho omp/1.0.0\n");
 -			await fs.chmod(ompPath, 0o755);
 -			const next = "#!/bin/sh\necho omp/999.0.0\n";
--			const { target, fileName } = await currentBuildHost();
+-			const host = await currentBuildHost();
+-			const { target } = host;
+-			const fileName = OMP_BUILD.fileName(host, "999.0.0");
 -			process.env.PI_BUILD_URL = "https://build.test";
 -			const check = `https://build.test/api/products/omp/latest/${target}?channel=stable&from_version=${VERSION}`;
 -			const { logs } = quiet();
@@ -3288,7 +3357,7 @@ index 9e9ccc2fd3..7da927f493 100644
  	afterEach(() => {
 diff --git a/packages/coding-agent/test/extension-session-admission.test.ts b/packages/coding-agent/test/extension-session-admission.test.ts
 new file mode 100644
-index 0000000000..d04d515853
+index 0000000000000000000000000000000000000000..d04d51585346b3e7ae994ab43621aef5d66db4c5
 --- /dev/null
 +++ b/packages/coding-agent/test/extension-session-admission.test.ts
 @@ -0,0 +1,540 @@
@@ -3833,10 +3902,10 @@ index 0000000000..d04d515853
 +	});
 +});
 diff --git a/packages/coding-agent/test/extensions-runner.test.ts b/packages/coding-agent/test/extensions-runner.test.ts
-index 07a8525175..748acf5912 100644
+index bda82521a7bfb57229fb28a400de07b9ce5f48d2..df07426838dd6b7a304164c7d8561bdd52eb54b6 100644
 --- a/packages/coding-agent/test/extensions-runner.test.ts
 +++ b/packages/coding-agent/test/extensions-runner.test.ts
-@@ -15,7 +15,7 @@ import { getBundledModel } from "@oh-my-pi/pi-catalog/models";
+@@ -19,7 +19,7 @@ import { getBundledModel } from "@oh-my-pi/pi-catalog/models";
  import { convertToLlm, wrapSteeringForModel } from "@oh-my-pi/pi-coding-agent/session/messages";
  import { ModelRegistry } from "@oh-my-pi/pi-coding-agent/config/model-registry";
  import { Settings } from "@oh-my-pi/pi-coding-agent/config/settings";
@@ -3845,15 +3914,15 @@ index 07a8525175..748acf5912 100644
  import {
  	EXTENSION_HANDLER_TIMEOUT_MS,
  	ExtensionRunner,
-@@ -26,6 +26,7 @@ import {
+@@ -30,6 +30,7 @@ import {
  import type {
  	Extension,
  	ExtensionError,
 +	ExtensionFactory,
  	ExtensionUIContext,
+ 	ExtensionUIDialogOptions,
  	InputEvent,
- 	InputEventResult,
-@@ -33,6 +34,7 @@ import type {
+@@ -38,6 +39,7 @@ import type {
  import { ExtensionToolWrapper } from "@oh-my-pi/pi-coding-agent/extensibility/extensions/wrapper";
  import { AuthStorage } from "@oh-my-pi/pi-coding-agent/session/auth-storage";
  import { SessionManager } from "@oh-my-pi/pi-coding-agent/session/session-manager";
@@ -3861,7 +3930,7 @@ index 07a8525175..748acf5912 100644
  import { getProjectAgentDir, logger, TempDir } from "@oh-my-pi/pi-utils";
  import { createAssistantMessage } from "./helpers/agent-session-setup";
  
-@@ -96,6 +98,84 @@ describe("ExtensionRunner", () => {
+@@ -101,6 +103,84 @@ describe("ExtensionRunner", () => {
  		};
  	};
  
@@ -3947,10 +4016,10 @@ index 07a8525175..748acf5912 100644
  		const dirA = tempDir.join("dirA");
  		const dirB = tempDir.join("dirB");
 diff --git a/packages/coding-agent/test/task/structured-subagent.test.ts b/packages/coding-agent/test/task/structured-subagent.test.ts
-index 22668671c1..a38ca68b2f 100644
+index 149fb71b5c62e75e2a527d5fad63263638f5b07c..24baeff8b1a678eda6e6028d88330d175f82e778 100644
 --- a/packages/coding-agent/test/task/structured-subagent.test.ts
 +++ b/packages/coding-agent/test/task/structured-subagent.test.ts
-@@ -40,6 +40,8 @@ import * as discoveryModule from "@oh-my-pi/pi-coding-agent/task/discovery";
+@@ -42,6 +42,8 @@ import * as discoveryModule from "@oh-my-pi/pi-coding-agent/task/discovery";
  import { createEvalCustomTools } from "@oh-my-pi/pi-coding-agent/task/eval-tools";
  import * as executorModule from "@oh-my-pi/pi-coding-agent/task/executor";
  import * as isolationRunner from "@oh-my-pi/pi-coding-agent/task/isolation-runner";
@@ -3959,7 +4028,7 @@ index 22668671c1..a38ca68b2f 100644
  import {
  	buildStructuredSubagentRecoveryHint,
  	resolveEffectiveSubagentPolicy,
-@@ -728,6 +730,92 @@ describe("structured subagent primitive", () => {
+@@ -633,6 +635,92 @@ describe("structured subagent primitive", () => {
  		await fs.rm(settled.artifactsDir, { recursive: true, force: true });
  	});
  
@@ -4052,7 +4121,7 @@ index 22668671c1..a38ca68b2f 100644
  	it("rejects dispatch before leasing artifacts when an extension blocks the spawn", async () => {
  		mockDiscovery();
  		const blockedSession = session();
-@@ -1231,26 +1319,6 @@ describe("structured subagent primitive", () => {
+@@ -1051,26 +1139,6 @@ describe("structured subagent primitive", () => {
  		]);
  	});
  
@@ -4080,10 +4149,10 @@ index 22668671c1..a38ca68b2f 100644
  		mockDiscovery();
  		vi.spyOn(planHandoff, "loadOverallPlanReference").mockRejectedValue(new Error("plan unavailable"));
 diff --git a/packages/coding-agent/test/turn-recovery-replay-unsafe.test.ts b/packages/coding-agent/test/turn-recovery-replay-unsafe.test.ts
-index c757f63673..2b9037c3ce 100644
+index 9b9412b08499842a6366b67f120e710793040fac..44b531156701983c315556919bc4d4634d5db06e 100644
 --- a/packages/coding-agent/test/turn-recovery-replay-unsafe.test.ts
 +++ b/packages/coding-agent/test/turn-recovery-replay-unsafe.test.ts
-@@ -140,6 +140,49 @@ describe("TurnRecovery replay-unsafe output classification", () => {
+@@ -141,6 +141,49 @@ describe("TurnRecovery replay-unsafe output classification", () => {
  		tempDir.removeSync();
  	});
  
@@ -4134,10 +4203,10 @@ index c757f63673..2b9037c3ce 100644
  		const fallback = getBundledModel("openai", "gpt-4o-mini");
  		if (!fallback) throw new Error("Expected bundled fallback model");
 diff --git a/packages/coding-agent/test/update-cli.test.ts b/packages/coding-agent/test/update-cli.test.ts
-index acee3dad8e..7cdaba5f9f 100644
+index 027d9c335008c0e50360556e07b70bf8aae93692..4f4f1d1e9d68b25eb8f93b40a8f8a703f3700baa 100644
 --- a/packages/coding-agent/test/update-cli.test.ts
 +++ b/packages/coding-agent/test/update-cli.test.ts
-@@ -869,30 +869,6 @@ describe("migrateRenamedInstall transaction", () => {
+@@ -867,30 +867,6 @@ describe("migrateRenamedInstall transaction", () => {
  		expect(logs.some(line => line.includes("could not remove the old"))).toBe(true);
  	});
  
@@ -4169,14 +4238,14 @@ index acee3dad8e..7cdaba5f9f 100644
  
  describe("update-cli bun install command", () => {
 diff --git a/packages/utils/package.json b/packages/utils/package.json
-index c2f7f54569..53680a177d 100644
+index 75d3bd9b11db5f29271cc13bd2d4705f40e0712f..1b4b4b3e4e20a2d6ca22b76cdb749697133acbac 100644
 --- a/packages/utils/package.json
 +++ b/packages/utils/package.json
 @@ -1,6 +1,6 @@
  {
  	"name": "@oh-my-pi/pi-utils",
--	"version": "18.18.9",
-+	"version": "18.18.9-ojak.1",
+-	"version": "18.22.2",
++	"version": "18.22.2-ojak.1",
  	"description": "Shared utilities for pi packages",
  	"keywords": [
  		"cli",
