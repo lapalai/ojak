@@ -251,6 +251,30 @@ test('checkCandidate accepts exactly a pin-only newer candidate and nothing else
   assert.ok(existsSync(f.patchPath));
 });
 
+test('checkCandidate accepts a pin-only candidate on a CRLF (Windows) checkout and still catches real edits there', () => {
+  const f = fixture();
+  // Same rule as the real repository: patches are byte-exact, everything else is ordinary text.
+  write(f.root, '.gitattributes', 'integrations/client-forks/*.patch -text\n');
+  write(f.root, 'scripts/tool.mjs', 'export const a = 1;\nexport const b = 2;\n');
+  git(f.root, 'add', '-A'); git(f.root, 'commit', '-q', '-m', 'text files');
+  updateOmpFork({ root: f.root, tag: 'v1.1.0' });
+  git(f.root, 'add', '-A'); git(f.root, 'commit', '-q', '-m', 'candidate');
+
+  // What `core.autocrlf=true` leaves in a Windows working tree: text files in CRLF, `-text` patches untouched.
+  const crlf = relative => writeFileSync(join(f.root, relative), readFileSync(join(f.root, relative), 'utf8').replace(/\r?\n/g, '\r\n'));
+  for (const file of ['.gitattributes', 'scripts/tool.mjs', 'scripts/prepare-client-forks.mjs', 'integrations/client-forks/manifest.json']) crlf(file);
+  assert.deepEqual(checkCandidate(f.root, 'HEAD~1'), { tag: 'v1.1.0', revision: f.r110, version: '1.1.0-ojak.1' });
+
+  // A real content change outside the pin is still refused on that checkout.
+  writeFileSync(join(f.root, 'scripts/tool.mjs'), 'export const a = 1;\r\nexport const b = 3;\r\n');
+  assert.throws(() => checkCandidate(f.root, 'HEAD~1'), /outside the fork pin: .*scripts\/tool\.mjs$/);
+  writeFileSync(join(f.root, 'scripts/tool.mjs'), 'export const a = 1;\r\nexport const b = 2;\r\n');
+
+  // The patch stays byte-exact: line-ending conversion of the patch itself is a change, not noise.
+  writeFileSync(f.patchPath, readFileSync(f.patchPath, 'utf8').replace(/\n/g, '\r\n'));
+  assert.throws(() => checkCandidate(f.root, 'HEAD~1'), /sha256 does not match/);
+});
+
 test('stable tag ordering is numeric and rejects non-stable tags', () => {
   assert.equal(compareTags('v18.18.9', 'v18.15.0'), 1);
   assert.equal(compareTags('v18.9.0', 'v18.15.0'), -1);

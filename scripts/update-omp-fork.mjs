@@ -207,7 +207,10 @@ export function checkCandidate(root = defaultRoot, base = 'HEAD') {
   const pins = loadPins(root);
   const head = JSON.parse(git(['show', `${base}:integrations/client-forks/manifest.json`], root).out);
   const before = head.clients.find(client => client.directory === CLIENT);
-  const changed = [...git(['diff', '--name-only', base], root).out.split('\n'), ...git(['ls-files', '--others', '--exclude-standard'], root).out.split('\n')].filter(Boolean).sort();
+  // A Windows checkout converts text files to CRLF. Compared byte-for-byte (`core.autocrlf=false`) every such file
+  // looks changed and a pin-only candidate is refused. `input` normalises CRLF to LF only while comparing; files marked
+  // `-text` (the patches) are still compared byte-exact, and the patch sha256 below is checked on the raw bytes.
+  const changed = [...git(['-c', 'core.autocrlf=input', 'diff', '--name-only', base], root).out.split('\n'), ...git(['ls-files', '--others', '--exclude-standard'], root).out.split('\n')].filter(Boolean).sort();
   const allowed = ['integrations/client-forks/manifest.json', 'integrations/client-forks/oh-my-pi.patch'];
   if (changed.length === 0) throw new Refusal('There is no candidate: nothing differs from the base');
   if (changed.some(file => !allowed.includes(file))) throw new Refusal(`Candidate touches files outside the fork pin: ${changed.join(', ')}`);
