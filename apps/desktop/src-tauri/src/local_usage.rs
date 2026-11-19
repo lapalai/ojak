@@ -25,7 +25,9 @@ use std::{
     time::{Duration, Instant, UNIX_EPOCH},
 };
 
-const INDEX_VERSION: i32 = 2;
+/// 해석 규칙이나 가격표(`PRICES`)가 바뀌면 올린다. 저장된 `cost`는 색인할 때 계산하므로, 올리지 않으면 이전 기록이 옛 가격(또는 ‘가격 모름’)으로 남는다.
+/// 3: Claude Fable·Mythos 5.2, OpenAI gpt-6.2-astra·gpt-6.2-sol 가격 추가.
+const INDEX_VERSION: i32 = 3;
 /// 기록 파일을 여는 규칙의 판. 바꾸면 이전 규칙으로 '읽을 수 없음' 표시된 파일을 한 번 다시 읽는다.
 /// 2: Windows에서 하드 링크(링크 수 2 이상) 기록도 연다.
 const OPEN_RULES: i64 = 2;
@@ -347,11 +349,13 @@ static PRICES: &[Price] = &[
     p("claude-3-haiku-20240307", 0.25, 1.25, 0.03, 0.3),
     p("claude-fable-5", 10.0, 50.0, 1.0, 12.5),
     p("claude-fable-5-1", 10.0, 50.0, 0.25, 12.5),
+    p("claude-fable-5-2", 8.0, 40.0, 0.2, 10.0),
     p("claude-haiku-4-5", 1.0, 5.0, 0.1, 1.25),
     p("claude-haiku-4-5-20251001", 1.0, 5.0, 0.1, 1.25),
     pl("claude-haiku-5-5", 0.1, 0.5, 0.01, 0.125, 100_000, false, (0.5, 2.5, 0.05, 0.625)),
     p("claude-mythos-5", 10.0, 50.0, 1.0, 12.5),
     p("claude-mythos-5-1", 10.0, 50.0, 0.25, 12.5),
+    p("claude-mythos-5-2", 8.0, 40.0, 0.2, 10.0),
     p("claude-opus-4-0", 15.0, 75.0, 1.5, 18.75),
     p("claude-opus-4-1", 15.0, 75.0, 1.5, 18.75),
     p("claude-opus-4-1-20250805", 15.0, 75.0, 1.5, 18.75),
@@ -392,6 +396,8 @@ static PRICES: &[Price] = &[
     pl("gpt-5.6-terra", 2.0, 12.0, 0.2, 2.5, 272_000, false, (4.0, 18.0, 0.4, 5.0)),
     pl("gpt-5.6-luna", 0.2, 1.2, 0.02, 0.25, 272_000, false, (0.4, 1.8, 0.04, 0.5)),
     pl("gpt-6-astra", 10.0, 50.0, 1.0, 12.5, 272_000, false, (20.0, 75.0, 2.0, 25.0)),
+    pl("gpt-6.2-astra", 8.0, 40.0, 0.4, 10.0, 272_000, false, (16.0, 60.0, 0.8, 20.0)),
+    pl("gpt-6.2-sol", 2.0, 10.0, 0.1, 2.5, 272_000, false, (4.0, 15.0, 0.2, 5.0)),
     p("gpt-6-luna", 0.1, 0.5, 0.01, 0.125),
     p("gpt-6-sol", 2.0, 10.0, 0.2, 2.5),
     p("gpt-6.1-sol", 2.0, 10.0, 0.1, 2.5),
@@ -2252,6 +2258,30 @@ mod tests {
         let expected = (1000.0 * 5.0 + 500.0 * 25.0 + 2000.0 * 0.5 + 3000.0 * 6.25 + 1000.0 * 10.0) / 1e6;
         assert!((r.totals.cost_usd.unwrap() - expected).abs() < 1e-6, "{:?}", r.totals.cost_usd);
         assert_eq!(r.totals.unpriced_tokens, 0);
+    }
+
+    /// 가격표에 모델을 더하면 이미 색인된 이전 기록도 다시 계산돼야 한다. 판 2 색인(가격표에 Fable 5.2가 없어 ‘가격 모름’으로 저장)을 열면 새 가격으로 다시 센다.
+    #[test]
+    fn reopening_an_older_index_reprices_records_for_newly_priced_models() {
+        const PREVIOUS_INDEX_VERSION: i32 = 2;
+        let dir = Temp::new();
+        let root = dir.join("projects");
+        let line = claude_msg("msg_1", "2026-08-04T00:00:01Z", (1_000_000, 0, 0, 0), 0).replace("claude-opus-5", "claude-fable-5-2");
+        write_lines(&root.join("p/a.jsonl"), &[line]);
+        {
+            let mut index = open(&dir);
+            drain(&mut index, &set_of(TOOL_CLAUDE, &root));
+        }
+        // 가격표에 Fable 5.2가 없던 이전 판 색인을 흉내 낸다: 저장된 금액을 지우고 판 번호를 낮춘다.
+        let conn = rusqlite::Connection::open(dir.join("index.sqlite3")).unwrap();
+        conn.execute("UPDATE records SET cost = NULL", []).unwrap();
+        conn.pragma_update(None, "user_version", PREVIOUS_INDEX_VERSION).unwrap();
+        drop(conn);
+        let mut index = open(&dir);
+        drain(&mut index, &set_of(TOOL_CLAUDE, &root));
+        let r = report(&index, None, now());
+        assert_eq!(r.totals.unpriced_tokens, 0);
+        assert!((r.totals.cost_usd.unwrap() - 8.0).abs() < 1e-9, "{:?}", r.totals.cost_usd);
     }
 
     #[test]
