@@ -674,6 +674,10 @@ impl Service {
             "lease.validate-child" => value(self.validate_child(parse(params)?)?),
             "policy.update" => value(self.update_policy(parse(params)?)?),
             "bridge.status" => value(bridge::status_or_inactive(self.bridge.get())?),
+            "bridge.restartGateways" => match self.bridge.get() {
+                Some(bridge) => Ok(serde_json::json!({ "stopped": bridge.restart_gateways()? })),
+                None => Ok(serde_json::json!({ "stopped": 0 })),
+            },
             "diagnostics.export" => diagnostics::export(self, parse(params)?),
             "account.register" => value(self.register(parse(params)?)?),
             "account.remove" => self.remove_account(parse(params)?),

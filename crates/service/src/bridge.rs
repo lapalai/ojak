@@ -99,6 +99,8 @@ const ACTIVE_MS: i64 = 15 * 60_000;
 const HOT_PRIMARY_PERCENT: f64 = 85.0;
 const SYNC_MS: i64 = 60_000;
 const RESPAWN_BACKOFF_MS: i64 = 10_000;
+/// gateway 재시작 뒤 새 모델 요청을 닫아 두는 최대 시간. omp gateway는 Windows 첫 기동에 1분 넘게 걸릴 수 있다.
+const GATEWAY_RESTART_FENCE_MS: i64 = 120_000;
 const UNHEALTHY_MS: i64 = 15_000;
 const QUOTA_BLOCK_MS: i64 = 30 * 60_000;
 const RATE_BLOCK_MS: i64 = 60_000;
@@ -771,6 +773,8 @@ struct State {
     error: Option<String>,
     /// 마지막으로 읽은 계정 사용량·안전 여유량·공급자 수동 배정·지운 API 키의 이번 달 사용액(원장). 저장소를 읽지 못하면 빈 값 대신 이것을 쓴다.
     known: Option<(Vec<Account>, f64, BTreeMap<String, String>, PaidPolicy)>,
+    /// omp 교체 뒤 gateway를 다시 띄우는 동안 새 모델 요청을 닫아 둔 마감. 이 시각이 지나면 gateway 상태와 상관없이 연다.
+    fenced_until: i64,
 }
 
 #[derive(Debug, Serialize)]
@@ -1112,7 +1116,43 @@ impl Bridge {
             .ok();
     }
 
+    /// omp 실행 파일이 바뀐 뒤 gateway를 새 파일로 다시 띄운다. 진행 중이거나 대기 중인 모델 요청이 하나라도 있으면
+    /// 아무것도 멈추지 않고 거절한다(확인과 닫기는 `fence_models`의 한 잠금). 멈춘 gateway는 다음 `tick`이 띄우고,
+    /// 모두 다시 listen하거나 마감이 지나면 `release_fence`가 요청을 다시 받는다. 그동안 온 요청은 보내지 않고 `BRIDGE_BUSY`로 기다리게 한다.
+    pub(crate) fn restart_gateways(&self) -> Result<usize, ApiError> {
+        self.admission.fence_models().map_err(|_| ApiError::new(
+            "BRIDGE_BUSY",
+            "진행 중인 omp 모델 요청이 있어 연결을 다시 시작하지 않았어요. 요청이 끝난 뒤 다시 시도해 주세요.",
+        ))?;
+        let mut state = self.state();
+        let mut stopped = 0;
+        for gateway in &mut state.gateways {
+            if gateway.running() {
+                gateway.stop();
+                stopped += 1;
+            }
+            gateway.spawned_at = 0;
+        }
+        state.fenced_until = now_ms() + GATEWAY_RESTART_FENCE_MS;
+        Ok(stopped)
+    }
+
+    fn release_fence(&self, now: i64) {
+        if !self.admission.models_fenced() {
+            return;
+        }
+        let (ports, expired) = {
+            let mut state = self.state();
+            let expired = now >= state.fenced_until;
+            (state.gateways.iter_mut().map(|gateway| gateway.running().then_some(gateway.port)).collect::<Vec<_>>(), expired)
+        };
+        if expired || ports.iter().all(|port| port.is_some_and(|port| !port_free(port))) {
+            self.admission.unfence_models();
+        }
+    }
+
     fn tick(self: &Arc<Self>) {
+        self.release_fence(now_ms());
         // broker 감독은 브릿지가 꺼져 있어도 돈다. 첫 연결은 broker가 떠야 브릿지 설정까지 진행되기 때문이다.
         #[cfg(windows)]
         self.supervise_broker();
@@ -4341,6 +4381,32 @@ mod tests {
         gateway.native_port = 0;
         assert!(gateway_broker(&paths, &gateway).is_err());
         fs::remove_dir_all(home).unwrap();
+    }
+
+    /// omp 교체 뒤 gateway 재시작: 모델 요청이 진행 중이면 gateway를 건드리지 않고 거절한다. 없으면 멈추고,
+    /// 다시 뜰 때까지 새 모델 요청은 공급자에게 보내지 않고 재시도 가능한 `BRIDGE_BUSY`로 돌려준다.
+    #[test]
+    fn gateway_restart_refuses_while_a_model_request_runs_and_fences_until_gateways_return() {
+        let h = harness(Duration::from_secs(5));
+        let gateway = synthetic_gateway(&h);
+        let mut running = h.bridge.admission.admit(admission::Scope::Public).unwrap();
+        running.promote().unwrap();
+        assert_eq!(h.bridge.restart_gateways().unwrap_err().code, "BRIDGE_BUSY");
+        assert!(h.bridge.state().gateways[0].running(), "a busy bridge must keep its gateway");
+        assert!(!h.bridge.admission.models_fenced());
+        drop(running);
+
+        assert_eq!(h.bridge.restart_gateways().unwrap(), 1);
+        assert!(!h.bridge.state().gateways[0].running());
+        let refused = post(h.public, "/v1/pi/stream", &h.public_token, "{}");
+        assert!(refused.starts_with("HTTP/1.1 503 ") && refused.contains("BRIDGE_BUSY") && refused.contains("\"submitted\":false"), "{refused}");
+        assert_eq!(gateway.served.load(Ordering::SeqCst), 0);
+        // gateway가 아직 돌아오지 않았으면 닫아 둔다. 마감이 지나면 gateway 상태와 상관없이 연다.
+        h.bridge.release_fence(now_ms());
+        assert!(h.bridge.admission.models_fenced());
+        h.bridge.release_fence(now_ms() + GATEWAY_RESTART_FENCE_MS);
+        assert!(!h.bridge.admission.models_fenced());
+        wait_idle(&h.bridge);
     }
 
     #[test]

@@ -109,6 +109,11 @@ pub struct Report {
     pub service_version: Option<String>,
     pub minimum_ojak_service: String,
     pub path: String,
+    /// 교체 뒤 Ojak 서비스의 gateway를 새 omp로 다시 띄웠는지. 교체하지 않았으면 `None`.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub gateways: Option<&'static str>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub gateways_notice: Option<String>,
 }
 
 fn record(value: &Value) -> Option<&serde_json::Map<String, Value>> {
@@ -396,17 +401,15 @@ fn download(source: &Source, plan: &Plan, temp: &Path) -> Result<(), ApiError> {
     Ok(())
 }
 
-/// Windows는 실행 중인 omp가 파일을 쥐고 있으면 교체할 수 없다. 프로세스를 닫지 않고 거절한다.
-#[cfg(windows)]
-fn ensure_not_in_use(target: &Path) -> Result<(), ApiError> {
-    use std::os::windows::fs::OpenOptionsExt;
-    fs::OpenOptions::new().write(true).share_mode(0).open(target).map(drop).map_err(|_| {
-        error("OMP_UPDATE_IN_USE", "실행 중인 omp가 있어 교체하지 않았어요. 모든 omp를 종료한 뒤 다시 실행해 주세요. 프로세스는 닫지 않았어요.")
-    })
-}
-#[cfg(not(windows))]
-fn ensure_not_in_use(_: &Path) -> Result<(), ApiError> {
-    Ok(())
+/// 이전 교체가 남긴 백업을 지운다. Windows는 그 백업으로 실행 중인 omp가 있으면 지울 수 없으므로 실패는 넘어간다.
+fn sweep_backups(target: &Path) {
+    let (Some(dir), Some(name)) = (target.parent(), target.file_name().and_then(|name| name.to_str())) else { return };
+    let prefix = format!("{name}.");
+    for entry in fs::read_dir(dir).into_iter().flatten().flatten() {
+        if entry.file_name().to_str().is_some_and(|file| file.starts_with(&prefix) && file.ends_with(".bak")) {
+            let _ = fs::remove_file(entry.path());
+        }
+    }
 }
 
 fn swap(target: &Path, temp: &Path, backup: &Path) -> Result<(), ApiError> {
@@ -422,6 +425,7 @@ fn swap(target: &Path, temp: &Path, backup: &Path) -> Result<(), ApiError> {
     }
     #[cfg(windows)]
     {
+        // 실행 중인 exe도 이름은 바꿀 수 있다(실측). 이미 뜬 omp는 백업 파일로 계속 돌고, 새 실행부터 새 파일을 쓴다.
         fs::rename(target, backup).map_err(|_| fail("백업을 만들지 못했어요."))?;
         if fs::rename(temp, target).is_err() {
             let restored = fs::rename(backup, target).is_ok();
@@ -439,14 +443,14 @@ fn rollback(target: &Path, backup: &Path) -> bool {
 
 /// 플랜대로 `target`을 교체한다. 호출자는 서비스 버전을 이미 확인했다.
 pub(crate) fn install(source: &Source, plan: &Plan, target: &Path) -> Result<(), ApiError> {
-    ensure_not_in_use(target)?;
+    sweep_backups(target);
     let temp = sibling(target, "new");
     let backup = sibling(target, "bak");
     if let Err(problem) = download(source, plan, &temp) {
         let _ = fs::remove_file(&temp);
         return Err(problem);
     }
-    if let Err(problem) = ensure_not_in_use(target).and_then(|_| swap(target, &temp, &backup)) {
+    if let Err(problem) = swap(target, &temp, &backup) {
         let _ = fs::remove_file(&temp);
         return Err(problem);
     }
@@ -461,6 +465,7 @@ pub(crate) fn install(source: &Source, plan: &Plan, target: &Path) -> Result<(),
             if restored { "기존 omp로 되돌렸어요." } else { "기존 omp 복원도 실패했어요. 백업 파일을 직접 확인해 주세요." },
         )));
     }
+    // Windows에서 이전 omp가 아직 실행 중이면 지워지지 않는다. 다음 교체 때 `sweep_backups`가 지운다.
     let _ = fs::remove_file(&backup);
     Ok(())
 }
@@ -508,6 +513,8 @@ pub(crate) fn run(request: Request<'_>) -> Result<Report, ApiError> {
         service_version: request.service_version.clone(),
         minimum_ojak_service: plan.minimum_ojak_service.clone(),
         path: target.display().to_string(),
+        gateways: None,
+        gateways_notice: None,
     };
     let current = match installed.as_deref() {
         Some(version) => !request.force && !newer(&plan.version, version),
@@ -539,6 +546,16 @@ pub fn update(paths: &aam_protocol::Paths, check: bool, force: bool) -> Result<R
         .and_then(|snapshot| snapshot.get("serviceVersion").and_then(Value::as_str).map(str::to_owned));
     let target = resolve_target(&crate::omp_bridge::omp()?)?;
     let mut report = run(Request { source: &Source::github(), platform, target: &target, check, force, service_version })?;
+    if report.outcome == Outcome::Updated {
+        // 이미 뜬 gateway는 이전 omp 그대로다. 진행 중인 요청이 없을 때만 서비스가 다시 띄운다.
+        let (state, notice) = match aam_protocol::call(paths, "bridge.restartGateways", serde_json::json!({})) {
+            Ok(_) => ("restarted", None),
+            Err(problem) if problem.code == "BRIDGE_BUSY" => ("busy", Some("omp는 바꿨어요. 진행 중인 모델 요청이 있어 Ojak 연결은 이전 omp로 계속 돌아요. 요청이 끝난 뒤 이 명령을 --force로 다시 실행하거나 Ojak 서비스를 다시 시작해 주세요.".to_owned())),
+            Err(_) => ("unchanged", Some("omp는 바꿨어요. Ojak 연결은 서비스를 다시 시작한 뒤부터 새 omp를 써요.".to_owned())),
+        };
+        report.gateways = Some(state);
+        report.gateways_notice = notice;
+    }
     report_upstream(&mut report, UPSTREAM_RELEASE_API);
     Ok(report)
 }
@@ -824,6 +841,24 @@ mod tests {
         assert_eq!(fs::read(&target).unwrap(), release.binary);
         assert_eq!(fixture.leftovers(), 1, "temp and backup files must not linger");
         assert_eq!(server.paths(), ["/api/releases", &format!("/download/{TAG}/{MANIFEST}"), &format!("/download/{TAG}/{DARWIN}")]);
+    }
+
+    /// Windows는 이전 omp가 실행 중이면 교체 뒤 백업을 지우지 못한다. 다음 교체가 그 백업을 치우고, 다른 파일은 건드리지 않는다.
+    #[test]
+    fn a_backup_left_by_an_earlier_update_is_removed_and_other_files_stay() {
+        let fixture = Fixture::new();
+        let target = fixture.omp(OLD_VERSION);
+        let name = target.file_name().unwrap().to_str().unwrap().to_owned();
+        let stale = target.with_file_name(format!("{name}.1.2.3.bak"));
+        let unrelated = target.with_file_name(format!("{name}-notes.bak"));
+        fs::write(&stale, b"old").unwrap();
+        fs::write(&unrelated, b"keep").unwrap();
+        let release = Release::new();
+        let server = release.serve();
+        run(request(&server.source(), &target, false, false, Some("0.22.2"))).unwrap();
+        assert!(!stale.exists());
+        assert_eq!(fs::read(&unrelated).unwrap(), b"keep");
+        assert_eq!(fs::read(&target).unwrap(), release.binary);
     }
 
     #[test]
