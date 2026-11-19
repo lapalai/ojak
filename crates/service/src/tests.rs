@@ -1724,6 +1724,7 @@ fn diagnostics_export_allowlists_all_strings_and_exports_full_time_filtered_hist
                 installed: true,
                 isolation: secret.into(),
                 reason: Some(secret.into()),
+                ..Default::default()
             }],
         )
         .unwrap();
@@ -2004,4 +2005,29 @@ fn codex_conversation_id_is_recorded_on_release_and_can_continue_elsewhere() {
     assert_eq!(moved.account.id, "two");
     assert_eq!(moved.session.native_session_id.as_deref(), Some(native));
     assert_eq!(moved.session.continued_from.as_deref(), Some(grant.session.id.as_str()));
+}
+
+/// 스냅샷의 도구 상태는 스캔이 저장한 설치 버전에, 따로 저장된 최신 버전을 붙여 오래됐는지 알려 준다.
+/// 최신 버전을 확인하지 못한 도구와 설치되지 않은 도구는 오래됐다고 하지 않는다.
+#[test]
+fn snapshot_marks_a_tool_outdated_only_against_a_known_newer_version() {
+    let fixture = Fixture::new();
+    let tool = |id: &str, version: Option<&str>, installed: bool| ToolStatus { id: id.into(), version: version.map(str::to_owned), installed, ..Default::default() };
+    {
+        let store = fixture.service.lock().unwrap();
+        set_metadata(&store.connection, "tools", &vec![
+            tool("claude", Some("2.1.328 (Claude Code)"), true),
+            tool("codex", Some("codex-cli 0.154.0"), true),
+            tool("omp", None, false),
+        ]).unwrap();
+        set_metadata(&store.connection, tool_versions::METADATA_KEY, &tool_versions::Latest {
+            checked_at: now_ms(),
+            versions: [("codex".to_owned(), "0.170.0".to_owned()), ("omp".to_owned(), "18.22.2-ojak.1".to_owned())].into(),
+        }).unwrap();
+    }
+    let tools = fixture.service.snapshot().unwrap().tools;
+    let state = |id: &str| tools.iter().find(|tool| tool.id == id).map(|tool| (tool.latest_version.clone(), tool.outdated)).unwrap();
+    assert_eq!(state("codex"), (Some("0.170.0".into()), true));
+    assert_eq!(state("claude"), (None, false));
+    assert_eq!(state("omp"), (Some("18.22.2-ojak.1".into()), false));
 }

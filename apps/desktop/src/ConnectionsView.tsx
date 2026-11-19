@@ -8,7 +8,7 @@ import { loginProviderOf } from "./login";
 import type { LoginProvider, LoginRequest } from "./login";
 import { absoluteTime, bucketState, canonicalProvider, nextReset, occupiedStates, privacyText, providerNames, relativeTime, toolNames, useAction } from "./state";
 import { ApiKeyPanel } from "./ApiKeys";
-import type { Account, AccountQuotaSummary, ApiError, HostConnections, Snapshot } from "./types";
+import type { Account, AccountQuotaSummary, ApiError, HostConnections, Snapshot, ToolStatus } from "./types";
 import { canRelogin, choiceLabel } from "./overview";
 import { hostNote, t } from "./i18n";
 
@@ -29,8 +29,15 @@ function providerStatus(upstream: string, providers: string[], gateways: { provi
   return hasAccount ? t("omp.provider.syncing", { name }) : t("omp.provider.noAccount", { name, upstream });
 }
 
+/// 설치된 CLI가 확인된 최신 버전보다 낮을 때의 안내. 오래된 버전에는 공급자가 새 모델을 숨길 수 있다.
+/// Ojak은 업데이트하지 않고 공식 명령만 알려 준다. 최신 버전을 확인하지 못했으면 아무것도 보이지 않는다.
+function OutdatedNotice({ tool }: { tool: ToolStatus | undefined }) {
+  if (!tool?.outdated || !tool.latestVersion) return null;
+  const command = tool.id === "claude" ? "claude update" : tool.id === "codex" ? "npm install -g @openai/codex@latest" : "omp update";
+  return <p className="gate-reason" role="status">{t("tool.outdated", { name: toolNames[tool.id] ?? tool.name, installed: tool.version ?? "", latest: tool.latestVersion })} <code>{command}</code></p>;
+}
 
-function OmpPanel({ masked, accounts, online, onReload }: { masked: boolean; accounts: Account[]; online: boolean; onReload: () => Promise<void> }) {
+function OmpPanel({ masked, accounts, online, onReload, tool }: { masked: boolean; accounts: Account[]; online: boolean; onReload: () => Promise<void>; tool: ToolStatus | undefined }) {
   const [login, setLogin] = useState<LoginRequest | null>(null);
   const [broker, setBroker] = useState<OmpBrokerStatus | null>(null);
   const [bridge, setBridge] = useState<OmpBridgeStatus | null>(null);
@@ -83,6 +90,7 @@ function OmpPanel({ masked, accounts, online, onReload }: { masked: boolean; acc
   };
   return <div className="panel">
     <header><Dot color="var(--accent)" /><h2>omp</h2><Badge tone={connected ? "good" : partial ? "warning" : "neutral"}>{connected ? t("status.connected") : partial ? t("status.partial") : broker === null && !statusError ? t("common.checking") : t("status.disconnected")}</Badge></header>
+    <OutdatedNotice tool={tool} />
     <div className="steps">
       <div className="step"><div className="t"><Badge tone={storeReady ? "good" : "neutral"}>{storeReady ? t("step.done") : t("step.required")}</Badge>{t("omp.store")}</div><p>{storeReady ? t("omp.store.ready") : broker?.connected ? t("omp.store.noAccounts") : t("omp.store.notConnected")}</p></div>
       <div className="step"><div className="t"><Badge tone={loginReady ? "good" : "neutral"}>{loginReady ? t("step.done") : t("step.required")}</Badge>{t("omp.login")}</div><p>{loginReady ? <>{t("omp.login.readyBefore")}<code>/model</code>{t("omp.login.readyAfter")}{ojakLogins > 0 ? t("omp.login.count", { count: ojakLogins }) : t("omp.login.none")}</> : t("omp.login.notReady")}</p>{loginReady && broker && <ul className="field-help">{bridgeProviderOrder.map(upstream => <li key={upstream}>{providerStatus(upstream, availableProviders, gateways)}</li>)}</ul>}</div>
@@ -142,6 +150,7 @@ function ToolPanel({ tool, snapshot, masked, online, shimInstalled, onAdd, onRel
   };
   return <div className="panel">
     <header><Dot provider={tool === "claude" ? "anthropic" : "openai"} /><h2>{toolNames[tool]}</h2><Badge tone={launchable ? "good" : status?.installed ? "warning" : "neutral"}>{!status?.installed ? t("tool.notInstalled") : launchable ? t("status.connected") : accounts.length ? t("tool.noLaunchable") : t("tool.noAccounts")}</Badge></header>
+    <OutdatedNotice tool={status} />
     {accounts.length ? <table><tbody>{accounts.map(account => {
       const state = accountState(account, snapshot.policy.staleAfterSeconds, snapshot.quotaSummaries?.find(summary => summary.accountIds.includes(account.id)));
       const needsLogin = canRelogin(account);
@@ -223,7 +232,7 @@ export function ConnectionsView({ snapshot, masked, online, refreshing, onRefres
   };
   return <section className="view" aria-labelledby="connect-title">
     <div className="top"><div><h1 id="connect-title">{t("nav.connect")}</h1><div className="sub">{t("connect.subtitle")}</div></div></div>
-    <OmpPanel masked={masked} accounts={snapshot.accounts} online={online} onReload={onReload} />
+    <OmpPanel masked={masked} accounts={snapshot.accounts} online={online} onReload={onReload} tool={snapshot.tools.find(item => item.id === "omp")} />
     <ToolPanel tool="claude" snapshot={snapshot} masked={masked} online={online} shimInstalled={shim("claude")} onAdd={onAdd} onReload={onReload} />
     <ApiKeyPanel snapshot={snapshot} masked={masked} online={online} onReload={onReload} />
     <ToolPanel tool="codex" snapshot={snapshot} masked={masked} online={online} shimInstalled={shim("codex")} onAdd={onAdd} onReload={onReload} />

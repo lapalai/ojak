@@ -623,8 +623,15 @@ pub(crate) fn insert_lease(
     connection.execute("INSERT INTO leases(id,request_id,client_id,payload_hash,capability,policy_revision,binding_hash,account_body,expires_at,heartbeat_at,body,manual,account_id) VALUES (?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11,?12,?13)", params![record.session.id, record.session.request_id, client_id, record.payload_hash, record.capability, record.policy_revision, record.binding_hash, encode(&record.account)?, record.expires_at, record.heartbeat_at, encode(&record.session)?, record.manual, record.session.account_id]).map_err(db_error)?;
     Ok(())
 }
+/// 스캔이 저장한 도구 상태에 마지막으로 확인한 최신 버전을 붙인다. 최신 버전은 따로 저장하므로 스캔이 덮어쓰지 않는다.
 pub(crate) fn tools(connection: &Connection) -> Result<Vec<ToolStatus>, ApiError> {
-    Ok(metadata(connection, "tools")?.unwrap_or_default())
+    let mut tools: Vec<ToolStatus> = metadata(connection, "tools")?.unwrap_or_default();
+    let latest: crate::tool_versions::Latest = metadata(connection, crate::tool_versions::METADATA_KEY)?.unwrap_or_default();
+    for tool in &mut tools {
+        tool.latest_version = latest.versions.get(&tool.id).cloned();
+        tool.outdated = tool.installed && crate::tool_versions::outdated(tool.version.as_deref(), tool.latest_version.as_deref());
+    }
+    Ok(tools)
 }
 pub(crate) fn notices(connection: &Connection) -> Result<Vec<Notice>, ApiError> {
     Ok(metadata(connection, "notices")?.unwrap_or_default())

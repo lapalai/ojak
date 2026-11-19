@@ -257,6 +257,12 @@ pub struct ToolStatus {
     pub installed: bool,
     pub isolation: String,
     pub reason: Option<String>,
+    /// 마지막으로 확인한 최신 버전(Claude Code·Codex는 npm `latest`, omp는 게시된 Ojak 호환판). 확인하지 못했으면 없다.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub latest_version: Option<String>,
+    /// 설치된 버전이 `latest_version`보다 낮다. 둘 중 하나라도 읽지 못하면 false(모름)다.
+    #[serde(default)]
+    pub outdated: bool,
 }
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "lowercase")]

@@ -972,6 +972,7 @@ pub fn scan(
                 binary_path: binary.map(|binary| binary.to_string_lossy().into_owned()),
                 version: versions.remove(tool).flatten(), installed: binary.is_some(),
                 isolation: isolation.into(), reason: reason.map(str::to_owned),
+                ..Default::default()
             });
         }
         Ok(result)

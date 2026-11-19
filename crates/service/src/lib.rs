@@ -15,6 +15,7 @@ pub mod scheduler;
 pub mod supervisor;
 mod server;
 mod store;
+mod tool_versions;
 
 use aam_protocol::*;
 use process::Liveness;
@@ -2375,11 +2376,28 @@ impl Service {
             // 벽시계로 잰다. macOS의 Instant는 잠자기 동안 멈춰서, 노트북을 깨운 뒤에도
             // 남은 간격만큼 조회가 밀리고 그동안 사용량이 오래된 값으로 남았다.
             let mut refresh_at = aam_protocol::now_ms() + refresh_interval_ms();
+            // 시작 직후 한 번, 그 뒤 6시간마다 설치된 CLI의 최신 버전을 본다. 네트워크 조회는 DB 잠금 밖의 별도 스레드에서 한다.
+            let mut versions_at = 0;
             loop {
                 std::thread::sleep(Duration::from_secs(2));
                 let _ = service.reconcile(false);
                 let _ = service.reset_web_tick();
                 let now = aam_protocol::now_ms();
+                if now >= versions_at {
+                    versions_at = now + tool_versions::REFRESH_MS;
+                    let service = Arc::clone(&service);
+                    std::thread::spawn(move || {
+                        let latest = tool_versions::fetch(aam_protocol::now_ms());
+                        // 아무것도 읽지 못했으면(오프라인) 이전 기록을 지우지 않는다.
+                        if latest.versions.is_empty() { return; }
+                        if let Ok(store) = service.lock() {
+                            let mut merged: tool_versions::Latest = metadata(&store.connection, tool_versions::METADATA_KEY).ok().flatten().unwrap_or_default();
+                            merged.checked_at = latest.checked_at;
+                            merged.versions.extend(latest.versions);
+                            let _ = store::set_metadata(&store.connection, tool_versions::METADATA_KEY, &merged);
+                        }
+                    });
+                }
                 if now >= refresh_at {
                     service.start_refresh();
                     refresh_at = now + refresh_interval_ms();

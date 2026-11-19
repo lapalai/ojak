@@ -7,7 +7,8 @@
 - `main.rs` — Windows 기본 실행/`--supervise`는 독립 감독 프로세스, `--worker`는 그 자식 서비스다. `--foreground`는 감독 없는 개발 실행이며 macOS의 기존 실행 방식은 유지한다.
 - `server::run` (`server.rs:104`) — `service.lock` 단일 인스턴스(`service_lifetime_lock` `server.rs:90-94`, 호출 `server.rs:126`), peer uid == euid 검사(`aam_protocol::peer_is_self`; Unix는 연결 직후 `server.rs:181`, Windows는 요청 프레임을 읽은 뒤 `server.rs:206`), 연결 최대 64개(`server.rs:184`)
 - `Service::dispatch` (`lib.rs:446`) — RPC 분기
-- `Service::start_background` (`lib.rs:1864`) — reconcile 2초 주기, quota refresh 225–375초(지터), 브릿지 시작
+- `Service::start_background` (`lib.rs:1864`) — reconcile 2초 주기, quota refresh 225–375초(지터), 브릿지 시작, 설치된 CLI 최신 버전 확인(시작 직후 + 6시간마다)
+- 설치된 CLI 최신 버전(0.29.0, `tool_versions.rs`): 공급자 서버가 오래된 클라이언트 버전에 새 모델을 오류 없이 숨기므로 Ojak이 오래된 CLI를 알려 준다. `fetch`가 npm `latest`(`@anthropic-ai/claude-code`, `@openai/codex`)와 이 저장소의 게시된 `omp-v*-ojak.N` 릴리스(초안·시험판 제외) 중 가장 높은 버전을 읽어 metadata `toolLatestVersions`(`{checkedAt, versions}`)에 합친다. 버전 번호만 조회하고 redirect를 따르지 않으며, 아무것도 읽지 못하면 이전 기록을 그대로 둔다. `store::tools`가 스캔이 저장한 `ToolStatus`에 `latestVersion`과 `outdated`를 붙인다(스캔은 이 값을 덮어쓰지 않는다). `outdated`는 설치돼 있고 두 버전을 모두 숫자로 읽을 수 있으며 설치본이 낮을 때만 true다. omp는 같은 upstream 버전이면 `-ojak.N`으로 비교한다. 업데이트는 하지 않는다.
 
 ### Windows 복구와 런타임 진단
 - `supervisor.rs`는 작업자 종료를 확인한 뒤 1초부터 최대 60초까지 지수 간격으로 재시작한다. 연속 실패 8회면 멈추고, 120초 이상 안정적으로 실행한 작업자 뒤에는 실패 횟수를 초기화한다. 응답 지연·준비 시간 초과만으로 작업자를 죽이거나 lease를 반환하지 않는다.
