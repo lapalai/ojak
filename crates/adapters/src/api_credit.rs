@@ -432,7 +432,7 @@ pub struct Usage {
 /// 비슷한 미등록 버전(`claude-opus-5-6`)이나 다른 접두·접미는 모르는 모델로 본다(추정할 수 없으면 쓰지 않는다).
 fn base_model(model: &str) -> Option<&'static str> {
     const KNOWN: &[&str] = &[
-        "claude-fable-5-1", "claude-mythos-5-1", "claude-fable-5", "claude-mythos-5",
+        "claude-fable-5-2", "claude-mythos-5-2", "claude-fable-5-1", "claude-mythos-5-1", "claude-fable-5", "claude-mythos-5",
         "claude-opus-5-5", "claude-opus-5", "claude-opus-4-8", "claude-opus-4-7", "claude-opus-4-6", "claude-opus-4-5",
         "claude-sonnet-5-5", "claude-sonnet-5", "claude-sonnet-4-6", "claude-sonnet-4-5",
         "claude-haiku-5-5", "claude-haiku-4-5",
@@ -449,7 +449,7 @@ fn base_model(model: &str) -> Option<&'static str> {
 /// 변형은 단가표에 따로 있거나 없으므로 모르는 모델로 본다(추정할 수 없으면 쓰지 않는다).
 fn openai_base_model(model: &str) -> Option<&'static str> {
     const KNOWN: &[&str] = &[
-        "gpt-6-astra", "gpt-6.1-sol", "gpt-6.1-terra", "gpt-6-luna", "gpt-6-sol",
+        "gpt-6.2-astra", "gpt-6.2-sol", "gpt-6-astra", "gpt-6.1-sol", "gpt-6.1-terra", "gpt-6-luna", "gpt-6-sol",
         "gpt-5.6-sol", "gpt-5.6-terra", "gpt-5.6-luna", "gpt-5.5", "gpt-5.4",
     ];
     let m = model.strip_prefix("openai/").unwrap_or(model);
@@ -468,6 +468,7 @@ struct Rates {
 /// Anthropic: (input, cache write 1h, cache read, output).
 fn rates(model: &str, prompt_tokens: u64) -> Option<Rates> {
     let (input, cache_write, cache_read, output) = match base_model(model)? {
+        "claude-fable-5-2" | "claude-mythos-5-2" => (8.0, 16.0, 0.20, 40.0),
         "claude-fable-5-1" | "claude-mythos-5-1" => (10.0, 20.0, 0.25, 50.0),
         "claude-fable-5" | "claude-mythos-5" => (10.0, 20.0, 1.0, 50.0),
         "claude-opus-5-5" => (4.0, 8.0, 0.20, 20.0),
@@ -491,6 +492,8 @@ fn openai_rates(model: &str, prompt_tokens: u64) -> Option<Rates> {
     let long = prompt_tokens > LONG_CONTEXT_TOKENS;
     // (short input, short output, short cached, short 12h write), (long input, long output, long cached, long 12h write)
     let (short, long_rates): ((f64, f64, f64, f64), (f64, f64, f64, f64)) = match openai_base_model(model)? {
+        "gpt-6.2-astra" => ((8.0, 40.0, 0.40, 20.0), (16.0, 60.0, 0.80, 40.0)),
+        "gpt-6.2-sol" => ((2.0, 10.0, 0.10, 5.0), (4.0, 15.0, 0.20, 10.0)),
         "gpt-6-astra" => ((10.0, 50.0, 1.00, 25.0), (20.0, 75.0, 2.00, 50.0)),
         "gpt-6.1-sol" => ((2.0, 10.0, 0.10, 5.0), (4.0, 15.0, 0.20, 10.0)),
         "gpt-6.1-terra" => ((1.0, 5.0, 0.05, 2.5), (2.0, 7.5, 0.10, 5.0)),
@@ -610,6 +613,8 @@ mod tests {
         // Opus 5.5: 4 + 20 + 0.20 + 8 (1h write)
         assert!((cost_usd(Anthropic, "claude-opus-5-5", usage).unwrap() - 32.20).abs() < 1e-9);
         assert!((cost_usd(Anthropic, "anthropic/claude-sonnet-5-5", usage).unwrap() - 16.10).abs() < 1e-9);
+        // Fable 5.2 (공식 단가표 2026-11): 8 + 40 + 0.20 + 16 (1h write). 5.1과 단가가 다르다.
+        assert!((cost_usd(Anthropic, "anthropic/claude-fable-5-2", usage).unwrap() - 64.20).abs() < 1e-9);
         // Haiku 5.5는 프롬프트 100k 초과 시 높은 구간 단가.
         let small = Usage { input: 1_000, output: 0, cache_read: 0, cache_write: 0 };
         assert!((cost_usd(Anthropic, "claude-haiku-5-5", small).unwrap() - 0.0001).abs() < 1e-12);
@@ -628,10 +633,14 @@ mod tests {
     #[test]
     fn openai_cost_uses_cached_write_and_long_context_rates_and_stays_in_its_provider() {
         let near = |left: f64, right: f64| (left - right).abs() < 1e-9;
+        let edge_short = || Usage { input: 200_000, output: 1_000_000, cache_read: 0, cache_write: 0 };
         // gpt-6.1-sol 짧은 문맥: input $2 + output $10 + cached $0.10 + 12h write $5 per MTok.
         let usage = Usage { input: 1_000_000, output: 1_000_000, cache_read: 1_000_000, cache_write: 1_000_000 };
         // 프롬프트 합계가 272K를 넘으므로 긴 문맥 단가: 4 + 15 + 0.20 + 10.
         assert!(near(cost_usd(OpenAi, "gpt-6.1-sol", usage).unwrap(), 29.20));
+        // gpt-6.2-astra(2026-11-19 단가표) 긴 문맥: 16 + 60 + 0.80 + 40. gpt-6-astra와 단가가 다르다.
+        assert!(near(cost_usd(OpenAi, "openai/gpt-6.2-astra", usage).unwrap(), 116.80));
+        assert!(near(cost_usd(OpenAi, "gpt-6.2-sol", edge_short()).unwrap(), 200_000.0 * 2.0 / 1e6 + 10.0));
         // 272,000토큰 정확히는 짧은 문맥, 272,001부터 긴 문맥(요청 전체에 적용).
         let edge = |input: u64| Usage { input, output: 1_000_000, cache_read: 0, cache_write: 0 };
         assert!(near(cost_usd(OpenAi, "gpt-6.1-sol", edge(272_000)).unwrap(), 272_000.0 * 2.0 / 1e6 + 10.0));
@@ -650,7 +659,7 @@ mod tests {
             assert!(!priced(OpenAi, unknown), "{unknown}");
             assert_eq!(cost_usd(OpenAi, unknown, usage), None, "{unknown}");
         }
-        for known in ["gpt-6-astra", "gpt-6.1-sol", "gpt-6.1-terra", "gpt-6-luna", "gpt-6-sol", "gpt-5.6-sol", "gpt-5.6-terra", "gpt-5.6-luna", "gpt-5.5", "gpt-5.4", "openai/gpt-5.5"] {
+        for known in ["gpt-6.2-astra", "gpt-6.2-sol", "gpt-6-astra", "gpt-6.1-sol", "gpt-6.1-terra", "gpt-6-luna", "gpt-6-sol", "gpt-5.6-sol", "gpt-5.6-terra", "gpt-5.6-luna", "gpt-5.5", "gpt-5.4", "openai/gpt-5.5"] {
             assert!(priced(OpenAi, known), "{known}");
         }
         // 공급자 격리: Claude 모델은 OpenAI 키로, OpenAI 모델은 Claude 키로 단가를 구하지 않는다.

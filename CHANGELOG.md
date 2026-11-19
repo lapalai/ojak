@@ -2,6 +2,14 @@
 
 규칙은 `docs/release-policy.md`를 따른다.
 
+## 0.28.2 (2026-11-19)
+
+- Claude Fable 5.2·Mythos 5.2(`claude-fable-5-2`·`claude-mythos-5-2`)의 공식 API 단가(입력 $8, 출력 $40, 캐시 읽기 $0.20, 캐시 쓰기 5분 $10·1시간 $16 / 100만 토큰)를 넣었습니다. 전에는 단가표에 없어서 구독 한도가 다 차도 이 모델 요청은 API 크레딧으로 넘어가지 않았고, 토큰·비용 화면에서 Claude Code 기록이 ‘가격 모름’으로 나왔습니다. 빠른 모드 단가는 넣지 않았습니다.
+- OpenAI `gpt-6.2-astra`·`gpt-6.2-sol`의 표준 API 단가(짧은 문맥/272K 초과 긴 문맥)도 넣었습니다. astra는 입력 $8·출력 $40(긴 문맥 $16·$60), sol은 $2·$10(긴 문맥 $4·$15)입니다. 이 두 모델도 전에는 OpenAI API 키로 넘어가지 않고 비용 화면에서 ‘가격 모름’이었습니다.
+- 근거: [Claude 가격표](https://platform.claude.com/docs/en/about-claude/pricing)·[OpenAI 가격표](https://developers.openai.com/api/docs/pricing) 2026-11-19 확인.
+- 토큰·비용 화면의 로컬 색인 판을 3으로 올렸습니다. 앱을 처음 열 때 이 PC의 사용 기록을 한 번 다시 읽어, 전에 ‘가격 모름’으로 저장된 위 모델 기록도 새 가격으로 다시 셉니다.
+- 검증: `cargo test -p aam-adapters api_credit`(Fable 5.2·gpt-6.2 금액 회귀 포함)·`cargo test -p ai-account-manager local_usage`(판 2 색인을 다시 열면 Fable 5.2 기록이 다시 계산되는 회귀 포함, 판을 올리지 않으면 실패함을 확인) 통과. 빌드·설치·배포는 하지 않았습니다.
+
 ## 0.28.1 (2026-11-17)
 
 - 사용 현황 위쪽의 유료 사용 표시가 켜진 경로를 이름으로 보여 줍니다(예: ‘유료 허용 · Codex 크레딧, Claude API’). OpenAI API만 켰을 때 ‘유료 사용 꺼짐’으로 보이던 문제도 고쳤습니다.
