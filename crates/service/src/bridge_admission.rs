@@ -388,6 +388,7 @@ impl Admission {
         self.changed.notify_all();
     }
 
+    #[cfg(test)]
     pub(super) fn models_fenced(&self) -> bool {
         self.inner.lock().fenced
     }
