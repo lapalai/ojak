@@ -401,12 +401,21 @@ fn download(source: &Source, plan: &Plan, temp: &Path) -> Result<(), ApiError> {
     Ok(())
 }
 
-/// 이전 교체가 남긴 백업을 지운다. Windows는 그 백업으로 실행 중인 omp가 있으면 지울 수 없으므로 실패는 넘어간다.
+/// `sibling(target, "bak")`이 만든 이름인지: `<name>.<ms>.<pid>.<attempt>.bak`, 세 칸 모두 숫자만.
+/// 같은 접두사를 쓰는 사용자 백업(`omp.exe.before-upgrade.bak` 등)은 해당하지 않는다.
+fn updater_backup(name: &str, file: &str) -> bool {
+    let Some(middle) = file.strip_prefix(name).and_then(|rest| rest.strip_prefix('.')).and_then(|rest| rest.strip_suffix(".bak")) else { return false };
+    let parts: Vec<&str> = middle.split('.').collect();
+    parts.len() == 3 && parts.iter().all(|part| !part.is_empty() && part.len() <= 20 && part.bytes().all(|byte| byte.is_ascii_digit()))
+}
+
+/// 이전 교체가 남긴 이 업데이터의 백업만 지운다(일반 파일, `updater_backup` 형식). Windows는 그 백업으로 실행 중인 omp가 있으면
+/// 지울 수 없으므로 실패는 넘어간다.
 fn sweep_backups(target: &Path) {
     let (Some(dir), Some(name)) = (target.parent(), target.file_name().and_then(|name| name.to_str())) else { return };
-    let prefix = format!("{name}.");
     for entry in fs::read_dir(dir).into_iter().flatten().flatten() {
-        if entry.file_name().to_str().is_some_and(|file| file.starts_with(&prefix) && file.ends_with(".bak")) {
+        let ours = entry.file_name().to_str().is_some_and(|file| updater_backup(name, file));
+        if ours && entry.file_type().is_ok_and(|kind| kind.is_file()) {
             let _ = fs::remove_file(entry.path());
         }
     }
@@ -849,15 +858,25 @@ mod tests {
         let fixture = Fixture::new();
         let target = fixture.omp(OLD_VERSION);
         let name = target.file_name().unwrap().to_str().unwrap().to_owned();
-        let stale = target.with_file_name(format!("{name}.1.2.3.bak"));
-        let unrelated = target.with_file_name(format!("{name}-notes.bak"));
+        // 실제 `sibling`이 만든 이름으로 남은 백업을 만든다. 형식이 바뀌면 이 테스트가 잡는다.
+        let stale = sibling(&target, "bak");
         fs::write(&stale, b"old").unwrap();
-        fs::write(&unrelated, b"keep").unwrap();
+        // 같은 접두사·같은 꼬리의 사용자 파일: 칸 수가 다르거나 숫자가 아니면 이 업데이터의 백업이 아니다.
+        let kept: Vec<PathBuf> = [".before-upgrade.bak", ".notes.bak", ".1.2.bak", ".1.2.3.4.bak", ".1.x.3.bak", ".1..3.bak", ".1.2.3.bak.txt", "-notes.bak", ".1.2.3.manual.bak"]
+            .iter().map(|tail| target.with_file_name(format!("{name}{tail}"))).collect();
+        for path in &kept {
+            fs::write(path, b"keep").unwrap();
+        }
+        let folder = target.with_file_name(format!("{name}.7.8.9.bak"));
+        fs::create_dir(&folder).unwrap();
         let release = Release::new();
         let server = release.serve();
         run(request(&server.source(), &target, false, false, Some("0.22.2"))).unwrap();
         assert!(!stale.exists());
-        assert_eq!(fs::read(&unrelated).unwrap(), b"keep");
+        for path in &kept {
+            assert_eq!(fs::read(path).unwrap(), b"keep", "{}", path.display());
+        }
+        assert!(folder.is_dir());
         assert_eq!(fs::read(&target).unwrap(), release.binary);
     }
 
