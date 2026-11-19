@@ -55,6 +55,10 @@ export interface ToolStatus {
   installed: boolean;
   isolation: string;
   reason: string | null;
+  /// 마지막으로 확인한 최신 버전. 확인하지 못했거나 이전 서비스면 없다.
+  latestVersion?: string | null;
+  /// 설치된 버전이 `latestVersion`보다 낮다. 모르면 false다.
+  outdated?: boolean;
 }
 
 export interface ProjectRoute {
