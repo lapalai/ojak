@@ -444,9 +444,25 @@ fn swap(target: &Path, temp: &Path, backup: &Path) -> Result<(), ApiError> {
     Ok(())
 }
 
+/// 검증에 실패한 새 파일을 치우고 백업을 되돌린다.
+/// Windows는 그사이 다른 세션이 새 `target`을 실행했을 수 있다. 실행 중인 exe는 지우거나 덮어쓸 수 없지만 이름은 바꿀 수 있으므로,
+/// 새 파일을 고유한 백업 이름으로 옮긴 뒤 백업을 제자리에 둔다. 옮겨 둔 파일은 지금 지워지지 않으면 다음 교체의 `sweep_backups`가 지운다.
 fn rollback(target: &Path, backup: &Path) -> bool {
     #[cfg(windows)]
-    let _ = fs::remove_file(target);
+    {
+        let displaced = sibling(target, "bak");
+        if fs::rename(target, &displaced).is_err() {
+            return false;
+        }
+        if fs::rename(backup, target).is_err() {
+            // 경로를 비워 두지 않는다. 내려받은 파일이라도 제자리에 돌려놓고 실패로 보고한다.
+            let _ = fs::rename(&displaced, target);
+            return false;
+        }
+        let _ = fs::remove_file(&displaced);
+        true
+    }
+    #[cfg(not(windows))]
     fs::rename(backup, target).is_ok()
 }
 
@@ -924,6 +940,38 @@ mod tests {
         assert_eq!(problem.code, "OMP_UPDATE_VERIFY_FAILED");
         assert!(problem.message.contains("되돌렸어요"));
         assert_eq!(fs::read(&target).unwrap(), before);
+        assert_eq!(fixture.leftovers(), 1);
+    }
+
+    /// 교체 직후 다른 세션이 새 omp를 실행해 둔 상태의 롤백. 실행 중인 exe는 지울 수 없으므로(전제 확인) 이름을 바꿔 비키고
+    /// 백업을 제자리에 둔다. 실행 중이던 프로세스는 닫지 않는다.
+    #[cfg(windows)]
+    #[test]
+    fn rollback_restores_the_backup_while_the_new_file_is_running() {
+        let fixture = Fixture::new();
+        let target = fixture.dir.join("omp.exe");
+        let system = PathBuf::from(std::env::var_os("SystemRoot").unwrap()).join("System32").join("ping.exe");
+        fs::copy(&system, &target).unwrap();
+        let backup = sibling(&target, "bak");
+        fs::write(&backup, b"previous omp").unwrap();
+        let mut running = std::process::Command::new(&target)
+            .args(["-n", "60", "127.0.0.1"])
+            .stdin(std::process::Stdio::null()).stdout(std::process::Stdio::null()).stderr(std::process::Stdio::null())
+            .spawn().unwrap();
+        std::thread::sleep(Duration::from_millis(500));
+        assert!(fs::remove_file(&target).is_err(), "a running exe must not be deletable, or this test proves nothing");
+
+        let restored = rollback(&target, &backup);
+        let alive = running.try_wait().unwrap().is_none();
+        let content = fs::read(&target);
+        let _ = running.kill();
+        let _ = running.wait();
+        assert!(restored);
+        assert_eq!(content.unwrap(), b"previous omp");
+        assert!(!backup.exists());
+        assert!(alive, "rollback must not close the running process");
+        // 비켜 둔 새 파일은 실행이 끝난 뒤 다음 교체의 정리 대상이다.
+        sweep_backups(&target);
         assert_eq!(fixture.leftovers(), 1);
     }
 
