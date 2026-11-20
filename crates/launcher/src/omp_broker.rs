@@ -85,13 +85,35 @@ fn has_top_level_auth(text: &str) -> bool {
 }
 
 /// OMP가 설정을 재작성하면 주석 마커가 사라지고 값만 남는다.
-/// 마커가 없어도 우리가 적용한 broker 설정이면 연결로 인정하고 범위를 찾는다.
+/// 마커가 없어도 최상위 `auth:` 아래에 우리가 적용한 `broker.url`이 있으면 연결로 인정하고, 해제할 때 지울 범위를 돌려준다.
+/// `auth:`에 다른 자식(`unpausedProviders` 등)이 있으면 `broker` 두 줄만, 없으면 `auth:` 줄까지가 범위다.
+/// 다른 자식은 `broker` 앞에 있어도 뒤에 있어도 된다. `broker`에 `url` 말고 다른 값이 있으면 우리 것이 아니다.
 fn applied_block(text: &str) -> Option<(usize, usize)> {
-    let target = format!("auth:\n  broker:\n    url: {BROKER_URL}");
-    let start = text.find(&target)?;
-    let mut end = start + target.len();
-    if text[end..].starts_with('\n') { end += 1; }
-    Some((start, end))
+    let url = format!("    url: {BROKER_URL}");
+    let mut offset = 0;
+    let lines: Vec<(usize, &str)> = text.split_inclusive('\n').map(|line| {
+        let start = offset;
+        offset += line.len();
+        (start, line)
+    }).collect();
+    let blank = |index: usize| lines[index].1.trim().is_empty();
+    let auth = lines.iter().position(|(_, line)| line.trim_end() == "auth:")?;
+    // `auth:`의 본문은 들여쓴 줄과 빈 줄이다. 들여쓰지 않은 첫 줄에서 끝난다.
+    let body_end = (auth + 1..lines.len()).find(|&index| !blank(index) && !lines[index].1.starts_with(' ')).unwrap_or(lines.len());
+    let broker = (auth + 1..body_end.saturating_sub(1)).find(|&index| lines[index].1.trim_end() == "  broker:" && lines[index + 1].1.trim_end() == url)?;
+    if (broker + 2..body_end).find(|&index| !blank(index)).is_some_and(|index| lines[index].1.starts_with("   ")) {
+        return None;
+    }
+    let siblings = (auth + 1..body_end).any(|index| index != broker && index != broker + 1 && !blank(index));
+    let end = lines[broker + 1].0 + lines[broker + 1].1.len();
+    Some((lines[if siblings { broker } else { auth }].0, end))
+}
+
+fn without_block(text: &str, (start, end): (usize, usize)) -> String {
+    let mut next = String::with_capacity(text.len());
+    next.push_str(&text[..start]);
+    next.push_str(&text[end..]);
+    next
 }
 
 /// 연결 판정에 쓰는 설정 범위. 관리 블록이 우선이고, 없으면 적용된 값을 본다.
@@ -458,10 +480,7 @@ pub fn disconnect(paths: &Paths) -> Result<Status, ApiError> {
     if managed_block(&current)?.is_some() && receipt.applied_digest != digest(current.as_bytes()) {
         return Err(ApiError::new("CONFIG_CONFLICT", "OMP 설정이 연결 후 변경되어 자동 제거하지 않습니다."));
     }
-    let mut next = String::with_capacity(current.len());
-    next.push_str(&current[..start]);
-    next.push_str(&current[end..]);
-    atomic_write(&path, next.as_bytes())?;
+    atomic_write(&path, without_block(&current, (start, end)).as_bytes())?;
     let _ = fs::remove_file(receipt_path(paths));
     status(paths)
 }
@@ -505,6 +524,26 @@ mod tests {
     #[test] fn foreign_broker_url_is_not_recognized() {
         let text = "auth:\n  broker:\n    url: http://127.0.0.1:9999\n";
         assert!(connected_block(text).unwrap().is_none());
+    }
+    /// 해제는 `auth.broker`만 지운다. 사용자가 넣은 다른 `auth` 값은 `broker` 앞에 있든 뒤에 있든 부모 `auth:`와 함께 남는다.
+    #[test] fn disconnect_keeps_other_auth_settings_on_either_side_of_the_broker() {
+        let kept = "theme: dark\nauth:\n  unpausedProviders:\n    - google-antigravity\nother: 1\n";
+        let after = format!("theme: dark\nauth:\n  broker:\n    url: {BROKER_URL}\n  unpausedProviders:\n    - google-antigravity\nother: 1\n");
+        let before = format!("theme: dark\nauth:\n  unpausedProviders:\n    - google-antigravity\n  broker:\n    url: {BROKER_URL}\nother: 1\n");
+        let at_end = format!("theme: dark\nauth:\n  unpausedProviders:\n    - google-antigravity\n  broker:\n    url: {BROKER_URL}");
+        for (text, expected) in [(after.as_str(), kept), (before.as_str(), kept), (at_end.as_str(), "theme: dark\nauth:\n  unpausedProviders:\n    - google-antigravity\n")] {
+            let range = connected_block(text).unwrap().expect(text);
+            assert_eq!(without_block(text, range), expected, "{text}");
+        }
+        // 다른 값이 없으면 빈 `auth:`를 남기지 않는다.
+        let alone = format!("theme: dark\nauth:\n  broker:\n    url: {BROKER_URL}\nother: 1\n");
+        assert_eq!(without_block(&alone, connected_block(&alone).unwrap().unwrap()), "theme: dark\nother: 1\n");
+    }
+    #[test] fn a_broker_with_extra_settings_or_a_nested_auth_is_not_ours() {
+        let extra = format!("auth:\n  broker:\n    url: {BROKER_URL}\n    token: file\n");
+        assert!(connected_block(&extra).unwrap().is_none());
+        let nested = format!("providers:\n  auth:\n    broker:\n      url: {BROKER_URL}\n");
+        assert!(connected_block(&nested).unwrap().is_none());
     }
     #[test] fn nested_auth_key_is_not_top_level() { assert!(!has_top_level_auth("providers:\n  auth:\n")); assert!(has_top_level_auth("auth:\n  broker:\n")); }
     #[cfg(unix)]
