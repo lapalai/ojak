@@ -172,6 +172,7 @@ impl Overload {
     pub(super) fn code(&self) -> &'static str {
         match self.class {
             "queue_timeout" => "BRIDGE_QUEUE_TIMEOUT",
+            // `maintenance`는 설치된 omp 확장이 이미 기다렸다 다시 보내는 `BRIDGE_BUSY`로 나간다(새 코드는 옛 확장이 재시도하지 않는다).
             "resource" => "BRIDGE_RESOURCE_PRESSURE",
             _ => self.scope.busy_code(),
         }
@@ -179,6 +180,7 @@ impl Overload {
     pub(super) fn message(&self) -> &'static str {
         match self.class {
             "queue_timeout" => "Ojak 모델 연결 자리가 정해진 시간 안에 나지 않았어요. 잠시 뒤 다시 시도해 주세요.",
+            "maintenance" => "Ojak이 omp를 새 버전으로 바꾸는 중이라 새 모델 요청을 잠시 받지 않아요. 요청은 보내지 않았어요. 잠시 뒤 다시 시도해 주세요.",
             "resource" => "Windows 메모리 여유가 매우 부족해서 Ojak이 새 모델 요청을 잠시 받지 않아요. 이미 진행 중인 요청은 계속 처리돼요. 잠시 뒤 다시 시도해 주세요.",
             "payload" => "Ojak이 처리 중인 요청 본문 메모리가 가득 찼어요. 잠시 뒤 다시 시도해 주세요.",
             _ => self.scope.busy_message(),
@@ -215,6 +217,8 @@ struct Inner {
     queue: VecDeque<u64>,
     next_ticket: u64,
     body_bytes: usize,
+    /// omp 교체 중: 새 모델 요청을 받지 않는다. `counts`·`queue`와 같은 잠금 아래에 둔다.
+    fenced: bool,
 }
 
 pub(super) struct Admission {
@@ -365,6 +369,29 @@ impl Admission {
             inner = self.inner.lock();
         }
     }
+
+    /// omp 실행 파일을 바꾸기 전에 새 모델 요청을 닫는다. 닫기와 "진행·대기 중인 모델 요청이 없다"는 확인을 **같은 잠금**에서 한다.
+    /// 그래서 확인과 닫기 사이에 새 스트림이 끼어들 수 없다. 진행 중이거나 대기 중인 요청이 있으면 닫지 않고 그 수를 돌려준다.
+    /// 모델 몫은 본문 예약·수신보다 먼저 잡으므로(`handle_model_request`) 본문을 받는 중인 요청도 여기 `models`에 들어 있다.
+    pub(super) fn fence_models(&self) -> Result<(), (usize, usize)> {
+        let mut inner = self.inner.lock();
+        if inner.counts.models > 0 || !inner.queue.is_empty() {
+            return Err((inner.counts.models, inner.queue.len()));
+        }
+        inner.fenced = true;
+        Ok(())
+    }
+
+    /// 닫은 것을 푼다. 여러 번 불러도 같다.
+    pub(super) fn unfence_models(&self) {
+        self.inner.lock().fenced = false;
+        self.changed.notify_all();
+    }
+
+    #[cfg(test)]
+    pub(super) fn models_fenced(&self) -> bool {
+        self.inner.lock().fenced
+    }
 }
 
 /// 연결 하나의 허가. `Drop`에서 반드시 돌려준다.
@@ -412,6 +439,10 @@ impl Permit {
         }
         let limits = self.admission.limits();
         let mut inner = self.admission.inner.lock();
+        if self.scope == Scope::Public && inner.fenced {
+            drop(inner);
+            return Err(self.admission.reject(self.scope, "maintenance", 0, 0));
+        }
         let (active, limit, class) = match self.scope {
             Scope::Public => (&mut inner.counts.models, limits.models, "model"),
             Scope::Native => (&mut inner.counts.polls, limits.polls, "poll"),
@@ -442,6 +473,10 @@ impl Permit {
         let wait = admission.config.model_wait;
         let mut inner = admission.inner.lock();
         // 앞서 기다리는 요청이 있으면 끼어들지 않는다.
+        if inner.fenced {
+            drop(inner);
+            return Err(Denied::Overload(admission.reject(Scope::Public, "maintenance", 0, 0)));
+        }
         if inner.queue.is_empty() && inner.counts.models < limits.models {
             inner.counts.models += 1;
             self.special = true;
@@ -464,6 +499,10 @@ impl Permit {
         let deadline = Instant::now() + wait;
         loop {
             let limits = admission.limits();
+            if inner.fenced {
+                drop(inner);
+                return Err(Denied::Overload(admission.reject(Scope::Public, "maintenance", 0, 0)));
+            }
             if inner.queue.front() == Some(&id) && inner.counts.models < limits.models {
                 inner.queue.pop_front();
                 inner.counts.models += 1;
@@ -794,6 +833,80 @@ mod tests {
         assert_eq!(result, Ok(true));
         drop((permit, held));
         assert_eq!(admission.snapshot().counts, Counts::default());
+    }
+
+    /// omp 교체용 닫기: 진행 중이거나 대기 중인 모델 요청이 있으면 닫지 않는다. 닫힌 동안 새 요청은 대기 없이 거절되고,
+    /// 이미 쥔 몫과 제어 요청·native 경로는 그대로다. 풀면 정상으로 돌아온다.
+    #[test]
+    fn fencing_refuses_while_work_exists_then_blocks_only_new_model_work_until_released() {
+        let admission = Admission::with_config(config(64, 5_000));
+        let mut running = admission.admit(Scope::Public).unwrap();
+        running.promote().unwrap();
+        assert_eq!(admission.fence_models(), Err((1, 0)));
+        assert!(!admission.models_fenced());
+        drop(running);
+
+        // 대기 중인 요청도 "작업 있음"이다.
+        let held = fill_models(&admission);
+        let waiter = {
+            let admission = Arc::clone(&admission);
+            std::thread::spawn(move || {
+                let mut permit = admission.admit(Scope::Public).unwrap();
+                let result = permit.promote_wait(&|| false);
+                (result, permit)
+            })
+        };
+        eventually("waiter queued", || admission.snapshot().counts.waiting == 1);
+        assert_eq!(admission.fence_models(), Err((held.len(), 1)));
+        drop(held);
+        let (result, permit) = waiter.join().unwrap();
+        assert_eq!(result, Ok(true));
+        drop(permit);
+
+        assert_eq!(admission.fence_models(), Ok(()));
+        let started = Instant::now();
+        let mut refused = admission.admit(Scope::Public).unwrap();
+        match refused.promote_wait(&|| false) {
+            Err(Denied::Overload(over)) => assert_eq!((over.class, over.code()), ("maintenance", "BRIDGE_BUSY")),
+            other => panic!("{other:?}"),
+        }
+        assert!(started.elapsed() < Duration::from_millis(250), "a fenced request must not wait");
+        assert_eq!(refused.promote().unwrap_err().class, "maintenance");
+        // 제어 요청(몫을 올리지 않는 공개 연결)과 native long-poll은 막지 않는다.
+        let mut poll = admission.admit(Scope::Native).unwrap();
+        admission.set_native_profiles(1);
+        poll.promote().unwrap();
+        assert_eq!(admission.snapshot().counts.models, 0);
+        drop((refused, poll));
+
+        admission.unfence_models();
+        let mut again = admission.admit(Scope::Public).unwrap();
+        assert_eq!(again.promote_wait(&|| false), Ok(false));
+    }
+
+    /// 요청 시작과 닫기를 붙여도, 닫기가 성공한 순간에는 모델 몫을 쥔 요청이 하나도 없다.
+    /// 닫기 뒤에 시작한 요청은 몫을 얻지 못하고, 닫기 전에 몫을 얻은 요청이 있으면 닫기가 거절된다.
+    #[test]
+    fn a_fence_and_a_starting_request_never_both_win() {
+        for round in 0..300 {
+            let admission = Admission::with_config(config(64, 0));
+            let gate = Arc::new(std::sync::Barrier::new(2));
+            let starter = {
+                let (admission, gate) = (Arc::clone(&admission), Arc::clone(&gate));
+                std::thread::spawn(move || {
+                    let mut permit = admission.admit(Scope::Public).unwrap();
+                    gate.wait();
+                    let won = permit.promote_wait(&|| false).is_ok();
+                    (won, permit)
+                })
+            };
+            gate.wait();
+            let fenced = admission.fence_models().is_ok();
+            let (started, permit) = starter.join().unwrap();
+            assert!(fenced != started, "round {round}: fenced={fenced} started={started}");
+            assert_eq!(admission.snapshot().counts.models, usize::from(started));
+            drop(permit);
+        }
     }
 
     #[test]
