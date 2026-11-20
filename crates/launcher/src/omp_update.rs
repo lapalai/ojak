@@ -466,8 +466,25 @@ fn rollback(target: &Path, backup: &Path) -> bool {
     fs::rename(backup, target).is_ok()
 }
 
+/// 같은 `target`의 교체를 한 번에 하나만 하게 하는 잠금 파일(`<omp 파일명>.update.lock`, 지우지 않는다).
+/// 잠금 없이 두 교체가 겹치면 뒤쪽의 `sweep_backups`가 앞쪽이 아직 검증 중인 백업을 지워 되돌릴 수 없게 된다.
+/// 기다리지 않고 거절한다: 기다렸다 진행하면 방금 끝난 교체를 같은 파일로 한 번 더 하게 된다.
+fn lock_target(target: &Path) -> Result<fs::File, ApiError> {
+    let mut name = target.file_name().map(|name| name.to_os_string()).unwrap_or_default();
+    name.push(".update.lock");
+    let lock = fs::OpenOptions::new().create(true).truncate(false).write(true).open(target.with_file_name(name))
+        .map_err(|_| error("OMP_UPDATE_REPLACE_FAILED", "업데이트 잠금 파일을 만들지 못했어요. 기존 omp는 그대로 뒀어요."))?;
+    match lock.try_lock() {
+        Ok(()) => Ok(lock),
+        Err(fs::TryLockError::WouldBlock) => Err(error("OMP_UPDATE_BUSY", "다른 omp 업데이트가 진행 중이에요. 끝난 뒤 다시 실행해 주세요. omp는 바꾸지 않았어요.")),
+        Err(fs::TryLockError::Error(_)) => Err(error("OMP_UPDATE_REPLACE_FAILED", "업데이트 잠금을 확인하지 못했어요. 기존 omp는 그대로 뒀어요.")),
+    }
+}
+
 /// 플랜대로 `target`을 교체한다. 호출자는 서비스 버전을 이미 확인했다.
+/// 남은 백업 정리부터 검증·되돌리기까지 `lock_target` 잠금을 쥔 채로 한다.
 pub(crate) fn install(source: &Source, plan: &Plan, target: &Path) -> Result<(), ApiError> {
+    let _lock = lock_target(target)?;
     sweep_backups(target);
     let temp = sibling(target, "new");
     let backup = sibling(target, "bak");
@@ -708,8 +725,9 @@ mod tests {
             }
             path
         }
+        /// 잠금 파일(`*.update.lock`)은 일부러 남기므로 세지 않는다.
         fn leftovers(&self) -> usize {
-            fs::read_dir(&self.dir).unwrap().count()
+            fs::read_dir(&self.dir).unwrap().flatten().filter(|entry| !entry.file_name().to_string_lossy().ends_with(".update.lock")).count()
         }
     }
     impl Drop for Fixture {
@@ -941,6 +959,55 @@ mod tests {
         assert!(problem.message.contains("되돌렸어요"));
         assert_eq!(fs::read(&target).unwrap(), before);
         assert_eq!(fixture.leftovers(), 1);
+    }
+
+    /// `<자기 경로>.go` 파일이 생길 때까지 `--version` 응답을 미루는 omp. 교체 뒤 검증 단계에서 멈춰 세우는 데 쓴다.
+    fn waiting_omp(version: &str) -> Vec<u8> {
+        if cfg!(windows) {
+            format!("@echo off\r\n:wait\r\nif exist \"%~f0.go\" goto done\r\nping -n 2 127.0.0.1 >nul\r\ngoto wait\r\n:done\r\necho omp/{version}\r\n").into_bytes()
+        } else {
+            format!("#!/bin/sh\nwhile [ ! -e \"$0.go\" ]; do sleep 0.05; done\necho 'omp/{version}'\n").into_bytes()
+        }
+    }
+
+    /// A가 교체를 마치고 검증에서 멈춰 있는 동안 B가 같은 대상을 교체하려 한다. B는 아무것도 건드리지 않고 거절돼야 하고
+    /// (잠금이 없으면 B의 정리가 A의 백업을 지운다), A는 검증 실패 뒤 그 백업으로 되돌릴 수 있어야 한다.
+    #[test]
+    fn a_second_update_is_refused_while_the_first_is_verifying_and_its_backup_survives() {
+        let fixture = Fixture::new();
+        let target = fixture.omp(OLD_VERSION);
+        let before = fs::read(&target).unwrap();
+        let name = target.file_name().unwrap().to_str().unwrap().to_owned();
+        // manifest는 ojak.9, 실행 파일은 ojak.1을 보고한다: 검증이 실패해 되돌리기까지 간다.
+        let release = Release { binary: waiting_omp(NEW_VERSION), ..Release::versioned("18.15.0-ojak.9") };
+        let server = release.serve();
+        let source = server.source();
+        let second_plan = plan(&source, "darwin-arm64").unwrap();
+        let backups = || fs::read_dir(&fixture.dir).unwrap().flatten().filter(|entry| updater_backup(&name, &entry.file_name().to_string_lossy())).count();
+        std::thread::scope(|scope| {
+            let first = scope.spawn(|| run(request(&source, &target, false, false, Some("0.22.2"))));
+            let deadline = Instant::now() + Duration::from_secs(20);
+            while fs::read(&target).ok().as_deref() != Some(release.binary.as_slice()) {
+                assert!(Instant::now() < deadline, "the first update never reached verification");
+                std::thread::sleep(Duration::from_millis(20));
+            }
+            assert_eq!(backups(), 1);
+
+            let second = install(&source, &second_plan, &target).unwrap_err();
+            assert_eq!(second.code, "OMP_UPDATE_BUSY");
+            assert_eq!(backups(), 1, "the second update must not sweep the first one's backup");
+            assert_eq!(fs::read(&target).unwrap(), release.binary);
+
+            let mut go = target.clone().into_os_string();
+            go.push(".go");
+            fs::write(&go, b"").unwrap();
+            let problem = first.join().unwrap().unwrap_err();
+            assert_eq!(problem.code, "OMP_UPDATE_VERIFY_FAILED");
+            assert!(problem.message.contains("되돌렸어요"), "{}", problem.message);
+        });
+        assert_eq!(fs::read(&target).unwrap(), before);
+        // 끝난 뒤에는 잠금이 풀려 다음 교체가 진행된다.
+        assert!(lock_target(&target).is_ok());
     }
 
     /// 교체 직후 다른 세션이 새 omp를 실행해 둔 상태의 롤백. 실행 중인 exe는 지울 수 없으므로(전제 확인) 이름을 바꿔 비키고
