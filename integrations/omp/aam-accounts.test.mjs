@@ -1,7 +1,12 @@
 import assert from 'node:assert/strict';
 import test from 'node:test';
+import { copyFileSync, mkdirSync, mkdtempSync, rmSync, writeFileSync } from 'node:fs';
+import { tmpdir } from 'node:os';
+import { join } from 'node:path';
+import { pathToFileURL } from 'node:url';
 import {
   bridgedModels,
+  classifySubmittedError,
   connectedAccounts,
   createOutageReporter,
   fetchBridgeModels,
@@ -174,6 +179,103 @@ test('only an explicit pre-upstream admission rejection permits replay', () => {
   assert.equal(isAdmissionRejection(502, { error }), false);
   assert.equal(isAdmissionRejection(503, { error: { ...error, type: 'upstream_error' } }), false);
   assert.equal(isAdmissionRejection(503, { error: { ...error, code: 'BRIDGE_EXECUTION_UNKNOWN' } }), false);
+});
+
+test('a submitted provider refusal keeps its explanation and vetoes automatic recovery', () => {
+  const error = { stopDetails: { type: 'refusal', category: 'cyber' }, errorMessage: 'Refusal (cyber): request blocked' };
+  assert.equal(classifySubmittedError(error), 'rejected');
+  assert.equal(error.errorMessage, 'Refusal (cyber): request blocked');
+  assert.equal(error.errorType, 'refusal');
+  assert.equal(error.errorCode, 'BRIDGE_ADMISSION_STOPPED');
+});
+
+test('an interrupted stream is not a provider refusal, even if its error text mentions one', () => {
+  const error = { errorMessage: 'connection refused' };
+  assert.equal(classifySubmittedError(error), 'unknown');
+  assert.equal(error.errorCode, 'BRIDGE_EXECUTION_UNKNOWN');
+});
+
+test('primary and ownerless advisor streams preserve terminal outcomes without replaying the POST', async t => {
+  const dir = mkdtempSync(join(tmpdir(), 'ojak-stream-'));
+  const priorHome = process.env.AAM_HOME;
+  t.after(() => {
+    if (priorHome === undefined) delete process.env.AAM_HOME;
+    else process.env.AAM_HOME = priorHome;
+    rmSync(dir, { recursive: true, force: true });
+  });
+  process.env.AAM_HOME = dir;
+  writeFileSync(join(dir, 'bridge.token'), 'test');
+  // Load the unmodified extension through its public entry point, with only the native SDK substituted.
+  copyFileSync(new URL('./aam-accounts.js', import.meta.url), join(dir, 'extension.mjs'));
+  const sdk = join(dir, 'node_modules', '@oh-my-pi', 'pi-ai');
+  mkdirSync(sdk, { recursive: true });
+  writeFileSync(join(sdk, 'package.json'), JSON.stringify({ type: 'module', exports: './index.js' }));
+  writeFileSync(join(sdk, 'index.js'), `
+    export class AssistantMessageEventStream {
+      events = [];
+      finished = new Promise((resolve, reject) => { this.end = resolve; this.fail = reject; });
+      trackLocalWork(work) { return work; }
+      forwardLocalWorkFrom() {}
+      push(event) { this.events.push(event); }
+    }
+    export async function* streamSimple(model, context, options) {
+      const response = await options.fetch(model.baseUrl, { method: 'POST' });
+      yield await response.json();
+    }
+  `);
+  const { default: register } = await import(pathToFileURL(join(dir, 'extension.mjs')));
+  const handlers = new Map(), providers = new Map(), entries = [];
+  await register({
+    on: (name, fn) => handlers.set(name, fn), registerCommand() {},
+    registerProvider: (name, provider) => providers.set(name, provider),
+    appendEntry: (customType, data) => entries.push({ id: String(entries.length), type: 'custom', customType, data }),
+  });
+  for (const [phase, error, code] of [
+    ['rejected', { stopDetails: { type: 'refusal' }, errorMessage: 'Refusal (cyber)' }, 'BRIDGE_ADMISSION_STOPPED'],
+    ['unknown', { errorMessage: 'stream interrupted' }, 'BRIDGE_EXECUTION_UNKNOWN'],
+  ]) {
+    entries.length = 0;
+    const persisted = [];
+    const ctx = {
+      providerSessionId: phase,
+      sessionManager: { getSessionId: () => phase, getBranch: () => entries, getEntries: () => entries },
+      persistSession: async () => { persisted.push(entries.at(-1).data.phase); },
+    };
+    handlers.get('session_start')({}, ctx);
+    let posts = 0;
+    const provider = providers.get('ojak-claude');
+    const output = provider.streamSimple({ id: 'fixture', provider: 'ojak-claude', baseUrl: provider.baseUrl }, {}, {
+      requestKind: 'primary', sessionId: phase, fetch: async (url, init) => {
+        if (url.endsWith('/v1/admission')) return Response.json({ version: 1, ready: true });
+        assert.equal(init.method, 'POST');
+        assert.equal(persisted.at(-1), 'submitted');
+        posts++;
+        return Response.json({ type: 'error', error });
+      },
+    });
+    await output.finished;
+    assert.deepEqual(persisted, ['queued', 'submitted', phase]);
+    assert.equal(posts, 1);
+    assert.equal(output.events[0].error.errorCode, code);
+    if (phase === 'rejected') assert.equal(output.events[0].error.errorMessage, error.errorMessage);
+    handlers.get('session_shutdown')({}, ctx);
+  }
+  entries.length = 0;
+  const provider = providers.get('ojak-claude');
+  let posts = 0;
+  const advisor = provider.streamSimple({ id: 'fixture', provider: 'ojak-claude', baseUrl: provider.baseUrl }, {}, {
+    requestKind: 'ephemeral', fetch: async (url, init) => {
+      if (url.endsWith('/v1/admission')) return Response.json({ version: 1, ready: true });
+      assert.equal(init.method, 'POST');
+      posts++;
+      return Response.json({ type: 'error', error: { stopDetails: { type: 'refusal' }, errorMessage: 'Refusal (cyber)' } });
+    },
+  });
+  await advisor.finished;
+  assert.equal(posts, 1);
+  assert.equal(entries.length, 0);
+  assert.equal(advisor.events[0].error.errorMessage, 'Refusal (cyber)');
+  assert.equal(advisor.events[0].error.errorCode, 'BRIDGE_ADMISSION_STOPPED');
 });
 
 test('cancellation during readiness response cannot grant admission and frees the waiter', async () => {
