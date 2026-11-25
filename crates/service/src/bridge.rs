@@ -312,10 +312,30 @@ fn exhausted(bucket: &QuotaBucket, now: i64) -> bool {
     spent && bucket.resets_at.is_none_or(|reset| reset > now)
 }
 
-fn blocked(blocks: &[Block], key: &str, scope: Option<&str>, now: i64) -> bool {
+/// 차단 범위가 이번 요청에 걸리는지. `None`은 계정 전체, `model:<id>`는 그 모델 하나만, 나머지는 모델 계열(`block_scope`)이다.
+fn scope_applies(block: Option<&str>, scope: Option<&str>, model: &str) -> bool {
+    match block {
+        None => true,
+        Some(block) => match block.strip_prefix("model:") {
+            Some(blocked_model) => blocked_model.eq_ignore_ascii_case(model),
+            None => Some(block) == scope,
+        },
+    }
+}
+
+fn blocked(blocks: &[Block], key: &str, scope: Option<&str>, model: &str, now: i64) -> bool {
     blocks
         .iter()
-        .any(|block| block.key == key && block.until > now && (block.scope.is_none() || block.scope.as_deref() == scope))
+        .any(|block| block.key == key && block.until > now && scope_applies(block.scope.as_deref(), scope, model))
+}
+
+/// Codex의 "모델 수용량 초과"(turn_rate_limit_exceeded / at capacity)는 그 모델의 일시 제한이다. 같은 계정의 다른 모델은 쓸 수 있다.
+fn model_capacity_limit(provider: &str, body: &[u8]) -> bool {
+    if provider != "openai-codex" {
+        return false;
+    }
+    let text = String::from_utf8_lossy(body).to_ascii_lowercase();
+    text.contains("turn_rate_limit") || text.contains("at capacity")
 }
 
 /// 응답 당시 공용 소진이 확인됐으면 공용 회복으로 해제할 수 있다. 모델 전용 소진도 있거나
@@ -445,7 +465,7 @@ fn api_credit_pool(candidates: &[Candidate], provider: &str, model: &str, scope:
                 && candidate.healthy
                 && candidate.enabled
                 && !tried.contains(&candidate.key)
-                && !blocked(blocks, &candidate.key, scope, now)
+                && !blocked(blocks, &candidate.key, scope, model, now)
                 && candidate.paid_fallback.is_some_and(|fresh_ms| {
                     candidates.iter().filter(|subscription| !subscription.api_credit && subscription.enabled).all(|subscription| {
                         subscription.healthy && if api == aam_adapters::api_credit::ApiProvider::Anthropic {
@@ -453,7 +473,7 @@ fn api_credit_pool(candidates: &[Candidate], provider: &str, model: &str, scope:
                                 && exhausted(bucket, now) && scheduler::exhausted_observation_fresh(bucket, now, fresh_ms))
                                 || blocks.iter().any(|block| block.key == subscription.key && block.quota && block.until > now
                                     && block.observed_at <= now
-                                    && (block.scope.is_none() || block.scope.as_deref() == scope))
+                                    && scope_applies(block.scope.as_deref(), scope, model))
                         } else {
                             paid_cover(&subscription.buckets, model, now, fresh_ms)
                         }
@@ -503,7 +523,7 @@ fn claude_api_reasons(accounts: &[Account], paid: &PaidPolicy, candidates: &[(Ca
             ("API_MONTHLY_CAP", "API 키의 월 추정 사용액 상한에 도달했어요.")
         } else if candidate.is_none_or(|candidate| !candidate.healthy) {
             ("API_GATEWAY_UNAVAILABLE", "API 연결이 준비되지 않았거나 연결에 실패했어요.")
-        } else if candidate.is_some_and(|candidate| blocked(blocks, &candidate.key, scope.as_deref(), now) || tried.contains(&candidate.key)) {
+        } else if candidate.is_some_and(|candidate| blocked(blocks, &candidate.key, scope.as_deref(), model, now) || tried.contains(&candidate.key)) {
             ("API_KEY_BLOCKED", "API 키가 요청을 거절했거나 한도·속도 제한으로 차단돼 있어요.")
         } else {
             ("SUBSCRIPTION_NOT_EXHAUSTED", "활성 구독의 연결 또는 해당 모델의 한도 소진을 확인할 수 없어 과금 전환을 멈췄어요.")
@@ -539,7 +559,7 @@ pub(crate) fn choose(
                 && candidate.healthy
                 && candidate.enabled
                 && !tried.contains(&candidate.key)
-                && !blocked(blocks, &candidate.key, scope.as_deref(), now)
+                && !blocked(blocks, &candidate.key, scope.as_deref(), model, now)
                 && !candidate
                     .buckets
                     .iter()
@@ -566,7 +586,7 @@ pub(crate) fn choose(
                     && candidate.healthy
                     && candidate.enabled
                     && !tried.contains(&candidate.key)
-                    && !blocked(blocks, &candidate.key, scope.as_deref(), now)
+                    && !blocked(blocks, &candidate.key, scope.as_deref(), model, now)
                     && candidate.paid_fallback.is_some_and(|fresh_ms| paid_cover(&candidate.buckets, model, now, fresh_ms))
             })
             .map(|(index, _)| index)
@@ -591,7 +611,7 @@ pub(crate) fn choose(
                     && candidate.healthy
                     && candidate.enabled
                     && !tried.contains(&candidate.key)
-                    && !blocked(blocks, &candidate.key, scope.as_deref(), now)
+                    && !blocked(blocks, &candidate.key, scope.as_deref(), model, now)
             })
             .map(|(index, _)| index)
             .collect()
@@ -2044,7 +2064,13 @@ impl Bridge {
                 // 응답이 알려 준 대기가 관측 리셋보다 길면 그 시각까지 막는다(최대 8일).
                 let hinted = retry_ms.map(|ms| now + ms.min(8 * 24 * 60 * 60_000));
                 let (until, estimate) = block_until(&candidate.buckets, &model, quota, hinted, now);
-                let scope = if quota { quota_response_scope(&provider, &model, &candidate.buckets, now, paid.api_fresh_ms) } else { None };
+                let scope = if quota {
+                    quota_response_scope(&provider, &model, &candidate.buckets, now, paid.api_fresh_ms)
+                } else if model_capacity_limit(&provider, body) {
+                    Some(format!("model:{model}"))
+                } else {
+                    None
+                };
                 self.state().blocks.push(Block {
                     key: candidate.key.clone(),
                     scope: scope.clone(),
@@ -2932,7 +2958,7 @@ fn classify(candidate: &Candidate, scope: Option<&str>, model: &str, blocks: &[B
         .map(|(until, known)| Cause::Wait { until, quota: true, known });
     let responded = blocks
         .iter()
-        .filter(|block| block.key == candidate.key && block.until > now && (block.scope.is_none() || block.scope.as_deref() == scope))
+        .filter(|block| block.key == candidate.key && block.until > now && scope_applies(block.scope.as_deref(), scope, model))
         .map(|block| Cause::Wait { until: block.until, quota: block.quota, known: !block.estimate });
     // 후보는 모든 대기가 끝나야 쓸 수 있으므로 가장 늦은 것이 결정한다. 같은 시각이면 공급자가 알려 준 쪽을 쓴다.
     observed
@@ -3658,6 +3684,12 @@ mod tests {
         // Codex는 chat 한도와 spark 한도가 따로다.
         let chat_block = [Block { key: "a".into(), scope: block_scope("openai-codex", "gpt-6-astra"), until: now + 60_000, observed_at: now, reason: "q".into(), quota: true, estimate: false }];
         assert_eq!(choose(&pool, "openai-codex", "gpt-6-astra", None, &none, &chat_block, &[], 0.0, now), Some(1));
+        // Codex 모델 수용량 초과는 그 모델만 막는다. 같은 계정의 다른 모델(sol)은 계속 받는다.
+        assert!(model_capacity_limit("openai-codex", b"{\"code\":\"turn_rate_limit_exceeded\",\"message\":\"Codex is at capacity\"}"));
+        assert!(!model_capacity_limit("openai-codex", b"{\"error\":\"slow down\"}"));
+        let astra_block = [Block { key: "a".into(), scope: Some("model:gpt-6.2-astra".into()), until: now + 60_000, observed_at: now, reason: "r".into(), quota: false, estimate: false }];
+        assert_eq!(choose(&[candidate("a", vec![])], "openai-codex", "gpt-6.2-astra", None, &none, &astra_block, &[], 0.0, now), None);
+        assert_eq!(choose(&[candidate("a", vec![])], "openai-codex", "gpt-6.2-sol", None, &none, &astra_block, &[], 0.0, now), Some(0));
         // 공급자 수동 배정: 새 대화는 고정 계정이 받을 수 있으면 그 계정. 소진·차단이면 다른 계정으로 넘어간다.
         let mut pinned_pool = vec![candidate("a", vec![]), candidate("b", vec![])];
         pinned_pool[1].pinned = true;
@@ -6015,7 +6047,7 @@ mod tests {
         assert_eq!(left().len(), 3);
         update(json!({"apiCreditGrant": {"accountIds": ["key-o"], "budgetUsd": 200.0, "startsAt": now, "expiresAt": now + 30 * DAY, "confirmed": true}}));
         assert_eq!(left(), [(key_p.to_owned(), true), (key_o.to_owned(), false)]);
-        assert!(!blocked(&h.bridge.state().blocks, key_o, None, now + 120_000) && blocked(&h.bridge.state().blocks, key_p, None, now + 120_000));
+        assert!(!blocked(&h.bridge.state().blocks, key_o, None, "", now + 120_000) && blocked(&h.bridge.state().blocks, key_p, None, "", now + 120_000));
     }
 
     #[test]

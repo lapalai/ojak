@@ -229,3 +229,4 @@ sequenceDiagram
 
 - (0.30.0) sync는 broker snapshot에서 같은 `ojak-*` 공급자의 중복 로그인을 최신 id 하나만 남기고 `/v1/credential/<id>/disable`로 끈다(`duplicate_ojak_logins`). 원래 공급자·`aam-*` 로그인은 건드리지 않는다. 계정 해제의 `ompLogin: true`는 같은 이메일+조직의 원래 공급자 로그인을 끈다(`disable_omp_logins`).
 - (0.30.2) 계정 선택(`candidates`)은 gateway별 모델 목록(`Gateway.models`, sync가 `/v1/models`로 채움)에 요청 모델이 없으면 그 구독 후보를 `enabled=false`로 뺀다. 목록을 모르면(`None`) 거르지 않는다. 같은 공급자라도 플랜마다 모델이 다르다(Codex free에는 gpt-6.2-astra 없음).
+- (0.30.3) Codex `turn_rate_limit_exceeded`/`at capacity` 속도 제한은 `scope: "model:<id>"` 차단으로 그 모델만 막는다(`model_capacity_limit`, `scope_applies`). 다른 속도 제한은 계정 전체(`scope: None`) 그대로다.

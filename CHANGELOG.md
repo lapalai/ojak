@@ -2,6 +2,10 @@
 
 규칙은 `docs/release-policy.md`를 따른다.
 
+## 0.30.3 (2026-11-25)
+
+- Codex가 한 모델에 대해 `Codex is at capacity`(turn_rate_limit_exceeded)로 거절하면 그 모델만 잠시 막고, 같은 계정의 다른 모델(예: gpt-6.2-sol)은 계속 씁니다. 이전에는 계정 전체를 막아 "쓸 수 있는 Codex 계정이 모두 쉬고 있어요"가 떴습니다.
+
 ## 0.30.2 (2026-11-25)
 
 - omp 브릿지가 계정을 고를 때 그 계정 플랜이 요청 모델을 실제로 내주는지 확인합니다. 이전에는 한도 여유만 보고 골라, Codex free 계정에 `gpt-6.2-astra`를 보내 `Unknown model`이나 `Codex is at capacity`(turn_rate_limit_exceeded)로 실패했습니다. 이제 각 gateway의 `/v1/models` 목록(60초마다 갱신)에 없는 모델은 그 계정에 배정하지 않고, 목록을 아직 모르면 이전처럼 고릅니다.
