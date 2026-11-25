@@ -949,8 +949,19 @@ pub fn scan(
             result.notices.push(notice("NATIVE_USAGE_UNAVAILABLE", "일부 Claude 계정의 사용량을 공식 CLI로 조회하지 못했어요. 이전 관측 시각은 갱신하지 않았어요."));
         }
         let current: BTreeSet<_> = result.accounts.iter().map(|account| account.id.as_str()).collect();
+        // omp 응답을 받았는데도 없는 관측 중 identity 없는 이전 형식 행과 7일 넘게 안 보인 행은 지울 대상으로 넘긴다.
+        // 저장소는 이 목록의 omp 행을 (사용 이력 없는 한) 지운다. omp 조회 자체가 실패했으면 아무것도 지우지 않는다.
+        if omp_usage.is_some() {
+            let keep_after = started - 7 * 24 * 60 * 60 * 1000;
+            for old in existing.iter().filter(|account| account.tool == "omp" && !current.contains(account.id.as_str()) && !observed_omp.contains(&account.id)) {
+                if old.identity_key.is_none() || old.last_checked_at < keep_after {
+                    result.merged_observation_ids.push(old.id.clone());
+                }
+            }
+        }
         let stale: Vec<_> = existing.iter()
             .filter(|account| account.tool == "omp" && !current.contains(account.id.as_str()) && !observed_omp.contains(&account.id))
+            .filter(|account| !result.merged_observation_ids.contains(&account.id))
             .map(|old| {
                 let mut stale = old.clone();
                 stale.can_launch = false;

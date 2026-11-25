@@ -639,8 +639,9 @@ fn execute(paths: &Paths, action: Action) -> Result<(), ApiError> {
             action: AccountAction::Remove { account },
         } => {
             let value = call(paths, "account.remove", json!({"id": account}))?;
-            let routes = value.get("removedRoutes").and_then(Value::as_u64).unwrap_or(0);
-            println!("계정 연결을 끊었어요. 공식 로그인과 프로필 폴더는 그대로 뒀어요. 함께 지운 프로젝트 고정 규칙: {routes}개");
+            let count = |key: &str| value.get(key).and_then(Value::as_u64).unwrap_or(0);
+            let trashed = if value.get("profileTrashed").and_then(Value::as_bool) == Some(true) { "Ojak 프로필 폴더는 AAM_HOME/trash로 옮겼어요. " } else { "" };
+            println!("계정 연결을 끊었어요. {trashed}함께 지운 omp 관측 행: {}개, 프로젝트 고정 규칙: {}개", count("removedObservations"), count("removedRoutes"));
         }
         Action::Account {
             action: AccountAction::SettingsPreview { tool },

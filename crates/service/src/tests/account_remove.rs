@@ -45,7 +45,7 @@ fn remove_is_refused_while_a_lease_holds_capacity_and_keeps_history_afterwards()
 
     fixture.service.finish(abort(&grant), true, now + 1).unwrap();
     let result = remove(&fixture, "one").unwrap();
-    assert_eq!(result, json!({ "id": "one", "removedRoutes": 0 }));
+    assert_eq!(result["removedRoutes"], 0);
 
     let store = fixture.service.lock().unwrap();
     assert!(accounts(&store.connection).unwrap().is_empty());
@@ -98,7 +98,7 @@ fn remove_clears_policy_references_pinned_routes_takeovers_and_reset_quote() {
     }
 
     let result = remove(&fixture, "one").unwrap();
-    assert_eq!(result, json!({ "id": "one", "removedRoutes": 1 }));
+    assert_eq!(result["removedRoutes"], 1);
 
     let after = stored_policy(&fixture);
     assert_eq!(after.revision, saved.revision + 1);
@@ -273,15 +273,17 @@ mod with_fake_cli {
         assert_eq!(dismissed(&fixture), both);
         // 서비스가 스캔에 넘기는 목록 그대로를 쓴다. 두 후보 모두 빠진다.
         assert!(candidates(&fixture, &home, &dismissed(&fixture)).is_empty());
-        // 끊기 전(=기록 없음)에는 두 폴더가 모두 후보라서, 위 결과가 기록 때문임을 확인한다.
-        let mut expected = vec![default.clone(), managed.clone()];
-        expected.sort();
-        assert_eq!(candidates(&fixture, &home, &[]), expected);
+        // Ojak이 만든 관리 프로필은 휴지통 폴더로 옮겨지고, 기본 프로필은 그대로 남는다.
+        assert!(!managed.exists());
+        assert_eq!(std::fs::read_dir(fixture.service.paths.home.join("trash")).unwrap().count(), 1);
+        assert!(default.exists());
+        // 기록이 없으면 남아 있는 기본 프로필만 후보다. 위 결과가 기록 때문임을 확인한다.
+        assert_eq!(candidates(&fixture, &home, &[]), vec![default.clone()]);
 
         // 명시적 재등록은 그 폴더의 끊김 기록만 푼다. 다른 폴더의 기록은 그대로다.
-        let again: Account = serde_json::from_value(register(&fixture, &managed).unwrap()).unwrap();
-        assert_eq!(dismissed(&fixture), vec![both[0].clone()]);
-        assert_eq!(candidates(&fixture, &home, &dismissed(&fixture)), vec![managed.clone()]);
+        let again: Account = serde_json::from_value(register(&fixture, &default).unwrap()).unwrap();
+        assert_eq!(dismissed(&fixture), vec![both[1].clone()]);
+        assert_eq!(candidates(&fixture, &home, &dismissed(&fixture)), vec![default.clone()]);
         // 다시 끊으면 기록이 중복 없이 돌아온다.
         remove(&fixture, &again.id).unwrap();
         remove(&fixture, &again.id).unwrap_err();
@@ -317,4 +319,30 @@ mod with_fake_cli {
         assert_eq!(moved.profile_path.as_deref(), new.to_str());
         assert_ne!(moved.id, connected.id);
     }
+}
+
+#[test]
+fn remove_drops_the_same_accounts_omp_rows_but_not_other_workspaces() {
+    let fixture = Fixture::new();
+    let now = now_ms();
+    let mut native = account_fixture("native", now);
+    native.tool = "codex".into();
+    native.provider = "openai".into();
+    native.email = Some("a@example.test".into());
+    native.identity_key = Some("openai|email:a@example.test|workspace:w1".into());
+    fixture.save(&native);
+    let omp = |id: &str, workspace: &str| {
+        let mut row = account_fixture(id, now);
+        row.tool = "omp".into();
+        row.provider = "openai".into();
+        row.email = Some("A@example.test".into());
+        row.identity_key = Some(format!("openai-codex|subject:{workspace}|workspace:{workspace}"));
+        row
+    };
+    fixture.save(&omp("same", "w1"));
+    fixture.save(&omp("other", "w2"));
+    let result = remove(&fixture, "native").unwrap();
+    assert_eq!(result["removedObservations"], 1);
+    let left: Vec<String> = accounts(&fixture.service.lock().unwrap().connection).unwrap().into_iter().map(|account| account.id).collect();
+    assert_eq!(left, vec!["other".to_owned()]);
 }

@@ -731,6 +731,10 @@ struct Gateway {
     child: Option<(Child, GatewayJob)>,
     spawned_at: i64,
     unhealthy_until: i64,
+    /// 이 gateway(계정 플랜)가 실제로 내주는 모델 ID(공급자 접두사 제외). sync가 gateway의 `/v1/models`로 채운다.
+    /// 아직 모르면 `None`이고 그때는 거르지 않는다. 같은 공급자라도 플랜마다 모델이 달라(예: Codex free에는 gpt-6.2-astra 없음)
+    /// 모르는 계정에 보내면 `Unknown model`이나 공급자 거절이 난다.
+    models: Option<BTreeSet<String>>,
 }
 impl Gateway {
     fn key(&self) -> String {
@@ -1372,7 +1376,7 @@ impl Bridge {
                 port,
                 child: None,
                 spawned_at: 0,
-                unhealthy_until: 0,
+                unhealthy_until: 0, models: None,
             });
         }
         for gateway in &mut state.gateways {
@@ -1398,12 +1402,46 @@ impl Bridge {
         let running: Vec<String> = state.gateways.iter_mut().filter_map(|gateway| (gateway.running() && (!gateway.api_credit || gateway.provider == "anthropic")).then(|| gateway.provider.clone())).collect();
         let logged_in: Vec<String> = snapshot.providers.iter().cloned().collect();
         let missing = missing_ojak_logins(&logged_in, &running);
+        // 구독 gateway가 실제로 내주는 모델 목록. 잠금 밖에서 읽고(로컬 요청이라 짧다) 읽은 것만 반영한다. 실패하면 이전 값을 둔다.
+        let catalog_targets: Vec<(String, String, u16)> = state.gateways.iter_mut()
+            .filter_map(|gateway| (!gateway.api_credit && gateway.running()).then(|| (gateway.key(), gateway.provider.clone(), gateway.port)))
+            .collect();
         drop(state);
+        if let Some(token) = self.gateway_token() {
+            let catalogs: Vec<(String, BTreeSet<String>)> = catalog_targets.into_iter()
+                .filter_map(|(key, provider, port)| {
+                    let body = http_get(port, "/v1/models", &token).ok()?;
+                    let models = gateway_models(&body, &provider);
+                    (!models.is_empty()).then_some((key, models))
+                })
+                .collect();
+            let mut state = self.state();
+            for (key, models) in catalogs {
+                if let Some(gateway) = state.gateways.iter_mut().find(|gateway| gateway.key() == key) {
+                    gateway.models = Some(models);
+                }
+            }
+        }
         if let Err(message) = upload_ojak_logins(&self.paths, &missing) {
             let mut state = self.state();
             state.error = Some(match state.error.take() {
                 Some(existing) => format!("{existing} {message}"),
                 None => message,
+            });
+        }
+        // 예전 버전이 sync마다 쌓은 같은 공급자의 Ojak 로그인 중복은 최신 하나만 남기고 끈다.
+        // broker의 disable은 건당 수 초가 걸릴 수 있어(수천 건이면 수십 분) sync를 막지 않게 별도 스레드 하나에서만 처리한다.
+        static CLEANING: AtomicBool = AtomicBool::new(false);
+        if !snapshot.duplicate_ojak.is_empty() && !CLEANING.swap(true, Ordering::SeqCst) {
+            let ids = snapshot.duplicate_ojak.clone();
+            std::thread::spawn(move || {
+                if let Some(token) = broker_token() {
+                    let cause = json!({"cause": "duplicate Ojak login"}).to_string();
+                    for id in ids {
+                        let _ = broker_post(&format!("/v1/credential/{id}/disable"), &token, &cause);
+                    }
+                }
+                CLEANING.store(false, Ordering::SeqCst);
             });
         }
     }
@@ -1731,7 +1769,7 @@ impl Bridge {
         respond(client, 200, &json!({ "providers": providers }));
     }
 
-    fn candidates(&self, provider: &str, accounts: &[Account], pins: &BTreeMap<String, String>, paid: &PaidPolicy, now: i64) -> Vec<(Candidate, u16)> {
+    fn candidates(&self, provider: &str, model: &str, accounts: &[Account], pins: &BTreeMap<String, String>, paid: &PaidPolicy, now: i64) -> Vec<(Candidate, u16)> {
         let pin = pins
             .get(aam_protocol::pin_provider(provider))
             .and_then(|id| accounts.iter().find(|account| &account.id == id));
@@ -1779,7 +1817,9 @@ impl Bridge {
                     Candidate { key: gateway.key(), buckets: Vec::new(), healthy, enabled: usable, pinned: false, paid_fallback: usable.then_some(paid.api_fresh_ms), api_credit: true, api_used, api_pool, proactive, balanced: paid.balanced_mode, use_before_reset_ms: 0 }
                 } else {
                     let (buckets, enabled, pinned, paid_fallback) = account_view(gateway, accounts, pin, paid, now);
-                    Candidate { key: gateway.key(), buckets, healthy, enabled, pinned, paid_fallback, api_credit: false, api_used: 0.0, api_pool: None, proactive: None, balanced: paid.balanced_mode, use_before_reset_ms: paid.use_before_reset_ms }
+                    // 이 계정 플랜이 요청 모델을 내주지 않으면 이 요청에서는 배정하지 않는다(배정 제외와 같게 다룬다).
+                    let serves = gateway.models.as_ref().is_none_or(|models| models.contains(model));
+                    Candidate { key: gateway.key(), buckets, healthy, enabled: enabled && serves, pinned, paid_fallback, api_credit: false, api_used: 0.0, api_pool: None, proactive: None, balanced: paid.balanced_mode, use_before_reset_ms: paid.use_before_reset_ms }
                 };
                 (candidate, gateway.port)
             })
@@ -1855,7 +1895,7 @@ impl Bridge {
         let mut last_limited: Option<Vec<u8>> = None;
         loop {
             let now = now_ms();
-            let mut candidates = self.candidates(&provider, &accounts, &pins, &paid, now);
+            let mut candidates = self.candidates(&provider, &model, &accounts, &pins, &paid, now);
             // 구독을 모두 끄거나 API만 연결한 Claude 요청은 구독 로그인 없이 허용한다.
             // 활성 구독의 gateway가 사라진 것은 소진이 아니라 인증·연결 장애이므로 API로 가리지 않는다.
             let no_subscription = candidates.iter().all(|(candidate, _)| candidate.api_credit);
@@ -1888,7 +1928,7 @@ impl Bridge {
             for _ in 0..20 {
                 if tried.is_empty() && candidates.iter().any(|(c, _)| !c.healthy) && self.starting_up(now) {
                     std::thread::sleep(Duration::from_millis(500));
-                    candidates = self.candidates(&provider, &accounts, &pins, &paid, now_ms());
+                    candidates = self.candidates(&provider, &model, &accounts, &pins, &paid, now_ms());
                 } else {
                     break;
                 }
@@ -2334,6 +2374,8 @@ fn account_view(gateway: &Gateway, accounts: &[Account], pin: Option<&Account>, 
 struct BrokerIdentities {
     oauth: Vec<(String, String)>,
     providers: BTreeSet<String>,
+    /// 같은 Ojak 공급자에 중복으로 쌓인 브릿지 로그인 id(최신 하나 제외).
+    duplicate_ojak: Vec<u64>,
 }
 
 /// broker snapshot에서 공급자와 identityKey만 꺼낸다. 토큰 등 나머지 값은 보관하지 않는다.
@@ -2426,7 +2468,7 @@ fn parse_broker_identities(body: &Value) -> Result<BrokerIdentities, String> {
     }
     oauth.sort();
     oauth.dedup();
-    Ok(BrokerIdentities { oauth, providers })
+    Ok(BrokerIdentities { oauth, providers, duplicate_ojak: duplicate_ojak_logins(rows) })
 }
 
 /// gateway가 쓸 broker URL과 토큰. 공식 CLI 계정은 서비스의 내부 loopback listener를 가리킨다.
@@ -2468,7 +2510,9 @@ fn spawn_gateway(paths: &Paths, gateway: &Gateway, providers: &BTreeSet<String>)
     let omp = native_omp().ok_or("원래 omp 실행 파일 경로를 확인하지 못했어요.")?;
     let (broker_url, broker) = gateway_broker(paths, gateway)?;
     let root = paths.home.join("bridge");
-    let agent = root.join("agent");
+    // 모델 목록 캐시(models.db)는 계정 플랜마다 다르다. 폴더를 같이 쓰면 한 계정(예: free)이 받은 짧은 목록이
+    // 같은 공급자의 다른 계정(pro) gateway에도 쓰여 `Unknown model`이 난다. 그래서 gateway 계정마다 따로 둔다.
+    let agent = root.join("agent").join(account_key(&gateway.key()));
     let pools = root.join("pools");
     let logs = paths.home.join("logs");
     for dir in [&agent, &pools, &logs] {
@@ -3376,6 +3420,49 @@ fn broker_post(path: &str, token: &str, body: &str) -> Result<(), ()> {
     if head.starts_with("HTTP/1.1 200") || head.starts_with("HTTP/1.0 200") { Ok(()) } else { Err(()) }
 }
 
+/// 지운 계정과 같은 omp 원래 공급자 로그인(이메일+조직)을 broker에서 끈다. 끈 개수를 돌려준다.
+/// 끈 자격 증명은 omp가 더 쓰지 않고 snapshot에도 나오지 않는다. 실패는 0으로 본다(계정 삭제는 이미 끝났다).
+pub(crate) fn disable_omp_logins(provider: &str, email: &str, workspace: &str) -> usize {
+    let broker_provider = match provider {
+        "anthropic" => "anthropic",
+        "openai" => "openai-codex",
+        _ => return 0,
+    };
+    let Some(token) = broker_token() else { return 0 };
+    let Ok(body) = http_get(BROKER_PORT, "/v1/snapshot", &token) else { return 0 };
+    let identity = format!("email:{email}|org:{workspace}");
+    let ids = body.get("credentials").and_then(Value::as_array).into_iter().flatten()
+        .filter(|row| row.get("provider").and_then(Value::as_str) == Some(broker_provider)
+            && row.get("identityKey").and_then(Value::as_str).is_some_and(|key| key.eq_ignore_ascii_case(&identity)))
+        .filter_map(|row| row.get("id").and_then(Value::as_u64));
+    let cause = json!({"cause": "removed in Ojak"}).to_string();
+    ids.filter(|id| broker_post(&format!("/v1/credential/{id}/disable"), &token, &cause).is_ok()).count()
+}
+
+/// gateway `/v1/models` 응답에서 그 gateway 공급자의 모델 ID만 접두사 없이 꺼낸다(`openai-codex/gpt-6.2-astra` → `gpt-6.2-astra`).
+fn gateway_models(body: &Value, provider: &str) -> BTreeSet<String> {
+    let prefix = format!("{provider}/");
+    body.get("data").and_then(Value::as_array).into_iter().flatten()
+        .filter_map(|row| row.get("id").and_then(Value::as_str)?.strip_prefix(&prefix).map(str::to_owned))
+        .collect()
+}
+
+/// 같은 Ojak 공급자의 브릿지 로그인이 여러 개면 가장 최근 것만 남길 id 목록(끌 대상). 브릿지 로그인은 같은 토큰이라 하나면 된다.
+fn duplicate_ojak_logins(rows: &[Value]) -> Vec<u64> {
+    let mut newest: BTreeMap<&str, u64> = BTreeMap::new();
+    let mut all = Vec::new();
+    for row in rows {
+        let (Some(provider), Some(id)) = (row.get("provider").and_then(Value::as_str), row.get("id").and_then(Value::as_u64)) else { continue };
+        if !ALIASES.iter().any(|(alias, _)| *alias == provider) {
+            continue;
+        }
+        all.push((provider, id));
+        let entry = newest.entry(provider).or_insert(id);
+        *entry = (*entry).max(id);
+    }
+    all.into_iter().filter(|(provider, id)| newest.get(provider) != Some(id)).map(|(_, id)| id).collect()
+}
+
 
 fn dechunk(mut body: &[u8]) -> Vec<u8> {
     let mut out = Vec::new();
@@ -4160,6 +4247,17 @@ mod tests {
     }
 
     #[test]
+    fn duplicate_ojak_logins_keep_only_the_newest_per_provider() {
+        let rows = vec![
+            json!({"id": 20, "provider": "ojak-codex"}), json!({"id": 31, "provider": "ojak-codex"}),
+            json!({"id": 25, "provider": "ojak-claude"}), json!({"id": 2, "provider": "openai-codex"}),
+            json!({"id": 15, "provider": "aam-claude"}),
+        ];
+        // 원래 공급자 로그인과 이전 aam-* 로그인은 건드리지 않는다.
+        assert_eq!(duplicate_ojak_logins(&rows), vec![20]);
+    }
+
+    #[test]
     fn missing_ojak_logins_follow_running_upstreams_and_skip_existing() {
         let owned = |items: &[&str]| items.iter().map(|item| (*item).to_owned()).collect::<Vec<_>>();
         let logged_in = owned(&["anthropic", "openai-codex", "google-antigravity", "xai-oauth", "ojak-codex"]);
@@ -4177,7 +4275,7 @@ mod tests {
         let gateway = Gateway {
             provider: "xai-oauth".into(), identity: "account:subject-a".into(),
             email: "account:subject-a".into(), org: String::new(), native_account: None, api_credit: false, native_port: 0,
-            port: 0, child: None, spawned_at: 0, unhealthy_until: 0,
+            port: 0, child: None, spawned_at: 0, unhealthy_until: 0, models: None,
         };
         let account = Account {
             id: "grok-a".into(), tool: "omp".into(), provider: "xai".into(),
@@ -4208,7 +4306,7 @@ mod tests {
     fn anthropic_gateway() -> Gateway {
         Gateway {
             provider: "anthropic".into(), identity: "person@example.test".into(), email: "person@example.test".into(), org: String::new(),
-            native_account: None, api_credit: false, native_port: 0, port: 0, child: None, spawned_at: 0, unhealthy_until: 0,
+            native_account: None, api_credit: false, native_port: 0, port: 0, child: None, spawned_at: 0, unhealthy_until: 0, models: None,
         }
     }
 
@@ -4386,7 +4484,7 @@ mod tests {
         let paths = Paths { socket: home.join("service.sock"), database: home.join("state.db"), profiles: home.join("profiles"), home: home.clone() };
         let mut gateway = Gateway {
             provider: "anthropic".into(), identity: "email:a@example.test|org:a".into(), email: String::new(), org: String::new(),
-            native_account: Some("acc-1".into()), api_credit: false, native_port: 49_321, port: 4101, child: None, spawned_at: 0, unhealthy_until: 0,
+            native_account: Some("acc-1".into()), api_credit: false, native_port: 49_321, port: 4101, child: None, spawned_at: 0, unhealthy_until: 0, models: None,
         };
         let (url, token) = gateway_broker(&paths, &gateway).unwrap();
         assert_eq!(url, "http://127.0.0.1:49321/native/acc-1");
@@ -4596,7 +4694,7 @@ mod tests {
         }
         let make = |provider: &str, identity: &str, native: Option<&str>, port: u16| Gateway {
             provider: provider.into(), identity: identity.into(), email: String::new(), org: String::new(),
-            native_account: native.map(str::to_owned), api_credit: false, native_port: port, port: 4101, child: None, spawned_at: 0, unhealthy_until: 0,
+            native_account: native.map(str::to_owned), api_credit: false, native_port: port, port: 4101, child: None, spawned_at: 0, unhealthy_until: 0, models: None,
         };
         let mut gateways = vec![
             make("anthropic", "email:a|org:a", Some("a"), 5000),
@@ -4699,7 +4797,7 @@ mod tests {
         };
         h.bridge.state().gateways.push(Gateway {
             provider: "anthropic".into(), identity: format!("email:synthetic-{port}@example.test|org:o"), email: format!("synthetic-{port}@example.test"),
-            org: "o".into(), native_account: None, api_credit: false, native_port: 0, port, child: Some(child), spawned_at: 0, unhealthy_until: 0,
+            org: "o".into(), native_account: None, api_credit: false, native_port: 0, port, child: Some(child), spawned_at: 0, unhealthy_until: 0, models: None,
         });
         Synthetic { release, held, served }
     }
@@ -4741,7 +4839,7 @@ mod tests {
             let gateway = |name: &str| Gateway {
                 provider: "anthropic".into(), identity: format!("email:{name}@example.test|org:o"),
                 email: format!("{name}@example.test"), org: "o".into(), native_account: None,
-                api_credit: false, native_port: 0, port: free_port(), child: None, spawned_at: 0, unhealthy_until: 0,
+                api_credit: false, native_port: 0, port: free_port(), child: None, spawned_at: 0, unhealthy_until: 0, models: None,
             };
             let first = gateway("first");
             let second = gateway("second");
@@ -4806,14 +4904,14 @@ mod tests {
             }
             let gateway = Gateway {
                 provider: "anthropic".into(), identity: "email:recovery@example.test|org:o".into(), email: "recovery@example.test".into(), org: "o".into(),
-                native_account: Some(subscription.id.clone()), api_credit: false, native_port: 1, port: free_port(), child: None, spawned_at: 0, unhealthy_until: 0,
+                native_account: Some(subscription.id.clone()), api_credit: false, native_port: 1, port: free_port(), child: None, spawned_at: 0, unhealthy_until: 0, models: None,
             };
             let sub_key = gateway.key();
             let sub_served = scripted_gateway(&h, gateway, b"HTTP/1.1 200 OK\r\nContent-Type: text/event-stream\r\nConnection: close\r\n\r\ndata: {\"type\":\"done\",\"message\":{\"content\":[{\"type\":\"text\",\"text\":\"subscription-recovered\"}]}}\n\n");
             let api_served = scripted_gateway(&h, Gateway {
                 provider: "anthropic".into(), identity: aam_adapters::api_credit::identity_key(aam_adapters::api_credit::ApiProvider::Anthropic, &key),
                 email: String::new(), org: String::new(), native_account: Some("api-recovery".into()), api_credit: true,
-                native_port: 1, port: free_port(), child: None, spawned_at: 0, unhealthy_until: 0,
+                native_port: 1, port: free_port(), child: None, spawned_at: 0, unhealthy_until: 0, models: None,
             }, b"HTTP/1.1 200 OK\r\nContent-Type: text/event-stream\r\nConnection: close\r\n\r\ndata: {\"type\":\"done\",\"message\":{\"content\":[{\"type\":\"text\",\"text\":\"api-recovery-answer\"}],\"usage\":{\"input\":1,\"output\":1,\"cacheRead\":0,\"cacheWrite\":0,\"totalTokens\":2}}}\n\n");
             let scope = quota_response_scope("anthropic", model, &subscription.buckets, now, FRESH);
             assert_eq!(scope.as_deref(), if basis == "shared" { None } else { Some("sonnet") });
@@ -4869,7 +4967,7 @@ mod tests {
         let served = scripted_gateway(&h, Gateway {
             provider: "anthropic".into(), identity: aam_adapters::api_credit::identity_key(aam_adapters::api_credit::ApiProvider::Anthropic, &key),
             email: String::new(), org: String::new(), native_account: Some("api-only".into()), api_credit: true,
-            native_port: 1, port: free_port(), child: None, spawned_at: 0, unhealthy_until: 0,
+            native_port: 1, port: free_port(), child: None, spawned_at: 0, unhealthy_until: 0, models: None,
         }, b"HTTP/1.1 200 OK\r\nContent-Type: text/event-stream\r\nConnection: close\r\n\r\ndata: {\"type\":\"done\",\"message\":{\"content\":[{\"type\":\"text\",\"text\":\"api-answer\"}],\"usage\":{\"input\":10,\"output\":1,\"cacheRead\":0,\"cacheWrite\":0,\"totalTokens\":11}}}\n\n");
         let body = json!({"modelId":"claude-sonnet-5-5","options":{"model":{"id":"claude-sonnet-5-5","provider":"anthropic"}}}).to_string();
         let request = format!("POST /v1/pi/stream HTTP/1.1\r\nHost: localhost\r\nAuthorization: Bearer {}\r\nX-Ojak-Admission: 1\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}", h.public_token, body.len());
@@ -4945,13 +5043,13 @@ mod tests {
                 crate::store::save_account(&h.bridge.service.lock().unwrap().connection, &account).unwrap();
                 served_subscriptions.push(scripted_gateway(&h, Gateway {
                     provider: "anthropic".into(), identity: format!("email:{name}@example.test|org:o"), email: format!("{name}@example.test"), org: "o".into(),
-                    native_account: Some(name.into()), api_credit: false, native_port: 1, port: free_port(), child: None, spawned_at: 0, unhealthy_until: 0,
+                    native_account: Some(name.into()), api_credit: false, native_port: 1, port: free_port(), child: None, spawned_at: 0, unhealthy_until: 0, models: None,
                 }, response.clone()));
             }
             let served_api = scripted_gateway(&h, Gateway {
                 provider: "anthropic".into(), identity: aam_adapters::api_credit::identity_key(aam_adapters::api_credit::ApiProvider::Anthropic, &key),
                 email: String::new(), org: String::new(), native_account: Some("api".into()), api_credit: true,
-                native_port: 1, port: free_port(), child: None, spawned_at: 0, unhealthy_until: 0,
+                native_port: 1, port: free_port(), child: None, spawned_at: 0, unhealthy_until: 0, models: None,
             }, format!("{head}data: {{\"type\":\"done\",\"message\":{{\"content\":[{{\"type\":\"text\",\"text\":\"paid-sonnet\"}}],\"usage\":{{\"input\":1,\"output\":1,\"cacheRead\":0,\"cacheWrite\":0,\"totalTokens\":2}}}}}}\n\n"));
             {
                 let store = h.bridge.service.lock().unwrap();
@@ -5000,11 +5098,11 @@ mod tests {
         const API: &[u8] = b"HTTP/1.1 200 OK\r\nContent-Type: text/event-stream\r\nConnection: close\r\n\r\ndata: {\"type\":\"start\"}\n\ndata: {\"type\":\"done\",\"reason\":\"stop\",\"message\":{\"role\":\"assistant\",\"content\":[{\"type\":\"text\",\"text\":\"ok\"}],\"api\":\"anthropic-messages\",\"provider\":\"anthropic\",\"model\":\"claude-opus-5-5\",\"usage\":{\"input\":1000000,\"output\":100000,\"cacheRead\":2000000,\"cacheWrite\":0,\"totalTokens\":3100000,\"cost\":{\"input\":0.0,\"output\":0.0,\"cacheRead\":0.0,\"cacheWrite\":0.0,\"total\":0.0}},\"stopReason\":\"stop\",\"timestamp\":1}}\n\ndata: [DONE]\n\n";
         let sub_served = scripted_gateway(&h, Gateway {
             provider: "anthropic".into(), identity: "email:sub@example.test|org:o".into(), email: "sub@example.test".into(), org: "o".into(),
-            native_account: None, api_credit: false, native_port: 0, port: free_port(), child: None, spawned_at: 0, unhealthy_until: 0,
+            native_account: None, api_credit: false, native_port: 0, port: free_port(), child: None, spawned_at: 0, unhealthy_until: 0, models: None,
         }, SUB);
         let api_served = scripted_gateway(&h, Gateway {
             provider: "anthropic".into(), identity: aam_adapters::api_credit::identity_key(aam_adapters::api_credit::ApiProvider::Anthropic, &key), email: String::new(), org: String::new(),
-            native_account: Some("api-e".into()), api_credit: true, native_port: 1, port: free_port(), child: None, spawned_at: 0, unhealthy_until: 0,
+            native_account: Some("api-e".into()), api_credit: true, native_port: 1, port: free_port(), child: None, spawned_at: 0, unhealthy_until: 0, models: None,
         }, API);
         let request = |session: &str| {
             let body = json!({"modelId": OPUS, "options": {"model": {"id": OPUS, "provider": "anthropic"}, "sessionId": session}}).to_string();
@@ -5812,7 +5910,7 @@ mod tests {
         for id in ["key-a", "key-b"] {
             h.bridge.state().gateways.push(Gateway {
                 provider: "anthropic".into(), identity: format!("apikey:{id}"), email: String::new(), org: String::new(),
-                native_account: Some(id.into()), api_credit: true, native_port: 1, port: free_port(), child: None, spawned_at: 0, unhealthy_until: 0,
+                native_account: Some(id.into()), api_credit: true, native_port: 1, port: free_port(), child: None, spawned_at: 0, unhealthy_until: 0, models: None,
             });
         }
         let policy = aam_protocol::Policy {
@@ -5829,7 +5927,7 @@ mod tests {
         };
         let paid = PaidPolicy::of(&policy, scheduler::ApiLedger { removed_usd: 500.0, ..Default::default() });
         let view = |accounts: &[Account]| -> Vec<(bool, bool)> {
-            h.bridge.candidates("anthropic", accounts, &BTreeMap::new(), &paid, now).into_iter().map(|(candidate, _)| (candidate.enabled, candidate.proactive.is_some())).collect()
+            h.bridge.candidates("anthropic", "claude-opus-5-5", accounts, &BTreeMap::new(), &paid, now).into_iter().map(|(candidate, _)| (candidate.enabled, candidate.proactive.is_some())).collect()
         };
         let both_below = [api_account("key-a", Some(150.0), now), api_account("key-b", Some(150.0), now)];
         assert_eq!(view(&both_below), [(true, true), (true, true)]);
@@ -5844,7 +5942,7 @@ mod tests {
         let now = now_ms();
         h.bridge.state().gateways.push(Gateway {
             provider: "openai".into(), identity: "openai-apikey:key-o".into(), email: String::new(), org: String::new(),
-            native_account: Some("key-o".into()), api_credit: true, native_port: 1, port: free_port(), child: None, spawned_at: 0, unhealthy_until: 0,
+            native_account: Some("key-o".into()), api_credit: true, native_port: 1, port: free_port(), child: None, spawned_at: 0, unhealthy_until: 0, models: None,
         });
         let key = Account { provider: "openai".into(), ..api_account("key-o", Some(0.0), now) };
         let view = |openai: bool, expires_at: i64| -> Vec<(bool, bool)> {
@@ -5861,11 +5959,31 @@ mod tests {
                 ..aam_protocol::Policy::default()
             };
             let paid = PaidPolicy::of(&policy, scheduler::ApiLedger::default());
-            h.bridge.candidates("openai-codex", std::slice::from_ref(&key), &BTreeMap::new(), &paid, now).into_iter().map(|(candidate, _)| (candidate.enabled, candidate.proactive.is_some())).collect()
+            h.bridge.candidates("openai-codex", "gpt-6-astra", std::slice::from_ref(&key), &BTreeMap::new(), &paid, now).into_iter().map(|(candidate, _)| (candidate.enabled, candidate.proactive.is_some())).collect()
         };
         assert_eq!(view(true, now + 4 * DAY), [(true, true)]);
         assert_eq!(view(false, now + 4 * DAY), [(false, false)]);
         assert_eq!(view(true, now - DAY), [(false, false)]);
+    }
+
+    /// 같은 공급자라도 플랜마다 내주는 모델이 다르다. gateway 목록에 없는 모델은 그 계정에 배정하지 않고, 목록을 아직 모르면 거르지 않는다.
+    #[test]
+    fn bridge_candidates_skip_accounts_whose_plan_does_not_serve_the_model() {
+        let h = harness(Duration::from_secs(10));
+        let now = now_ms();
+        let free = gateway_models(&json!({"data": [{"id": "openai-codex/gpt-6-luna"}, {"id": "openai/gpt-4o"}]}), "openai-codex");
+        assert_eq!(free, BTreeSet::from(["gpt-6-luna".to_owned()]));
+        for (identity, models) in [("email:pro@example.test|org:p", None), ("email:free@example.test|org:f", Some(free))] {
+            h.bridge.state().gateways.push(Gateway {
+                provider: "openai-codex".into(), identity: identity.into(), email: String::new(), org: String::new(),
+                native_account: None, api_credit: false, native_port: 0, port: free_port(), child: None, spawned_at: 0, unhealthy_until: 0, models,
+            });
+        }
+        let enabled = |model: &str| -> Vec<bool> {
+            h.bridge.candidates("openai-codex", model, &[], &BTreeMap::new(), &PaidPolicy::default(), now).into_iter().map(|(candidate, _)| candidate.enabled).collect()
+        };
+        assert_eq!(enabled("gpt-6.2-astra"), [true, false]);
+        assert_eq!(enabled("gpt-6-luna"), [true, true]);
     }
 
     /// 잔액 소진 차단은 다음 달까지 걸리지만, 사용자가 그 키의 크레딧 금액·기간을 새로 확인해 저장하면 풀린다.
@@ -5880,7 +5998,7 @@ mod tests {
             crate::store::save_account(&h.bridge.service.lock().unwrap().connection, &account).unwrap();
             h.bridge.state().gateways.push(Gateway {
                 provider: "openai".into(), identity: format!("openai-apikey:{id}"), email: String::new(), org: String::new(),
-                native_account: Some(id.into()), api_credit: true, native_port: 1, port: free_port(), child: None, spawned_at: 0, unhealthy_until: 0,
+                native_account: Some(id.into()), api_credit: true, native_port: 1, port: free_port(), child: None, spawned_at: 0, unhealthy_until: 0, models: None,
             });
         }
         let until = api_key::next_period_start(now);
@@ -6015,7 +6133,7 @@ mod tests {
             let refresh = post(h.native, "/native/api-c/v1/credential/1/refresh", &h.native_token, "");
             let gateway = Gateway {
                 provider: "anthropic".into(), identity: aam_adapters::api_credit::identity_key(aam_adapters::api_credit::ApiProvider::Anthropic, &key), email: String::new(), org: String::new(),
-                native_account: Some("api-c".into()), api_credit: true, native_port: 1, port: 4998, child: None, spawned_at: 0, unhealthy_until: 0,
+                native_account: Some("api-c".into()), api_credit: true, native_port: 1, port: 4998, child: None, spawned_at: 0, unhealthy_until: 0, models: None,
             };
             let spawned = spawn_gateway(&h.bridge.paths, &gateway, &BTreeSet::new());
             std::env::remove_var(name);
@@ -6087,7 +6205,7 @@ mod tests {
         let identity = aam_adapters::api_credit::identity_key(aam_adapters::api_credit::ApiProvider::Anthropic, &key);
         h.bridge.state().gateways.push(Gateway {
             provider: "anthropic".into(), identity: identity.clone(), email: String::new(), org: String::new(),
-            native_account: Some("api-2".into()), api_credit: true, native_port: 1, port: 4999, child: None, spawned_at: 0, unhealthy_until: 0,
+            native_account: Some("api-2".into()), api_credit: true, native_port: 1, port: 4999, child: None, spawned_at: 0, unhealthy_until: 0, models: None,
         });
         let gateway_key = format!("anthropic|{identity}");
         assert_eq!(h.bridge.api_account_id(&gateway_key).as_deref(), Some("api-2"));

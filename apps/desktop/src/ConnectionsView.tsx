@@ -128,6 +128,7 @@ function accountState(account: Account, staleAfter: number, summary?: AccountQuo
 function ToolPanel({ tool, snapshot, masked, online, shimInstalled, onAdd, onReload }: { tool: "claude" | "codex"; snapshot: Snapshot; masked: boolean; online: boolean; shimInstalled: boolean | null; onAdd: (tool: string) => void; onReload: () => Promise<void> }) {
   const [login, setLogin] = useState<LoginRequest | null>(null);
   const [removing, setRemoving] = useState<Account | null>(null);
+  const [removeOmpLogin, setRemoveOmpLogin] = useState(false);
   const rowAction = useAction();
   const removeAction = useAction();
   const status = snapshot.tools.find(item => item.id === tool);
@@ -144,7 +145,7 @@ function ToolPanel({ tool, snapshot, masked, online, shimInstalled, onAdd, onRel
   };
   const remove = (account: Account) => {
     void removeAction.run(
-      async () => { const result = await rpc<{ id: string; removedRoutes: number }>("account.remove", { id: account.id }); setRemoving(null); await onReload(); return result; },
+      async () => { const result = await rpc<{ id: string; removedRoutes: number }>("account.remove", { id: account.id, ompLogin: removeOmpLogin }); setRemoving(null); setRemoveOmpLogin(false); await onReload(); return result; },
       result => t(result.removedRoutes > 0 ? "account.remove.doneRoutes" : "account.remove.done", { name: accountName(account), count: result.removedRoutes }),
     );
   };
@@ -170,6 +171,7 @@ function ToolPanel({ tool, snapshot, masked, online, shimInstalled, onAdd, onRel
           <li>{t("account.remove.routes")}</li>
           <li>{t("account.remove.noAutoAdd")}</li>
         </ul>
+        <label className="grant-confirm"><input type="checkbox" checked={removeOmpLogin} onChange={event => setRemoveOmpLogin(event.target.checked)} /><span>{t("account.remove.ompLogin")}</span></label>
         <p className="field-help">{t("account.remove.reconnect")}</p>
         <ActionFeedback error={removeAction.error} message={null} />
       </div>
