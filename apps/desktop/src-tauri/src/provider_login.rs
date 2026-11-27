@@ -39,9 +39,11 @@ pub fn start_provider_login(provider: String, account_id: Option<String>, label:
     let mut jobs = JOBS.lock().map_err(|_| unavailable())?;
     for job in jobs.values() {
         let job = job.lock().map_err(|_| unavailable())?;
-        if !terminal(&job.status.state) && job.status.provider == provider {
-            if job.status.target_account_id == account_id { return Ok(job.status.clone()); }
-            return Err(ApiError::new("LOGIN_BUSY", "이 공급자의 다른 로그인이 진행 중이에요. 먼저 완료하거나 취소해 주세요."));
+        if job.status.provider != provider { continue; }
+        match existing_job(&provider, &job.status.state, &job.status.target_account_id, &account_id) {
+            Some(true) => return Ok(job.status.clone()),
+            Some(false) => return Err(ApiError::new("LOGIN_BUSY", "이 공급자의 다른 로그인이 진행 중이에요. 먼저 완료하거나 취소해 주세요.")),
+            None => {}
         }
     }
     let mut command = Command::new(super::launcher()?);
@@ -116,6 +118,15 @@ pub fn cancel_provider_login(id: String) -> Result<Status, ApiError> {
     Ok(job.status.clone())
 }
 
+/// What an unfinished job of the same provider means for a new request: `Some(true)` attach to it, `Some(false)` busy, `None` ignore.
+/// Claude·Codex register the account before `syncing` and hold no browser or profile after it, so a syncing job only claims its own
+/// existing-account target. omp providers (xAI·Google) identify the account only at the end of `syncing`, so they stay exclusive until terminal.
+fn existing_job(provider: &str, state: &str, target: &Option<String>, requested: &Option<String>) -> Option<bool> {
+    let registered = state == "syncing" && matches!(provider, "anthropic" | "openai-codex");
+    if terminal(state) || (registered && (requested.is_none() || target != requested)) { return None; }
+    Some(target == requested)
+}
+
 fn login_error(event: &Value) -> ApiError {
     let code = event.get("error").and_then(|e| e.get("code")).and_then(Value::as_str)
         .filter(|s| s.len() <= 64 && !s.is_empty() && s.bytes().all(|c| c.is_ascii_uppercase() || c.is_ascii_digit() || c == b'_')).unwrap_or("LOGIN_FAILED");
@@ -129,6 +140,21 @@ fn login_error(event: &Value) -> ApiError {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_registered_login_still_syncing_does_not_block_the_next_account() {
+        let a = Some("a".to_owned());
+        let b = Some("b".to_owned());
+        assert_eq!(existing_job("anthropic", "syncing", &a, &b), None);
+        assert_eq!(existing_job("openai-codex", "syncing", &None, &None), None);
+        assert_eq!(existing_job("anthropic", "syncing", &a, &a), Some(true));
+        assert_eq!(existing_job("anthropic", "waiting", &a, &b), Some(false));
+        assert_eq!(existing_job("anthropic", "verifying", &None, &None), Some(true));
+        assert_eq!(existing_job("anthropic", "succeeded", &a, &b), None);
+        // omp는 syncing 끝에서야 계정을 확정하므로 끝날 때까지 다른 로그인을 막는다.
+        assert_eq!(existing_job("xai-oauth", "syncing", &a, &b), Some(false));
+        assert_eq!(existing_job("google-antigravity", "syncing", &None, &None), Some(true));
+    }
 
     #[test]
     fn recoverable_login_failure_allows_retry_without_exposing_provider_secrets() {

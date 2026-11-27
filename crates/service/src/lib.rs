@@ -316,6 +316,37 @@ struct AccountUpdate {
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 struct AccountRemove {
     id: String,
+    /// 같은 계정의 omp 로그인(원래 공급자 자격 증명)도 broker에서 끈다. 기본은 끄지 않는다.
+    #[serde(default)]
+    omp_login: bool,
+}
+/// 지운 공식 CLI 계정의 이메일·워크스페이스. identity 키(`<공급자>|email:<e>|workspace:<w>`)에서 읽는다.
+fn identity_parts(identity: &str) -> Option<(String, String)> {
+    let email = identity.split('|').find_map(|part| part.strip_prefix("email:"))?;
+    let workspace = identity.split('|').find_map(|part| part.strip_prefix("workspace:"))?;
+    (!email.is_empty() && !workspace.is_empty()).then(|| (email.to_lowercase(), workspace.to_owned()))
+}
+/// omp가 보고한 같은 계정 관측 행인지. 이메일만 같은 다른 워크스페이스는 다른 계정이다.
+fn same_omp_account(row: &Account, provider: &str, email: &str, workspace: &str) -> bool {
+    let workspace = format!("workspace:{workspace}");
+    row.tool == "omp"
+        && row.provider == provider
+        && row.email.as_deref().is_some_and(|value| value.eq_ignore_ascii_case(email))
+        && row.identity_key.as_deref().is_some_and(|key| key.split('|').any(|part| part == workspace))
+}
+/// Ojak이 만든 관리 프로필이면 지우지 않고 `AAM_HOME/trash`로 옮긴다(대화 기록 보존). 기본 프로필은 건드리지 않는다.
+fn trash_managed_profile(paths: &Paths, profile: &str) -> bool {
+    let profile = std::path::Path::new(profile);
+    let Some(managed) = paths.profiles.canonicalize().ok() else { return false };
+    if profile.parent().and_then(|parent| parent.canonicalize().ok()).as_deref() != Some(managed.as_path()) {
+        return false;
+    }
+    let Some(name) = profile.file_name() else { return false };
+    let trash = paths.home.join("trash");
+    if std::fs::create_dir_all(&trash).is_err() {
+        return false;
+    }
+    std::fs::rename(profile, trash.join(format!("{}-{}", name.to_string_lossy(), now_ms()))).is_ok()
 }
 #[derive(Deserialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
@@ -1255,6 +1286,15 @@ impl Service {
         tx.execute("DELETE FROM accounts WHERE id=?1", [&removed.id]).map_err(db_error)?;
         let mut current_policy = policy(&tx)?;
         let mut changed = forget_account(&mut current_policy, &removed.id);
+        // 같은 계정을 omp가 보고한 관측 행도 함께 지운다(이메일+워크스페이스가 같을 때만).
+        let parts = removed.identity_key.as_deref().and_then(identity_parts);
+        let mut removed_observations = 0;
+        if let Some((email, workspace)) = &parts {
+            for row in accounts(&tx)?.iter().filter(|row| same_omp_account(row, &removed.provider, email, workspace)) {
+                removed_observations += tx.execute("DELETE FROM accounts WHERE id=?1", [&row.id]).map_err(db_error)?;
+                changed |= forget_account(&mut current_policy, &row.id);
+            }
+        }
         let routes = current_policy.project_routes.len();
         current_policy
             .project_routes
@@ -1296,7 +1336,18 @@ impl Service {
             aam_adapters::api_credit::delete_key(&removed.id)?;
         }
         self.reset_web.drop_account(&removed.id);
-        Ok(serde_json::json!({"id": removed.id, "removedRoutes": removed_routes}))
+        let profile_trashed = removed.profile_path.as_deref().is_some_and(|path| trash_managed_profile(&self.paths, path));
+        let omp_logins = match (&parts, request.omp_login) {
+            (Some((email, workspace)), true) => bridge::disable_omp_logins(&removed.provider, email, workspace),
+            _ => 0,
+        };
+        Ok(serde_json::json!({
+            "id": removed.id,
+            "removedRoutes": removed_routes,
+            "removedObservations": removed_observations,
+            "profileTrashed": profile_trashed,
+            "ompLoginsRemoved": omp_logins,
+        }))
     }
     fn register(&self, request: Register) -> Result<Account, ApiError> {
         if request.label.is_empty()

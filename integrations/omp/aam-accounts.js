@@ -150,6 +150,23 @@ export function lastAdmission(ctx) {
   }
 }
 
+// A terminal provider refusal is a known outcome, not proof the request was never sent.
+export function classifySubmittedError(error) {
+  if (error.stopDetails?.type === 'refusal') {
+    // The installed omp fork recognizes this code as a veto on retries and model fallback.
+    error.errorCode = 'BRIDGE_ADMISSION_STOPPED';
+    error.errorType = 'refusal';
+    error.errorMessage ||= '공급자가 정책에 따라 이 요청을 거절했어요.';
+    error.errorClassificationMessage = error.errorMessage;
+    return 'rejected';
+  }
+  error.errorType = 'execution_unknown';
+  error.errorCode = 'BRIDGE_EXECUTION_UNKNOWN';
+  error.errorMessage = '[BRIDGE_EXECUTION_UNKNOWN] 응답 완료를 확인하지 못해 자동으로 다시 보내지 않았어요.';
+  error.errorClassificationMessage = error.errorMessage;
+  return 'unknown';
+}
+
 function durableNativeStream(ai, model, context, options = {}) {
   const output = new ai.AssistantMessageEventStream();
   const binding = [...liveContexts.values()].find(({ ctx }) => ctx.providerSessionId === options.sessionId);
@@ -229,11 +246,7 @@ function durableNativeStream(ai, model, context, options = {}) {
         } else if (event.type === 'error') {
           if (options.signal?.aborted) await save('cancelled');
           else if (submitted) {
-            await save('unknown');
-            event.error.errorType = 'execution_unknown';
-            event.error.errorCode = 'BRIDGE_EXECUTION_UNKNOWN';
-            event.error.errorMessage = '[BRIDGE_EXECUTION_UNKNOWN] 응답 완료를 확인하지 못해 자동으로 다시 보내지 않았어요.';
-            event.error.errorClassificationMessage = event.error.errorMessage;
+            await save(classifySubmittedError(event.error));
           }
           else if (job.phase !== 'rejected') {
             const paused = event.error.errorCode === 'BRIDGE_ADMISSION_PAUSED' || event.error.errorMessage?.startsWith('[BRIDGE_ADMISSION_PAUSED]');

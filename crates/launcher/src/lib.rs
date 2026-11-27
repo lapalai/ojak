@@ -225,7 +225,29 @@ fn select_continue<'a>(
     Ok(original)
 }
 
+/// Orca는 자기 Claude 계정을 고른 터미널에 `CLAUDE_CONFIG_DIR`을 넣고, 같은 값을 `ORCA_CLAUDE_INJECTED_CONFIG_DIR`에 표시한다.
+/// 두 값이 정확히 같을 때만 Orca가 넣은 값으로 본다. 그때 바꿀 값을 돌려준다: 사용자의 원래 값(`ORCA_CLAUDE_USER_CONFIG_DIR`)이
+/// 있으면 그 값(`Some(Some)`), 없으면 변수 제거(`Some(None)`). 사용자가 직접 지정한 값이면 `None`이고 기존 충돌 검사가 그대로 적용된다.
+fn orca_injected_claude_profile(var: impl Fn(&str) -> Option<OsString>) -> Option<Option<OsString>> {
+    let current = var("CLAUDE_CONFIG_DIR").filter(|value| !value.is_empty())?;
+    if var("ORCA_CLAUDE_INJECTED_CONFIG_DIR").as_ref() != Some(&current) {
+        return None;
+    }
+    Some(var("ORCA_CLAUDE_USER_CONFIG_DIR").filter(|value| !value.is_empty()))
+}
+
 pub fn run_cli(paths: &Paths, tool: &str, args: Vec<OsString>) -> Result<ExitStatus, ApiError> {
+    if tool == "claude" {
+        if let Some(restore) = orca_injected_claude_profile(|key| std::env::var_os(key)) {
+            // 계정은 Ojak이 고른다. Orca가 넣은 프로필만 이 실행에서 치우고 Orca 설정은 바꾸지 않는다. 값은 출력하지 않는다.
+            eprintln!("aam: Orca가 지정한 Claude 계정 대신 Ojak이 고른 계정으로 실행해요.");
+            std::env::remove_var("ORCA_CLAUDE_INJECTED_CONFIG_DIR");
+            match restore {
+                Some(own) => std::env::set_var("CLAUDE_CONFIG_DIR", own),
+                None => std::env::remove_var("CLAUDE_CONFIG_DIR"),
+            }
+        }
+    }
     // 비관리 경로가 확인되기 전에는 native 모델·새 세션 옵션을 관리 규칙으로 해석하지 않습니다.
     let intent = LaunchIntent {
         tool: tool.into(),
@@ -1737,6 +1759,24 @@ fn fallback_notice(paths: &Paths, tool: &str, mut error: ApiError) -> ApiError {
 #[cfg(test)]
 mod bridge_tests {
     use super::*;
+
+    #[test]
+    fn orca_injected_claude_profile_only_when_marked() {
+        let env = |pairs: &'static [(&'static str, &'static str)]| {
+            move |key: &str| pairs.iter().find(|(k, _)| *k == key).map(|(_, v)| OsString::from(*v))
+        };
+        // Orca가 넣은 값: 지운다.
+        assert_eq!(orca_injected_claude_profile(env(&[("CLAUDE_CONFIG_DIR", "C:\\orca\\p\\home"), ("ORCA_CLAUDE_INJECTED_CONFIG_DIR", "C:\\orca\\p\\home")])), Some(None));
+        // Orca가 사용자 값을 대체했으면 사용자 값으로 되돌린다.
+        assert_eq!(
+            orca_injected_claude_profile(env(&[("CLAUDE_CONFIG_DIR", "/o"), ("ORCA_CLAUDE_INJECTED_CONFIG_DIR", "/o"), ("ORCA_CLAUDE_USER_CONFIG_DIR", "/mine")])),
+            Some(Some(OsString::from("/mine")))
+        );
+        // 사용자가 직접 바꾼 값·표시 없는 값·빈 값은 건드리지 않는다.
+        assert_eq!(orca_injected_claude_profile(env(&[("CLAUDE_CONFIG_DIR", "/mine"), ("ORCA_CLAUDE_INJECTED_CONFIG_DIR", "/o")])), None);
+        assert_eq!(orca_injected_claude_profile(env(&[("CLAUDE_CONFIG_DIR", "/mine")])), None);
+        assert_eq!(orca_injected_claude_profile(env(&[("CLAUDE_CONFIG_DIR", ""), ("ORCA_CLAUDE_INJECTED_CONFIG_DIR", "")])), None);
+    }
 
     fn spend_snapshot(tool: &str, credits: Option<Value>, extra: Option<Value>, policy: Value, bucket_used: f64, observed_at: i64) -> Snapshot {
         let resets = now_ms() + 3_600_000;

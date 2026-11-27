@@ -512,6 +512,14 @@ fn open_browser(url: &str) -> bool {
     }
 }
 
+fn omp_login_failure(provider: &str, frame: &Value) -> Stop {
+    if provider == "google-antigravity" && frame["error"] == "Unknown OAuth provider: google-antigravity" {
+        return fail("ANTIGRAVITY_LOGIN_UNAVAILABLE", "이 omp에서는 Antigravity 로그인을 제공하지 않아요. Google Antigravity 공식 앱에서 로그인해 주세요.", false);
+    }
+    // Never forward raw OAuth errors: they may contain a URL, code or token.
+    fail("LOGIN_FAILED", "로그인이 완료되지 않았어요. 다시 시도해 주세요.", true)
+}
+
 fn omp_login(ctx: &mut Ctx, request: &Request) -> R<Done> {
     let paths = ctx.paths;
     let provider = request.provider.as_str();
@@ -593,12 +601,14 @@ fn omp_login(ctx: &mut Ctx, request: &Request) -> R<Done> {
                 }
                 ctx.emitter.state("waiting");
             }
+            Some("extension_ui_request") if provider == "google-antigravity" && frame["method"] == "input" => {
+                return Err(fail("ANTIGRAVITY_INTERACTIVE_LOGIN", "이 로그인은 직접 입력이 필요해 Ojak에서 계속할 수 없어요. Google Antigravity 공식 앱을 이용해 주세요.", false));
+            }
             Some("response") if frame["id"] == "login" => {
                 if frame["success"] == true {
                     break;
                 }
-                // omp 원문 오류에는 주소·코드가 들어 있을 수 있어 알리지 않는다.
-                return Err(fail("LOGIN_FAILED", "로그인이 완료되지 않았어요. 다시 시도해 주세요.", true));
+                return Err(omp_login_failure(provider, &frame));
             }
             _ => {}
         }
@@ -723,6 +733,17 @@ fn wait_synced(ctx: &mut Ctx, expected: &dyn Fn(&Account) -> bool, gateway: Opti
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn unavailable_antigravity_does_not_offer_retry_or_expose_other_rpc_errors() {
+        let absent = json!({"error": "Unknown OAuth provider: google-antigravity"});
+        let Stop::Failed(e) = omp_login_failure("google-antigravity", &absent) else { panic!() };
+        assert_eq!(e.code, "ANTIGRAVITY_LOGIN_UNAVAILABLE");
+        assert!(!e.retryable);
+        let Stop::Failed(e) = omp_login_failure("google-antigravity", &json!({"error": "private OAuth callback details"})) else { panic!() };
+        assert_eq!(e.code, "LOGIN_FAILED");
+        assert!(!e.message.contains("private"));
+    }
+
 
     #[test]
     fn auth_urls_are_limited_to_the_providers_https_hosts() {

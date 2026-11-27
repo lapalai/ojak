@@ -1,3 +1,5 @@
+import { snapshotLoader } from "./snapshot-loader";
+import type { SnapshotLoader } from "./snapshot-loader";
 import { useCallback, useEffect, useRef, useState } from "react";
 import { getCurrentWindow } from "@tauri-apps/api/window";
 import { getCurrentWebviewWindow } from "@tauri-apps/api/webviewWindow";
@@ -261,37 +263,31 @@ export function useSnapshot(observe = true) {
   const [connecting, setConnecting] = useState(true);
   const [refreshing, setRefreshing] = useState(false);
   const alive = useRef(false);
-  const flight = useRef<Promise<void> | null>(null);
-  const refreshLock = useRef(false);
-
-  const load = useCallback(async (refresh = false): Promise<void> => {
-    if (refresh && refreshLock.current) return;
-    if (!refresh && flight.current) return flight.current;
-    if (refresh) { refreshLock.current = true; setRefreshing(true); }
+  const loader = useRef<SnapshotLoader | null>(null);
+  loader.current ??= snapshotLoader(async refresh => {
     try {
-      if (flight.current) await flight.current;
-      if (!alive.current) return;
-      const request = (async () => {
-        try {
-          // 새로고침 버튼만 공급자 캐시를 건너뛴다. 3초 주기 읽기는 서비스의 마지막 관측만 읽는다.
-          const result = await rpc<Snapshot>(refresh ? "quota.refresh" : "status.read", refresh ? { force: true, observe } : { observe });
-          if (result.version !== 1) throw { code: "PROTOCOL_MISMATCH", message: t("api.protocolMismatch"), retryable: false };
-          // 라벨은 화면 표시용이라 서비스에 되돌려 보내지 않는다. 자동 발견 계정의 `기본 프로필`을 여기서 한 번만 옮긴다.
-          const accounts = result.accounts.map(account => ({ ...account, label: accountLabel(account.label) }));
-          if (alive.current) { setSnapshot({ ...result, accounts }); setError(null); }
-        } catch (failure) {
-          if (alive.current) setError(toApiError(failure));
-        } finally {
-          if (alive.current) setConnecting(false);
-        }
-      })();
-      flight.current = request;
-      await request;
-      if (flight.current === request) flight.current = null;
+      // 새로고침 버튼만 공급자 캐시를 건너뛴다. 3초 주기 읽기는 서비스의 마지막 관측만 읽는다.
+      const result = await rpc<Snapshot>(refresh ? "quota.refresh" : "status.read", refresh ? { force: true, observe } : { observe });
+      if (result.version !== 1) throw { code: "PROTOCOL_MISMATCH", message: t("api.protocolMismatch"), retryable: false };
+      // 라벨은 화면 표시용이라 서비스에 되돌려 보내지 않는다. 자동 발견 계정의 `기본 프로필`을 여기서 한 번만 옮긴다.
+      const accounts = result.accounts.map(account => ({ ...account, label: accountLabel(account.label) }));
+      if (alive.current) { setSnapshot({ ...result, accounts }); setError(null); }
+    } catch (failure) {
+      if (alive.current) setError(toApiError(failure));
     } finally {
-      if (refresh) { refreshLock.current = false; if (alive.current) setRefreshing(false); }
+      if (alive.current) setConnecting(false);
     }
-  }, [observe]);
+  }, () => alive.current);
+  const refreshLock = { get current() { return loader.current!.refreshing(); } };
+  const load = useCallback(async (refresh = false): Promise<void> => {
+    if (refresh) setRefreshing(true);
+    try { await loader.current!.load(refresh); } finally { if (refresh && alive.current) setRefreshing(false); }
+  }, []);
+  // 화면의 변경 뒤 다시 읽기. 변경 전에 시작된 읽기를 재사용하지 않는다.
+  const reload = useCallback(async (refresh = false): Promise<void> => {
+    if (refresh) return load(true);
+    await loader.current!.load(false, true);
+  }, [load]);
 
   const visible = useWindowVisible();
   useEffect(() => {
@@ -307,7 +303,7 @@ export function useSnapshot(observe = true) {
     document.addEventListener("visibilitychange", onVisible);
     return () => { window.clearInterval(interval); document.removeEventListener("visibilitychange", onVisible); };
   }, [load, visible]);
-  return { snapshot, error, connecting, refreshing, reload: load };
+  return { snapshot, error, connecting, refreshing, reload };
 }
 
 /// 화면을 오갈 때 빈 화면이 잠깐 보이지 않도록 마지막 브릿지 응답을 기억한다.

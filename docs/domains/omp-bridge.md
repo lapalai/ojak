@@ -50,6 +50,7 @@ Claude·Codex는 Ojak에 등록된 기존 공식 CLI 로그인과 omp의 원래 
 - 연결·확장 갱신 전 launcher는 `omp --version`의 포크 표식(`X.Y.Z-ojak.N`)으로 사전 점검한다(`omp_bridge::admission_contract`). N이 `integrations/client-forks/manifest.json`의 요구 계약 이상이면 기반 버전과 무관하게 통과하고, 표식 없는 일반 omp는 더 새 버전이어도 `OMP_ADMISSION_CLIENT_REQUIRED`다. 이 점검은 설정 변경 전 안내용이며 실제 차단선은 확장(`persistSession` 없으면 요청 전 `BRIDGE_ADMISSION_STOPPED`)과 서비스(`X-Ojak-Admission` 없으면 `BRIDGE_CLIENT_UPGRADE_REQUIRED`)다. 계약이 바뀌면 manifest의 N을 올리고 포크 patch·확장·서비스를 함께 바꾼다.
 - omp는 실제 입력과 `ojak.admission.v1` marker를 저장한 뒤 최대 15분 기다린다. 프로세스 안의 대기자는 최대 32개, 보존 context 데이터는 보수적 가중치로 256 MiB까지다(실제 RSS 상한 아님). GET 실패는 미전송 대기이며, POST는 명시적인 `admission_wait`·`submitted:false`와 허용 코드가 있을 때만 다시 대기한다. 일반 503·ECONNRESET은 재전송 근거가 아니다.
 - 전송 직전에 `submitted`를 fsync하고, 응답 완료를 확인한 뒤 `completed`를 기록한다. 재시작은 같은 세션·분기의 최신 `queued` 작업만 자동 재개한다. 대기 한도에 닿은 `paused`는 `/ojak-resume`으로 명시적으로 재개한다. 취소·전송됨·결과 불명·다른 분기의 작업은 자동 재개하지 않는다. 저장 실패도 전송을 막는다.
+- 전송 후 오류에 `stopDetails.type === 'refusal'`이 있으면 공급자의 거절 사유를 표시하고 `rejected`를 기록한다. omp의 `BRIDGE_ADMISSION_STOPPED` 자동 복구 차단 규약을 사용한다. 오류 문구만으로 거절로 분류하지 않는다.
 - 서비스 재시작과 omp(0.22.1): 브릿지는 `aam-service` 안에서 중계하므로 서비스를 다시 시작하면 진행 중인 모델 스트림(`bridge.status.connections.public.longActive`)은 끊긴다. 몫을 기다리던 요청(`connections.modelQueue.waiting`)은 서버에 남지 않는다. 앱·`aam service restart`는 이 두 값을 재시작 전에 보여 주고 동의 없이는 재시작하지 않는다(`--force`/확인 창). 재시작 뒤 안내: 전송 전(`queued`) 작업은 omp가 저장해 둔 채 돌아온 서비스로 이어지고, 대기 한도에 닿아 멈춘(`paused`) 작업은 그 omp 세션에서 `/ojak-resume`, 이미 보낸(`submitted`)·결과 불명(`unknown`) 요청은 자동 재전송하지 않으므로 도구가 이미 실행됐을 수 있어 같은 메시지를 그대로 다시 보내지 말고 결과부터 확인한다. 이 값을 보고하지 않는 예전 서비스는 omp 개수를 '알 수 없음'으로 취급해 동의를 요구한다.
 - `before_subagent_admission`은 기존 task/eval 스케줄러 안에서, child session·worktree 등 무거운 자원을 만들기 전에 기다린다. Orca도 terminal·structured ACP/Pi 실행 전에 기존 SQLite journal에 의도를 저장하며, 호스트당 32개/4 MiB·동시 시작 1개·시작 간격 2초를 적용한다. 종료는 대기를 보존하고 명시적 취소는 재개하지 않는다.
 - Orca 재시작은 기존 소유권·워크스페이스·권한을 다시 확인하고 현재 설정으로 시작 계획을 재구성한다. 저장된 shell 명령이나 환경/토큰을 그대로 실행하지 않는다. 닫힌 소유자는 자동으로 되살리지 않으며 미전송 작업은 화면에서 취소·복사·명시적 재개할 수 있다.
@@ -118,7 +119,7 @@ Claude·Codex는 Ojak에 등록된 기존 공식 CLI 로그인과 omp의 원래 
 - **모델 설정 점검(0.14.0):** 연결 → omp → `모델 설정 점검`은 `aam omp-bridge check-models`를 명시적으로 실행한다. `omp config get retry.modelFallback|retry.fallbackChains --json`과 `omp models --kind all --json`을 읽어 `{modelFallback,unknownSources}`를 반환한다. 역할 키(사용자 역할 포함)는 모델 id로 검사하지 않고, `provider/*`·`provider/prefix/*`는 같은 공급자의 id 접두어로 검사한다. 누락 모델을 나열하고 자동 fallback이 꺼진 경우에도 시작 경고가 날 수 있음을 안내한다. 대상 fallback 배열·역할에 배정한 모델까지 검증하는 기능은 아니며, 카탈로그가 비거나 조회에 실패하면 `OMP_MODELS_UNAVAILABLE`로 알린다. 기존 5초 상태 폴링에는 모델 조회를 추가하지 않으며 인증·설정·실행 중인 서비스는 변경하지 않는다.
 
 ## 주의
-- gateway는 상속된 `OMP_*`/`PI_*` 환경을 지우고 전용 `PI_CODING_AGENT_DIR=<AAM_HOME>/bridge/agent`로 띄운다. 안 그러면 사용자 설정이 요청을 다시 브릿지로 돌려 루프가 된다 (`bridge.rs:1943-1956`).
+- gateway는 상속된 `OMP_*`/`PI_*` 환경을 지우고 계정별 전용 `PI_CODING_AGENT_DIR=<AAM_HOME>/bridge/agent/<account_key(gateway key)>`로(0.30.0: 모델 캐시 `models.db`를 계정끼리 공유하면 낮은 플랜 목록이 다른 계정을 덮어 `Unknown model`이 났다) 띄운다. 안 그러면 사용자 설정이 요청을 다시 브릿지로 돌려 루프가 된다 (`bridge.rs:1943-1956`).
 - `logs/bridge.log` 줄 형식은 데스크톱 사용량 화면이 그대로 파싱한다 (`apps/desktop/src-tauri/src/main.rs`의 `parse_usage_line`). 형식을 바꾸면 그 파서도 고친다. 줄 종류는 요청·차단·거절·포화이며, 사용량은 `->`가 있는 요청 줄만 센다.
   - 요청: `<ms> <provider>/<model> session=<끝8자> turn=<bool> tools=<n> -> <계정별칭12hex> [reserve-fallback] [api-credit]`. `api-credit`은 구독이 아니라 등록한 Console API 키(월 API 크레딧)로 보낸 요청이다(계정 별칭은 `apikey:<12hex>` identity의 sha256 앞 12 hex).
   - 차단(한도 응답을 받아 계정을 막을 때): `<ms> <provider>/<model> session=<끝8자> outcome=blocked account=<별칭> kind=<quota|rate> scope=<모델범위|-> until=<ms>:<provider|estimate>`
@@ -225,3 +226,7 @@ sequenceDiagram
 - [ ] Gateway: add Drop for Gateway or a shutdown hook that stops all gateways. At sync time, detect and reclaim orphan gateways by matching the pool-file path.
 - [ ] Sticky: expose a release API or UI for a session. Consider shrinking the 24h in-memory retention to about STICKY_MS.
 - [ ] UI: add a broker disconnect action to ConnectionsView, or document it as CLI-only.
+
+- (0.30.0) sync는 broker snapshot에서 같은 `ojak-*` 공급자의 중복 로그인을 최신 id 하나만 남기고 `/v1/credential/<id>/disable`로 끈다(`duplicate_ojak_logins`). 원래 공급자·`aam-*` 로그인은 건드리지 않는다. 계정 해제의 `ompLogin: true`는 같은 이메일+조직의 원래 공급자 로그인을 끈다(`disable_omp_logins`).
+- (0.30.2) 계정 선택(`candidates`)은 gateway별 모델 목록(`Gateway.models`, sync가 `/v1/models`로 채움)에 요청 모델이 없으면 그 구독 후보를 `enabled=false`로 뺀다. 목록을 모르면(`None`) 거르지 않는다. 같은 공급자라도 플랜마다 모델이 다르다(Codex free에는 gpt-6.2-astra 없음).
+- (0.30.3) Codex `turn_rate_limit_exceeded`/`at capacity` 속도 제한은 `scope: "model:<id>"` 차단으로 그 모델만 막는다(`model_capacity_limit`, `scope_applies`). 다른 속도 제한은 계정 전체(`scope: None`) 그대로다.
