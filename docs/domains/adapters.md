@@ -63,7 +63,7 @@
 ## 안전 검사 (`src/safety.rs`)
 - 환경변수·설정 파일의 API key·base URL·token·auth helper를 찾으면 `AUTH_OVERRIDE_CONFLICT`. 메시지에는 환경변수 이름, 또는 설정 파일 경로와 키만 적고 값은 적지 않는다. 이 터미널에서 변수를 해제하거나 해당 파일에서 키를 제거하라고 안내한다. 자동으로 고치지 않는다.
 - `NODE_EXTRA_CA_CERTS`·`SSL_CERT_FILE`·`SSL_CERT_DIR`와 프록시(`HTTPS_PROXY`·`HTTP_PROXY`·`ALL_PROXY`)는 구독 계정을 고르지 않으므로 막지 않는다. `NODE_OPTIONS`·`LD_PRELOAD`·`DYLD_INSERT_LIBRARIES`는 코드를 넣어 인증을 바꿀 수 있어 막는다. `ANTHROPIC_BASE_URL`·`OPENAI_BASE_URL`도 endpoint를 바꾸므로 막는다.
-- 상속된 `CLAUDE_CONFIG_DIR`/`CODEX_HOME`이 선택한 프로필과 다르면 `HOST_PROFILE_CONFLICT`.
+- 상속된 `CLAUDE_CONFIG_DIR`/`CODEX_HOME`이 선택한 프로필과 다르면 `HOST_PROFILE_CONFLICT`. 단 Orca가 넣은 Claude 값(`ORCA_CLAUDE_INJECTED_CONFIG_DIR`와 같은 값)은 launcher `run_cli`가 검사 전에 치운다(사용자 원래 값 `ORCA_CLAUDE_USER_CONFIG_DIR`이 있으면 복원).
 - `NODE_OPTIONS`는 cmux의 정확한 값 하나만 허용한다. 그 예외가 아니면 변수 이름을 알리고 멈춘다.
 - `check_api_credit_env`(`lib.rs`가 현재 프로세스 환경을 넘기는 래퍼, 본체 `safety::check_api_credit_env(vars)`는 `check_api_credit_env_in`으로 재노출): API 키(월 API 크레딧) 경로 전용 환경 검사다. `reject_auth_env("claude", …)`의 Claude 규칙(`ANTHROPIC_*` 키·토큰·base URL·헤더, `CLAUDE_CODE_USE_*`, 코드 주입 변수)을 그대로 쓰되 cmux `NODE_OPTIONS` 예외는 두지 않는다. 걸리면 환경을 고치지 않고 변수 이름만 알리는 `AUTH_OVERRIDE_CONFLICT`다. 호출처: launcher `prepare_api_credit`, service `bridge_api_key.rs`의 키 제공 직전 `validate`와 `spawn_gateway`.
 

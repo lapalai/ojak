@@ -2,6 +2,10 @@
 
 규칙은 `docs/release-policy.md`를 따른다.
 
+## 0.30.4 (2026-11-27)
+
+- Orca에서 Claude 계정을 골라 둔 터미널에서 `claude`를 실행하면 `HOST_PROFILE_CONFLICT`로 막히던 문제를 고쳤습니다. Orca가 넣은 `CLAUDE_CONFIG_DIR`(같은 값의 `ORCA_CLAUDE_INJECTED_CONFIG_DIR` 표시가 있을 때만)은 이 실행에서만 치우고 Ojak이 고른 계정으로 실행합니다. Orca가 사용자의 원래 값을 대체했으면 그 값으로 되돌립니다. 사용자가 직접 지정한 값은 기존처럼 막습니다.
+
 ## 0.30.3 (2026-11-25)
 
 - Codex가 한 모델에 대해 `Codex is at capacity`(turn_rate_limit_exceeded)로 거절하면 그 모델만 잠시 막고, 같은 계정의 다른 모델(예: gpt-6.2-sol)은 계속 씁니다. 이전에는 계정 전체를 막아 "쓸 수 있는 Codex 계정이 모두 쉬고 있어요"가 떴습니다.
